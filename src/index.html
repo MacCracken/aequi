@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Aequi - Open Source Accounting</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      max-width: 800px;
+      margin: 50px auto;
+      padding: 20px;
+      background: #f5f5f5;
+    }
+    h1 { color: #333; }
+    .status { color: #666; margin-bottom: 20px; }
+    .accounts { background: white; padding: 20px; border-radius: 8px; }
+    .account { padding: 10px; border-bottom: 1px solid #eee; display: flex; justify-content: space-between; }
+    .account:last-child { border-bottom: none; }
+    .account-code { color: #666; font-family: monospace; }
+    .account-name { font-weight: 500; }
+  </style>
+</head>
+<body>
+  <h1>Aequi</h1>
+  <p class="status">Phase 1 — Foundation Complete</p>
+  <div class="accounts" id="accounts">
+    <p>Loading accounts...</p>
+  </div>
+  <script>
+    async function loadAccounts() {
+      try {
+        const accounts = await window.__TAURI__.core.invoke('get_accounts');
+        const container = document.getElementById('accounts');
+        container.innerHTML = accounts.map(a => 
+          '<div class="account"><span class="account-code">' + a.code + '</span><span class="account-name">' + a.name + '</span></div>'
+        ).join('');
+      } catch (e) {
+        document.getElementById('accounts').innerHTML = '<p>Error: ' + e + '</p>';
+      }
+    }
+    loadAccounts();
+  </script>
+</body>
+</html>

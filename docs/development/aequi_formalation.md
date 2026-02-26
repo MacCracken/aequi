@@ -1,8 +1,10 @@
-# OpenLedger — Open-Source Self-Employed Accounting Platform
+# Aequi — Open-Source Self-Employed Accounting Platform
 
-**Status:** Pre-development planning
+**Status:** In Development (Phase 1 Complete)
 **Date:** 2026-02-25
 **Target:** Freelancers, sole proprietors, independent contractors (US-focused v1)
+
+> **Note:** See [roadmap.md](roadmap.md) for current progress and upcoming phases.
 
 ---
 
@@ -18,7 +20,7 @@ QuickBooks Self-Employed is the dominant tool for freelancer accounting but suff
 - Tax features limited to Schedule C / SE tax; no state-level support
 - Cannot grow with the user into a small business
 
-**OpenLedger** is a local-first, open-source desktop application that removes these constraints and adds a modern AI-driven automation layer via the Model Context Protocol (MCP).
+**Aequi** is a local-first, open-source desktop application that removes these constraints and adds a modern AI-driven automation layer via the Model Context Protocol (MCP).
 
 ---
 
@@ -89,7 +91,7 @@ This means:
 The backend is split into a workspace so each layer is independently testable and the MCP server can link against core without pulling in Tauri:
 
 ```
-openledger/
+aequi/
   Cargo.toml                  — workspace root
   crates/
     core/                     — pure business logic, no I/O
@@ -171,7 +173,7 @@ The storage layer only accepts `ValidatedTransaction` — the type boundary is t
 ### 4.6 Data Layer
 
 ```
-~/.openledger/
+~/.aequi/
   ledger.db          — SQLite (WAL mode, foreign keys enforced)
   attachments/       — Content-addressed by SHA-256 hash (receipts, PDFs)
   exports/           — Generated PDFs, CSV exports (ephemeral, regeneratable)
@@ -221,7 +223,7 @@ Frontend receives real-time updates via Tauri events emitted from these tasks. N
 ### 4.8 Process Model
 
 ```
-openledger process (Tauri)
+aequi process (Tauri)
   ├── Rust core (all business logic)
   │   ├── LedgerEngine       — validates + commits transactions
   │   ├── ImportPipeline     — OFX/QFX/CSV → UnvalidatedTransaction[]
@@ -734,7 +736,7 @@ All network TLS via **rustls** — no OpenSSL dependency, simpler cross-platform
 
 ### Repository Structure
 ```
-openledger/
+aequi/
   Cargo.toml              — workspace
   crates/
     core/
@@ -773,7 +775,7 @@ Tax rates and mileage rates change annually. The `rules/tax/` directory accepts 
 | IRS FIRE system | Direct 1099-NEC e-filing |
 | IRS EFTPS | Direct 1040-ES quarterly payment submission |
 | State tax authorities | State quarterly estimates (CA, NY, TX, FL, WA priority) |
-| Wave Accounting | Migration import (Wave CSV export → OpenLedger) |
+| Wave Accounting | Migration import (Wave CSV export → Aequi) |
 | Actual Budget | Import from Actual (personal → business transaction split) |
 | SecureYeoman MCP | Agent-driven accounting workflows, receipt intake automation |
 

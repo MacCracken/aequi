@@ -2,10 +2,6 @@
 members = [
     "crates/core",
     "crates/storage",
-    "crates/ocr",
-    "crates/import",
-    "crates/pdf",
-    "crates/mcp",
     "crates/app",
 ]
 resolver = "2"

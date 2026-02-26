@@ -1,8 +1,15 @@
 use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
+use std::fmt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct FiscalYear(u16);
+pub struct FiscalYear(pub u16);
+
+impl fmt::Display for FiscalYear {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "FY{}", self.0)
+    }
+}
 
 impl FiscalYear {
     pub fn new(year: u16) -> Self {
@@ -28,6 +35,17 @@ pub enum Quarter {
     Q2,
     Q3,
     Q4,
+}
+
+impl fmt::Display for Quarter {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Quarter::Q1 => write!(f, "Q1"),
+            Quarter::Q2 => write!(f, "Q2"),
+            Quarter::Q3 => write!(f, "Q3"),
+            Quarter::Q4 => write!(f, "Q4"),
+        }
+    }
 }
 
 impl Quarter {
@@ -62,8 +80,14 @@ impl Quarter {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DateRange {
-    start: NaiveDate,
-    end: NaiveDate,
+    pub start: NaiveDate,
+    pub end: NaiveDate,
+}
+
+impl fmt::Display for DateRange {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} to {}", self.start, self.end)
+    }
 }
 
 impl DateRange {

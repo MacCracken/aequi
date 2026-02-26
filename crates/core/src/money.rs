@@ -1,3 +1,4 @@
+use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -35,15 +36,15 @@ impl fmt::Display for Money {
 }
 
 impl Add for Money {
-    type Output = Option<Self>;
-    fn add(self, rhs: Self) -> Option<Self> {
-        self.0.checked_add(rhs.0).map(Money)
+    type Output = Self;
+    fn add(self, rhs: Self) -> Self {
+        Money(self.0 + rhs.0)
     }
 }
 
 impl Sub for Money {
-    type Output = Option<Self>;
-    fn sub(self, rhs: Self) -> Option<Self> {
-        self.0.checked_sub(rhs.0).map(Money)
+    type Output = Self;
+    fn sub(self, rhs: Self) -> Self {
+        Money(self.0 - rhs.0)
     }
 }

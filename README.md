@@ -1,6 +1,6 @@
 # Aequi — Open-Source Self-Employed Accounting Platform
 
-**Status:** Pre-development planning  
+**Status:** In Development (Phase 1 Complete)  
 **Target:** Freelancers, sole proprietors, independent contractors (US-focused v1)
 
 ---
@@ -29,27 +29,19 @@ Aequi removes these constraints:
 
 ---
 
-## Architecture
-
-The Rust backend is the application. The React frontend is a display layer only.
+## Crate Structure
 
 ```
 aequi/
 ├── Cargo.toml                  # workspace root
 ├── crates/
-│   ├── core/                   # pure business logic (Money, ledger, tax, invoice)
+│   ├── core/                   # pure business logic (Money, Account, Transaction)
 │   ├── storage/                # SQLite via sqlx
-│   ├── ocr/                    # Tesseract pipeline
-│   ├── import/                 # OFX, QFX, CSV parsers
-│   ├── pdf/                    # Typst PDF generation
-│   ├── mcp/                    # MCP server (stdio transport)
-│   └── app/                    # Tauri commands, state
-├── src/                        # React frontend
-├── rules/                      # Tax rule TOML files
-└── templates/                  # Typst invoice templates
+│   └── app/                    # Tauri v2 desktop app
+├── src/                        # frontend (HTML/JS)
+├── docs/                       # documentation
+└── CHANGELOG.md                # version history
 ```
-
----
 
 ## Technology Stack
 
@@ -68,8 +60,8 @@ aequi/
 ## Getting Started
 
 ```bash
-# Install dependencies
-cargo build
+# Build workspace
+cargo build --workspace
 
 # Run in development mode
 cd crates/app && cargo tauri dev
@@ -77,6 +69,21 @@ cd crates/app && cargo tauri dev
 # Run tests
 cargo test --workspace
 ```
+
+## What's Implemented (Phase 1)
+
+- Double-entry bookkeeping with type-safe transaction validation
+- Chart of accounts with Schedule C line mappings
+- SQLite storage with WAL mode
+- Tauri v2 commands: get_accounts, create_transaction, get_transactions, get_profit_loss
+- Basic P&L reporting
+
+## What's Next (Phase 2)
+
+- Bank statement import (OFX/QFX/CSV)
+- Transaction categorization rules
+- Receipt OCR pipeline
+- Full frontend UI
 
 ---
 
@@ -86,4 +93,4 @@ MIT or AGPL-3.0
 
 ---
 
-*This project follows the specification in `aequi_start_prompt.md`.*
+*This project follows the specification in `docs/development/aequi_formalation.md`.*
