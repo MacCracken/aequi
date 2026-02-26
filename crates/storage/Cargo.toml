@@ -1,0 +1,15 @@
+[package]
+name = "aequi-storage"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+aequi-core = { path = "../core" }
+rust_decimal.workspace = true
+chrono.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+sqlx.workspace = true
+tokio.workspace = true

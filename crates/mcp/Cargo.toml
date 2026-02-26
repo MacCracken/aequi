@@ -1,0 +1,10 @@
+[package]
+name = "aequi-mcp"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+aequi-core = { path = "../core" }
+aequi-storage = { path = "../storage" }
