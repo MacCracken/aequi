@@ -1,0 +1,14 @@
+{
+  "identifier": "mobile",
+  "description": "Mobile capability — grants core IPC, file-system access, and dialog-based file picking for receipt intake. Camera capture uses the WebView's native HTML file input API (<input type='file' capture='camera'>).",
+  "platforms": ["iOS", "android"],
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "dialog:allow-open",
+    "fs:read-files",
+    "fs:write-files",
+    "fs:allow-app-read-recursive",
+    "fs:allow-app-write-recursive"
+  ]
+}

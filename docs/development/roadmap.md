@@ -1,30 +1,20 @@
 # Development Roadmap
 
-## Phase 2 — Import + Reconciliation
-- OFX/QFX parser (custom SGML subset in Rust)
-- CSV importer with saved column-mapping profiles
-- Auto-match engine (date window + Levenshtein description similarity)
-- Categorization rule engine (TOML rules, priority-ordered)
-- Review queue UI (approve / edit / skip)
-- Duplicate detection and reconciliation state tracking
+## Phase 3 — Receipt Pipeline + Mobile App
 
-**Deliverable:** User can import bank statements and reconcile their account.
-
----
-
-## Phase 3 — Receipt Pipeline
-- `ocr` crate: leptess bindings, image preprocessing, confidence scoring
-- Async Tokio pipeline with bounded channel
-- Watch folder via `notify` crate (cross-platform FSEvents/inotify)
-- Extraction heuristics (regex patterns for vendor / date / amounts)
 - Receipt review queue UI with attachment viewer (image + PDF)
 - Receipt-to-transaction linking
+- **iOS + Android mobile app via Tauri v2 Mobile**
+  - Camera capture via `<input type="file" capture="camera">` → OCR pipeline
+  - Responsive React frontend — single codebase, Tailwind breakpoints
+  - App Store + Google Play distribution targets
 
-**Deliverable:** User can photograph or drop receipts and have them auto-extracted.
+**Deliverable:** User can photograph receipts on their phone and review/approve transactions on desktop or mobile.
 
 ---
 
 ## Phase 4 — Tax Engine
+
 - `core/src/tax/` module: `TaxRules`, `TaxEngine::compute_quarterly_estimate()`
 - TOML rule file loader with version validation
 - SE tax, safe harbor, income bracket lookup
@@ -37,6 +27,7 @@
 ---
 
 ## Phase 5 — Invoicing
+
 - Contact management with contractor flag and YTD tracker
 - Invoice CRUD + line items + discount + tax lines
 - `InvoiceStatus` state machine with validated transitions
@@ -51,6 +42,7 @@
 ---
 
 ## Phase 6 — MCP Server
+
 - `mcp` crate: stdio transport, JSON-RPC framing via tokio-util codec
 - Tool and resource handlers wired to `core` + `storage`
 - Settings UI: enable/disable server, per-tool write permissions, read-only mode
@@ -62,6 +54,7 @@
 ---
 
 ## Phase 7 — Polish + Ecosystem
+
 - AI-assisted categorization via configured MCP endpoint (optional)
 - Community tax rule update workflow (PR-based, annual)
 - Import profile sharing (export/import TOML)
@@ -69,6 +62,7 @@
 - Data export: Beancount format (plain-text portability), QIF (legacy import)
 - Auto-updater via Tauri updater
 - Keyboard shortcuts + accessibility pass (WCAG 2.1 AA)
+- Mobile: push notifications for invoice due dates and quarterly tax reminders
 
 ---
 
@@ -87,3 +81,4 @@
 | Wave Accounting | Migration import |
 | Actual Budget | Import from Actual |
 | SecureYeoman MCP | Agent-driven accounting workflows |
+| iCloud / Google Drive sync | Optional encrypted ledger sync between desktop and mobile |

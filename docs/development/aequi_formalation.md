@@ -1,7 +1,7 @@
 # Aequi — Open-Source Self-Employed Accounting Platform
 
-**Status:** In Development (Phase 1 Complete)
-**Date:** 2026-02-25
+**Status:** In Development (Phase 2 Complete — Phase 3 in Progress)
+**Date:** 2026-02-26
 **Target:** Freelancers, sole proprietors, independent contractors (US-focused v1)
 
 > **Note:** See [roadmap.md](roadmap.md) for current progress and upcoming phases.
@@ -33,7 +33,8 @@ QuickBooks Self-Employed is the dominant tool for freelancer accounting but suff
 - Professional invoicing with payment tracking and 1099-NEC support
 - MCP server exposing accounting data and operations to AI agents
 - Open, auditable tax rule engine with community-maintained rule sets
-- Cross-platform desktop (macOS, Windows, Linux)
+- Cross-platform desktop (macOS, Windows, Linux) via Tauri v2
+- iOS and Android mobile app via Tauri v2 Mobile (camera receipt capture, on-the-go transaction review)
 
 ---
 
@@ -65,6 +66,7 @@ This means:
 | Layer | Choice | Rationale |
 |---|---|---|
 | Desktop shell | **Tauri v2** | Native webview wrapper; Rust process owns all logic |
+| Mobile shell | **Tauri v2 Mobile** | Same codebase targets iOS + Android; Rust backend shared with desktop |
 | Async runtime | **Tokio** | Multi-threaded async for concurrent pipelines (OCR, import, watch) |
 | Frontend | **React + TypeScript** | Display only; communicates with backend via `invoke()` |
 | UI components | **shadcn/ui + Tailwind** | Accessible, unstyled-first, easy to theme |
@@ -353,7 +355,7 @@ assign_account = "5100"               # Office Supplies (default; AI may overrid
 - Drag-and-drop onto the desktop app window
 - Watch folder (tokio `inotify`/`FSEvents` via `notify` crate)
 - MCP tool call (`accounting_ingest_receipt` — see §6)
-- Mobile companion app scan → sync via local network (v2)
+- Mobile app camera capture → local SQLite (same backend, Tauri v2 Mobile)
 - Email forwarding address (v2; requires optional sync component)
 
 **Processing steps (async, Tokio task):**
@@ -677,15 +679,20 @@ All network TLS via **rustls** — no OpenSSL dependency, simpler cross-platform
 
 **Deliverable:** User can import bank statements and reconcile their account.
 
-### Phase 3 — Receipt Pipeline
+### Phase 3 — Receipt Pipeline + Mobile App
 - `ocr` crate: leptess bindings, image preprocessing, confidence scoring
 - Async Tokio pipeline with bounded channel
 - Watch folder via `notify` crate (cross-platform FSEvents/inotify)
 - Extraction heuristics (regex patterns for vendor / date / amounts)
 - Receipt review queue UI with attachment viewer (image + PDF)
 - Receipt-to-transaction linking
+- **iOS + Android mobile app via Tauri v2 Mobile**
+  - Same Rust backend (`core`, `storage`, `ocr`) compiled for mobile targets
+  - Responsive React frontend (Tailwind breakpoints; no separate mobile codebase)
+  - Camera API via Tauri mobile plugin → image handed to `ocr` pipeline
+  - App Store + Google Play distribution targets
 
-**Deliverable:** User can photograph or drop receipts and have them auto-extracted.
+**Deliverable:** User can photograph receipts on their phone and review/approve on desktop or mobile.
 
 ### Phase 4 — Tax Engine
 - `core/src/tax/` module: `TaxRules`, `TaxEngine::compute_quarterly_estimate()`
@@ -745,13 +752,15 @@ aequi/
     import/
     pdf/
     mcp/
-    app/
-  src/                    — React frontend
+    app/                  — Tauri v2 desktop entry point
+  src/                    — React frontend (shared by desktop + mobile)
   rules/                  — Tax rule TOML files (community-maintained)
   templates/              — Typst invoice templates
   docs/                   — User guide, architecture, contributing
   .github/                — CI (cargo test + clippy + tsc), issue templates
 ```
+
+**Mobile targets:** The Tauri v2 mobile build reuses the same `crates/` workspace and `src/` frontend. No separate mobile codebase is maintained. iOS and Android targets are added via `cargo tauri ios init` / `cargo tauri android init` during Phase 3.
 
 ### Community Rule Maintenance
 Tax rates and mileage rates change annually. The `rules/tax/` directory accepts pull requests each January with updated `YYYY.toml` files — low barrier to contribution, high value to all users. Rule files are schema-validated by CI on every PR.

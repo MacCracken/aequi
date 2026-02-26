@@ -1,0 +1,15 @@
+{
+  "identifier": "default",
+  "description": "Desktop capability — grants core IPC, filesystem access, and native file dialogs for receipt intake.",
+  "platforms": ["macOS", "windows", "linux"],
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "core:window:allow-close",
+    "core:window:allow-minimize",
+    "core:window:allow-maximize",
+    "dialog:allow-open",
+    "fs:read-files",
+    "fs:write-files"
+  ]
+}

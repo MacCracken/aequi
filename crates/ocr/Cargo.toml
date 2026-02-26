@@ -7,3 +7,25 @@ license.workspace = true
 
 [dependencies]
 aequi-core = { path = "../core" }
+chrono = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = "2.0"
+tokio = { workspace = true }
+sha2 = { workspace = true }
+image = { workspace = true }
+regex = { workspace = true }
+rust_decimal = { workspace = true }
+notify = { workspace = true }
+
+# Optional Tesseract backend — requires system libtesseract + libleptonica
+[dependencies.leptess]
+version = "0.14"
+optional = true
+
+[features]
+default = []
+tesseract = ["dep:leptess"]
+
+[dev-dependencies]
+tempfile = "3"

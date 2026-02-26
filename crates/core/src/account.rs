@@ -71,6 +71,57 @@ pub enum LedgerError {
     ArchivedAccount(AccountId),
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn account_new_defaults() {
+        let a = Account::new("1000", "Checking", AccountType::Asset);
+        assert_eq!(a.code, "1000");
+        assert_eq!(a.name, "Checking");
+        assert_eq!(a.account_type, AccountType::Asset);
+        assert!(!a.is_archetype);
+        assert!(!a.is_archived);
+        assert!(a.id.is_none());
+        assert!(a.schedule_c_line.is_none());
+    }
+
+    #[test]
+    fn account_type_display() {
+        assert_eq!(AccountType::Asset.to_string(), "Asset");
+        assert_eq!(AccountType::Liability.to_string(), "Liability");
+        assert_eq!(AccountType::Equity.to_string(), "Equity");
+        assert_eq!(AccountType::Income.to_string(), "Income");
+        assert_eq!(AccountType::Expense.to_string(), "Expense");
+    }
+
+    #[test]
+    fn account_id_display() {
+        assert_eq!(AccountId(42).to_string(), "42");
+    }
+
+    #[test]
+    fn default_accounts_have_unique_codes() {
+        let mut codes = std::collections::HashSet::new();
+        for (code, _, _, _) in DEFAULT_ACCOUNTS {
+            assert!(codes.insert(*code), "Duplicate account code: {code}");
+        }
+    }
+
+    #[test]
+    fn default_accounts_income_have_schedule_c_lines() {
+        for (code, _, account_type, schedule_c_line) in DEFAULT_ACCOUNTS {
+            if matches!(account_type, AccountType::Income) {
+                assert!(
+                    !schedule_c_line.is_empty(),
+                    "Income account {code} missing schedule_c_line"
+                );
+            }
+        }
+    }
+}
+
 pub const DEFAULT_ACCOUNTS: &[(&str, &str, AccountType, &str)] = &[
     ("1000", "Checking", AccountType::Asset, ""),
     ("1010", "Savings", AccountType::Asset, ""),

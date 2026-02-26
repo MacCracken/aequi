@@ -24,8 +24,9 @@ impl FiscalYear {
         NaiveDate::from_ymd_opt(self.0 as i32, 1, 1).unwrap()
     }
 
+    /// Returns December 31 of this fiscal year (inclusive end, matching Quarter::end_date).
     pub fn end_date(self) -> NaiveDate {
-        NaiveDate::from_ymd_opt(self.0 as i32 + 1, 1, 1).unwrap()
+        NaiveDate::from_ymd_opt(self.0 as i32, 12, 31).unwrap()
     }
 }
 
@@ -95,15 +96,98 @@ impl DateRange {
         DateRange { start, end }
     }
 
-    pub fn start(self) -> NaiveDate {
-        self.start
-    }
-
-    pub fn end(self) -> NaiveDate {
-        self.end
-    }
-
     pub fn contains(self, date: NaiveDate) -> bool {
         date >= self.start && date <= self.end
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Datelike;
+
+    #[test]
+    fn fiscal_year_display() {
+        assert_eq!(FiscalYear::new(2024).to_string(), "FY2024");
+    }
+
+    #[test]
+    fn fiscal_year_start_date() {
+        let fy = FiscalYear::new(2024);
+        assert_eq!(fy.start_date(), NaiveDate::from_ymd_opt(2024, 1, 1).unwrap());
+    }
+
+    #[test]
+    fn fiscal_year_end_date_is_dec_31() {
+        let fy = FiscalYear::new(2024);
+        assert_eq!(fy.end_date(), NaiveDate::from_ymd_opt(2024, 12, 31).unwrap());
+    }
+
+    #[test]
+    fn fiscal_year_start_and_end_are_same_year() {
+        let fy = FiscalYear::new(2024);
+        assert_eq!(fy.start_date().year(), 2024);
+        assert_eq!(fy.end_date().year(), 2024);
+    }
+
+    #[test]
+    fn quarter_new_valid_and_invalid() {
+        assert_eq!(Quarter::new(1), Some(Quarter::Q1));
+        assert_eq!(Quarter::new(4), Some(Quarter::Q4));
+        assert_eq!(Quarter::new(0), None);
+        assert_eq!(Quarter::new(5), None);
+    }
+
+    #[test]
+    fn quarter_display() {
+        assert_eq!(Quarter::Q1.to_string(), "Q1");
+        assert_eq!(Quarter::Q4.to_string(), "Q4");
+    }
+
+    #[test]
+    fn quarter_start_dates() {
+        let fy = FiscalYear::new(2024);
+        assert_eq!(Quarter::Q1.start_date(fy), NaiveDate::from_ymd_opt(2024, 1, 1).unwrap());
+        assert_eq!(Quarter::Q2.start_date(fy), NaiveDate::from_ymd_opt(2024, 4, 1).unwrap());
+        assert_eq!(Quarter::Q3.start_date(fy), NaiveDate::from_ymd_opt(2024, 7, 1).unwrap());
+        assert_eq!(Quarter::Q4.start_date(fy), NaiveDate::from_ymd_opt(2024, 10, 1).unwrap());
+    }
+
+    #[test]
+    fn quarter_end_dates() {
+        let fy = FiscalYear::new(2024);
+        assert_eq!(Quarter::Q1.end_date(fy), NaiveDate::from_ymd_opt(2024, 3, 31).unwrap());
+        assert_eq!(Quarter::Q2.end_date(fy), NaiveDate::from_ymd_opt(2024, 6, 30).unwrap());
+        assert_eq!(Quarter::Q3.end_date(fy), NaiveDate::from_ymd_opt(2024, 9, 30).unwrap());
+        assert_eq!(Quarter::Q4.end_date(fy), NaiveDate::from_ymd_opt(2024, 12, 31).unwrap());
+    }
+
+    #[test]
+    fn quarter_covers_full_year() {
+        let fy = FiscalYear::new(2024);
+        assert_eq!(Quarter::Q1.start_date(fy), fy.start_date());
+        assert_eq!(Quarter::Q4.end_date(fy), fy.end_date());
+    }
+
+    #[test]
+    fn date_range_contains() {
+        let range = DateRange::new(
+            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2024, 12, 31).unwrap(),
+        );
+        assert!(range.contains(NaiveDate::from_ymd_opt(2024, 6, 15).unwrap()));
+        assert!(range.contains(NaiveDate::from_ymd_opt(2024, 1, 1).unwrap())); // inclusive start
+        assert!(range.contains(NaiveDate::from_ymd_opt(2024, 12, 31).unwrap())); // inclusive end
+        assert!(!range.contains(NaiveDate::from_ymd_opt(2023, 12, 31).unwrap()));
+        assert!(!range.contains(NaiveDate::from_ymd_opt(2025, 1, 1).unwrap()));
+    }
+
+    #[test]
+    fn date_range_display() {
+        let range = DateRange::new(
+            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2024, 12, 31).unwrap(),
+        );
+        assert_eq!(range.to_string(), "2024-01-01 to 2024-12-31");
     }
 }

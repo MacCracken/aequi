@@ -1,13 +1,13 @@
 # Aequi — Open-Source Self-Employed Accounting Platform
 
-**Status:** In Development (Phase 1 Complete)  
+**Status:** In Development (Phase 2 Complete — Phase 3 in Progress)
 **Target:** Freelancers, sole proprietors, independent contractors (US-focused v1)
 
 ---
 
 ## What is Aequi?
 
-Aequi is a local-first, open-source desktop application for freelancer accounting. It provides full double-entry bookkeeping with a modern AI-driven automation layer via the Model Context Protocol (MCP).
+Aequi is a local-first, open-source desktop and mobile application for freelancer accounting. It provides full double-entry bookkeeping with a modern AI-driven automation layer via the Model Context Protocol (MCP).
 
 ### Why Aequi?
 
@@ -37,7 +37,11 @@ aequi/
 ├── crates/
 │   ├── core/                   # pure business logic (Money, Account, Transaction)
 │   ├── storage/                # SQLite via sqlx
-│   └── app/                    # Tauri v2 desktop app
+│   ├── import/                 # OFX/CSV import, matching, rules
+│   ├── app/                   # Tauri v2 desktop app
+│   ├── ocr/                   # receipt OCR (Phase 3)
+│   ├── pdf/                   # PDF generation
+│   └── mcp/                   # MCP server (Phase 6)
 ├── src/                        # frontend (HTML/JS)
 ├── docs/                       # documentation
 └── CHANGELOG.md                # version history
@@ -47,10 +51,11 @@ aequi/
 
 | Layer | Choice |
 |---|---|
-| Desktop shell | Tauri v2 |
+| Desktop shell | Tauri v2 (macOS, Windows, Linux) |
+| Mobile shell | Tauri v2 Mobile (iOS, Android) |
 | Async runtime | Tokio |
 | Frontend | React + TypeScript |
-| UI components | shadcn/ui + Tailwind |
+| UI components | shadcn/ui + Tailwind (responsive) |
 | Database | SQLite via sqlx |
 | Money arithmetic | rust_decimal |
 | Date/time | chrono |
@@ -70,20 +75,25 @@ cd crates/app && cargo tauri dev
 cargo test --workspace
 ```
 
-## What's Implemented (Phase 1)
+## What's Implemented
 
 - Double-entry bookkeeping with type-safe transaction validation
 - Chart of accounts with Schedule C line mappings
 - SQLite storage with WAL mode
 - Tauri v2 commands: get_accounts, create_transaction, get_transactions, get_profit_loss
 - Basic P&L reporting
-
-## What's Next (Phase 2)
-
 - Bank statement import (OFX/QFX/CSV)
-- Transaction categorization rules
-- Receipt OCR pipeline
-- Full frontend UI
+- CSV import with saved column-mapping profiles
+- Auto-match engine (date window + Levenshtein similarity)
+- Categorization rule engine (TOML-based, priority-ordered)
+- Reconciliation session tracking
+
+## What's Next (Phase 3)
+
+- Receipt OCR pipeline (Tesseract via leptess)
+- Watch folder + drag-and-drop receipt intake
+- iOS + Android mobile app via Tauri v2 Mobile (camera-to-receipt capture)
+- Full frontend UI (desktop + mobile responsive)
 
 ---
 

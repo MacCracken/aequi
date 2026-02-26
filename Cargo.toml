@@ -3,11 +3,13 @@ members = [
     "crates/core",
     "crates/storage",
     "crates/app",
+    "crates/import",
+    "crates/ocr",
 ]
 resolver = "2"
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 authors = ["Robert MacCracken <robert.maccracken@gmail.com>"]
 license = "MIT OR AGPL-3.0"
@@ -17,6 +19,11 @@ repository = "https://github.com/anomalyco/aequi"
 rust_decimal = { version = "1.36", features = ["serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 thiserror = "2.0"
 tokio = { version = "1.41", features = ["full"] }
 sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio", "macros", "chrono", "rust_decimal"] }
+sha2 = "0.10"
+image = "0.25"
+notify = "6"
+regex = "1.10"

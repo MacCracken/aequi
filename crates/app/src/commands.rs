@@ -1,7 +1,9 @@
-use aequi_core::{Account, Money, UnvalidatedTransaction, ValidatedTransaction, TransactionLine};
-use chrono::{NaiveDate, Datelike};
+use aequi_core::{Account, Money, TransactionLine, UnvalidatedTransaction, ValidatedTransaction};
+use aequi_ocr::{ReceiptPipeline, MockRecognizer};
+use chrono::{Datelike, NaiveDate};
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tauri::State;
 use tokio::sync::Mutex;
@@ -23,9 +25,13 @@ impl From<sqlx::Error> for CommandError {
 
 impl From<aequi_core::LedgerError> for CommandError {
     fn from(e: aequi_core::LedgerError) -> Self {
-        CommandError {
-            message: e.to_string(),
-        }
+        CommandError { message: e.to_string() }
+    }
+}
+
+impl From<aequi_ocr::PipelineError> for CommandError {
+    fn from(e: aequi_ocr::PipelineError) -> Self {
+        CommandError { message: e.to_string() }
     }
 }
 
@@ -199,7 +205,7 @@ pub async fn get_profit_loss(
         (Some(s), Some(e)) => (s, e),
         _ => {
             let now = chrono::Utc::now().date_naive();
-            let start = NaiveDate::from_ymd_opt(now.year() as i32, 1, 1).unwrap();
+            let start = NaiveDate::from_ymd_opt(now.year(), 1, 1).unwrap();
             let end = now;
             (start.to_string(), end.to_string())
         }
@@ -231,4 +237,135 @@ pub async fn get_profit_loss(
             total: Money::from_cents(total_cents).to_string(),
         }
     }).collect())
+}
+
+// ── Receipt commands ──────────────────────────────────────────────────────────
+
+#[derive(Debug, Serialize)]
+pub struct ReceiptOutput {
+    pub id: i64,
+    pub file_hash: String,
+    pub vendor: Option<String>,
+    pub receipt_date: Option<String>,
+    pub total_cents: Option<i64>,
+    pub subtotal_cents: Option<i64>,
+    pub tax_cents: Option<i64>,
+    pub payment_method: Option<String>,
+    pub confidence: f64,
+    pub status: String,
+    pub transaction_id: Option<i64>,
+    pub attachment_path: String,
+    pub needs_review: bool,
+    pub created_at: String,
+}
+
+impl From<aequi_storage::ReceiptRecord> for ReceiptOutput {
+    fn from(r: aequi_storage::ReceiptRecord) -> Self {
+        let needs_review = r.confidence < 0.7;
+        ReceiptOutput {
+            id: r.id,
+            file_hash: r.file_hash,
+            vendor: r.vendor,
+            receipt_date: r.receipt_date,
+            total_cents: r.total_cents,
+            subtotal_cents: r.subtotal_cents,
+            tax_cents: r.tax_cents,
+            payment_method: r.payment_method,
+            confidence: r.confidence,
+            status: r.status,
+            transaction_id: r.transaction_id,
+            attachment_path: r.attachment_path,
+            needs_review,
+            created_at: r.created_at,
+        }
+    }
+}
+
+/// Ingest a receipt from a file path on disk.
+/// Processes the image through the OCR pipeline and stores the result.
+#[tauri::command]
+pub async fn ingest_receipt(
+    state: State<'_, Arc<Mutex<AppState>>>,
+    file_path: String,
+) -> Result<ReceiptOutput, CommandError> {
+    let path = PathBuf::from(&file_path);
+    let (db, attachments_dir) = {
+        let s = state.lock().await;
+        (s.db.clone(), s.attachments_dir.clone())
+    };
+
+    // Use MockRecognizer by default; swap for TesseractRecognizer when the
+    // `tesseract` feature is enabled and Tesseract data is available.
+    let pipeline = ReceiptPipeline::new(MockRecognizer::new(""), attachments_dir);
+    let result = pipeline.process_file(&path).await?;
+
+    let e = &result.extracted;
+    let id = aequi_storage::insert_receipt(
+        &db,
+        &result.hash_hex,
+        path.extension().and_then(|x| x.to_str()).unwrap_or("bin"),
+        result.attachment_path.to_str().unwrap_or(""),
+        Some(&result.ocr_text),
+        e.vendor.as_ref().map(|f| f.value.as_str()),
+        e.date.as_ref().map(|f| f.value.to_string()).as_deref(),
+        e.total_cents.as_ref().map(|f| f.value),
+        e.subtotal_cents.as_ref().map(|f| f.value),
+        e.tax_cents.as_ref().map(|f| f.value),
+        e.payment_method.as_ref().map(|f| f.value.to_string()).as_deref(),
+        e.confidence as f64,
+    )
+    .await
+    .map_err(|e| CommandError { message: e.to_string() })?;
+
+    let record = aequi_storage::get_receipt_by_id(&db, id)
+        .await
+        .map_err(|e| CommandError { message: e.to_string() })?
+        .ok_or(CommandError { message: "Receipt not found after insert".into() })?;
+
+    Ok(record.into())
+}
+
+/// Return all receipts currently awaiting review.
+#[tauri::command]
+pub async fn get_pending_receipts(
+    state: State<'_, Arc<Mutex<AppState>>>,
+) -> Result<Vec<ReceiptOutput>, CommandError> {
+    let state = state.lock().await;
+    let records = aequi_storage::get_receipts_pending_review(&state.db)
+        .await
+        .map_err(|e| CommandError { message: e.to_string() })?;
+    Ok(records.into_iter().map(ReceiptOutput::from).collect())
+}
+
+/// Approve a receipt, optionally linking it to an existing transaction.
+#[tauri::command]
+pub async fn approve_receipt(
+    state: State<'_, Arc<Mutex<AppState>>>,
+    receipt_id: i64,
+    transaction_id: Option<i64>,
+) -> Result<(), CommandError> {
+    let state = state.lock().await;
+    if let Some(tx_id) = transaction_id {
+        aequi_storage::link_receipt_to_transaction(&state.db, receipt_id, tx_id)
+            .await
+            .map_err(|e| CommandError { message: e.to_string() })?;
+    } else {
+        aequi_storage::update_receipt_status(&state.db, receipt_id, "approved")
+            .await
+            .map_err(|e| CommandError { message: e.to_string() })?;
+    }
+    Ok(())
+}
+
+/// Reject a receipt (marks it as not usable / duplicate).
+#[tauri::command]
+pub async fn reject_receipt(
+    state: State<'_, Arc<Mutex<AppState>>>,
+    receipt_id: i64,
+) -> Result<(), CommandError> {
+    let state = state.lock().await;
+    aequi_storage::update_receipt_status(&state.db, receipt_id, "rejected")
+        .await
+        .map_err(|e| CommandError { message: e.to_string() })?;
+    Ok(())
 }

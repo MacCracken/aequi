@@ -2,6 +2,66 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.0] - 2026-02-26
+
+### Added
+- **OCR Crate** (`aequi-ocr`)
+  - `OcrBackend` trait with `MockRecognizer` (tests) and optional `TesseractRecognizer` (`tesseract` feature)
+  - Image preprocessing: grayscale + contrast stretch via `image` crate; auto-resize for images > 2800 px
+  - SHA-256 content-addressed attachment store (`attachments/XX/HASH.ext` layout)
+  - `Extractor` with per-field confidence scores: vendor, date, amounts, payment method
+  - `ReceiptPipeline<R>`: hash → dedup → content-store → preprocess → OCR → extract
+  - `spawn_intake_watcher`: notify-based watch-folder feeding an `mpsc` channel
+  - 35 unit tests
+
+- **Storage Crate** — Phase 3 additions
+  - `receipts` table: file hash, OCR text, extracted fields, status, confidence, transaction link
+  - `receipt_line_items` table for per-line receipt data
+  - CRUD: `insert_receipt`, `get_receipt_by_id`, `get_receipts_pending_review`,
+    `update_receipt_status`, `link_receipt_to_transaction`, `check_receipt_duplicate`
+  - `ReceiptRecord` sqlx row type
+
+- **App Crate** — Phase 3 additions
+  - `AppState` extended with `attachments_dir` and `receipt_tx` pipeline channel
+  - Background Tokio task consuming the receipt pipeline channel
+  - Watch-folder task on `~/.aequi/intake/` (auto-created on startup)
+  - Tauri commands: `ingest_receipt`, `get_pending_receipts`, `approve_receipt`, `reject_receipt`
+  - `tauri-plugin-dialog` + `tauri-plugin-fs` for file picking on desktop and mobile
+  - Capability files: `capabilities/default.json` (desktop) and `capabilities/mobile.json` (iOS/Android)
+  - iOS min version 13.0, Android minSdkVersion 24 in `tauri.conf.json`
+
+### Completed
+- Phase 3: Receipt OCR pipeline + mobile scaffold
+
+---
+
+## [0.2.0] - 2026-02-26
+
+### Added
+- **Import Crate**
+  - OFX/QFX parser for bank statement import
+  - CSV importer with column-mapping profiles
+  - Auto-match engine (date window + Levenshtein similarity)
+  - Categorization rule engine (TOML-based, priority-ordered)
+  - Fuzzy matching with configurable thresholds
+
+- **Storage Crate**
+  - Import profiles table with saved mappings
+  - Imported transactions table with status tracking
+  - Categorization rules table
+  - Reconciliation sessions and items tables
+  - CRUD operations for all new tables
+
+### Completed
+- Phase 1: Desktop Shell (Tauri v2, core bookkeeping, SQLite storage)
+- Phase 2: Import + Reconciliation
+
+### Planned (Phase 3)
+- Receipt OCR pipeline
+- iOS + Android mobile app via Tauri v2 mobile (camera receipt capture)
+
+---
+
 ## [0.1.0] - 2026-02-26
 
 ### Added
@@ -33,8 +93,7 @@ All notable changes to this project will be documented in this file.
 - chrono v0.4
 
 ### Known Issues
-- No frontend UI yet (Phase 1 backend complete)
-- No OFX/CSV import (Phase 2)
+- No frontend UI yet
 - No receipt OCR (Phase 3)
 - No tax engine (Phase 4)
 - No invoicing (Phase 5)
