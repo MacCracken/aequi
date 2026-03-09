@@ -4,10 +4,10 @@
   "identifier": "com.aequi.app",
   "version": "0.2.0",
   "build": {
-    "beforeDevCommand": "",
+    "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "",
-    "frontendDist": "../../src"
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../../dist"
   },
   "app": {
     "windows": [
