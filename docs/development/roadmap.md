@@ -1,13 +1,22 @@
 # Development Roadmap
 
-## Phase 3 — Receipt Pipeline + Mobile App
+## Phase 3 — Receipt Pipeline + Mobile App ✓
 
-- Receipt review queue UI with attachment viewer (image + PDF)
-- Receipt-to-transaction linking
-- **iOS + Android mobile app via Tauri v2 Mobile**
-  - Camera capture via `<input type="file" capture="camera">` → OCR pipeline
-  - Responsive React frontend — single codebase, Tailwind breakpoints
-  - App Store + Google Play distribution targets
+- ✓ OCR pipeline backend (hash, preprocess, recognize, extract) — 35 tests
+- ✓ Tauri commands: ingest, list pending, approve/reject receipts
+- ✓ Watch folder intake (desktop) with notify crate
+- ✓ React + TypeScript + Vite + Tailwind v4 frontend scaffold
+- ✓ App shell with routing (Accounts, Transactions, Receipts pages)
+- ✓ Receipt review queue UI with attachment viewer (image + PDF)
+- ✓ Receipt-to-transaction linking (searchable picker on approve)
+- ✓ **iOS + Android mobile scaffold via Tauri v2 Mobile**
+  - ✓ `lib.rs` mobile entry point (`#[tauri::mobile_entry_point]`)
+  - ✓ Responsive layout: top nav (desktop) / bottom nav (mobile) with iOS safe areas
+  - ✓ Camera capture via `<input type="file" capture="environment">` → OCR pipeline
+  - ✓ `tauri.conf.json` mobile targets (iOS 13.0+, Android API 24+)
+  - ✓ Capability files: `default.json` (desktop) + `mobile.json` (iOS/Android)
+  - Remaining: `cargo tauri ios init` / `android init` (requires macOS + Android SDK)
+  - Remaining: App Store + Google Play distribution setup
 
 **Deliverable:** User can photograph receipts on their phone and review/approve transactions on desktop or mobile.
 

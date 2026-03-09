@@ -4,10 +4,13 @@ import {
   getTransactions,
   approveReceipt,
   rejectReceipt,
+  ingestReceipt,
   type ReceiptOutput,
   type TransactionOutput,
 } from "../lib/api";
 import { formatCents, formatDate, confidenceLabel, confidenceColor } from "../lib/format";
+import { CameraCapture } from "../components/CameraCapture";
+import { writeCapturedFile } from "../lib/capture";
 
 export function ReceiptsPage() {
   const [receipts, setReceipts] = useState<ReceiptOutput[]>([]);
@@ -48,13 +51,26 @@ export function ReceiptsPage() {
     }
   }
 
+  async function handleCapture(file: File) {
+    try {
+      const filePath = await writeCapturedFile(file);
+      await ingestReceipt(filePath);
+      refresh();
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
   if (error) {
     return <p className="text-danger">Error: {error}</p>;
   }
 
   return (
     <div className="space-y-4">
-      <h2 className="text-xl font-semibold">Receipt Review Queue</h2>
+      <div className="flex items-center justify-between">
+        <h2 className="text-xl font-semibold">Receipt Review Queue</h2>
+        <CameraCapture onCapture={handleCapture} />
+      </div>
 
       {receipts.length === 0 ? (
         <p className="text-text-muted">No pending receipts.</p>
@@ -111,13 +127,41 @@ export function ReceiptsPage() {
 
 function ReceiptDetail({
   receipt,
+  transactions,
   onApprove,
   onReject,
 }: {
   receipt: ReceiptOutput;
-  onApprove: (id: number) => void;
+  transactions: TransactionOutput[];
+  onApprove: (id: number, transactionId?: number) => void;
   onReject: (id: number) => void;
 }) {
+  const [linkedTxId, setLinkedTxId] = useState<number | undefined>(undefined);
+  const [search, setSearch] = useState("");
+  const [showPicker, setShowPicker] = useState(false);
+
+  // Reset link state when receipt changes
+  useEffect(() => {
+    setLinkedTxId(undefined);
+    setSearch("");
+    setShowPicker(false);
+  }, [receipt.id]);
+
+  const filtered = useMemo(() => {
+    if (!search) return transactions;
+    const q = search.toLowerCase();
+    return transactions.filter(
+      (tx) =>
+        tx.description.toLowerCase().includes(q) ||
+        tx.date.includes(q) ||
+        String(tx.id).includes(q)
+    );
+  }, [transactions, search]);
+
+  const linkedTx = linkedTxId != null
+    ? transactions.find((tx) => tx.id === linkedTxId)
+    : undefined;
+
   const isImage = receipt.attachment_path.match(/\.(png|jpg|jpeg|gif|webp)$/i);
 
   return (
@@ -155,13 +199,87 @@ function ReceiptDetail({
           </span>
         </div>
 
+        {/* Transaction linking */}
+        <div className="border-t border-border pt-3 space-y-2">
+          <div className="flex items-center justify-between">
+            <span className="text-sm font-medium">Link to Transaction</span>
+            {linkedTx ? (
+              <button
+                onClick={() => { setLinkedTxId(undefined); setShowPicker(false); }}
+                className="text-xs text-danger hover:underline"
+              >
+                Unlink
+              </button>
+            ) : (
+              <button
+                onClick={() => setShowPicker(!showPicker)}
+                className="text-xs text-primary hover:underline"
+              >
+                {showPicker ? "Cancel" : "Select transaction"}
+              </button>
+            )}
+          </div>
+
+          {linkedTx && (
+            <div className="text-sm bg-primary/5 border border-primary/20 rounded-md px-3 py-2 flex justify-between">
+              <span>
+                <span className="font-mono text-text-muted">{formatDate(linkedTx.date)}</span>
+                {" "}{linkedTx.description}
+              </span>
+              <span className="font-mono">
+                {formatCents(
+                  linkedTx.entries
+                    .filter((e) => e.amount_cents > 0)
+                    .reduce((s, e) => s + e.amount_cents, 0)
+                )}
+              </span>
+            </div>
+          )}
+
+          {showPicker && !linkedTx && (
+            <div className="space-y-2">
+              <input
+                type="text"
+                placeholder="Search by description, date, or ID..."
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                className="w-full px-3 py-1.5 text-sm border border-border rounded-md bg-bg focus:outline-none focus:border-primary"
+              />
+              <div className="max-h-48 overflow-y-auto border border-border rounded-md divide-y divide-border">
+                {filtered.length === 0 ? (
+                  <div className="px-3 py-2 text-sm text-text-muted">No transactions found</div>
+                ) : (
+                  filtered.slice(0, 50).map((tx) => {
+                    const debitTotal = tx.entries
+                      .filter((e) => e.amount_cents > 0)
+                      .reduce((s, e) => s + e.amount_cents, 0);
+                    return (
+                      <button
+                        key={tx.id}
+                        onClick={() => { setLinkedTxId(tx.id); setShowPicker(false); setSearch(""); }}
+                        className="w-full text-left px-3 py-2 text-sm hover:bg-bg transition-colors flex justify-between"
+                      >
+                        <span className="truncate">
+                          <span className="font-mono text-text-muted">{formatDate(tx.date)}</span>
+                          {" "}{tx.description}
+                        </span>
+                        <span className="font-mono shrink-0 ml-2">{formatCents(debitTotal)}</span>
+                      </button>
+                    );
+                  })
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+
         {/* Actions */}
         <div className="flex gap-2 pt-2">
           <button
-            onClick={() => onApprove(receipt.id)}
+            onClick={() => onApprove(receipt.id, linkedTxId)}
             className="px-4 py-2 rounded-md text-sm font-medium text-white bg-success hover:bg-success/90 transition-colors"
           >
-            Approve
+            {linkedTxId != null ? "Approve & Link" : "Approve"}
           </button>
           <button
             onClick={() => onReject(receipt.id)}
