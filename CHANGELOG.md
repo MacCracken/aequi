@@ -2,6 +2,132 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2026.3.10] - 2026-03-10
+
+### Added
+- **Invoice Engine** (`core/src/invoice/`)
+  - `Contact` model with `ContactType` (Client, Vendor, Contractor) and auto `is_contractor` flag
+  - `Invoice` struct with line items, `Discount` (Percentage/Flat), `TaxLine`, computed totals
+  - `InvoiceStatus` state machine with validated transitions (Draft → Sent → Viewed → Paid)
+  - `Payment` recording (full + partial)
+  - `compute_ytd_payments()` and `check_1099_threshold()` for 1099-NEC tracking ($600)
+  - 34 unit tests covering lifecycle transitions, computation, contacts, payments
+
+- **Data Export** (`core/src/export/`)
+  - Beancount format export with account declarations and sanitized names
+  - QIF (Quicken Interchange Format) export with account type mapping
+  - 6 unit tests
+
+- **Invoice PDF** (`pdf/src/invoice_pdf.rs`)
+  - Plain text invoice rendering (Typst PDF deferred)
+
+- **Storage Crate** — Phase 5-8 additions
+  - New tables: `contacts`, `invoices`, `invoice_lines`, `invoice_tax_lines`, `payments`, `audit_log`
+  - Contact CRUD: `insert_contact`, `update_contact`, `get_all_contacts`, `get_contact_by_id`, `get_contractors`
+  - Invoice CRUD: `insert_invoice`, `update_invoice_status`, `get_all_invoices`, `get_invoice_by_id`, `get_invoices_by_status`
+  - Invoice lines and tax lines: `insert_invoice_line`, `get_invoice_lines`, `insert_invoice_tax_line`, `get_invoice_tax_lines`
+  - Payments: `insert_payment`, `get_payments_for_invoice`, `get_ytd_payments_to_contact`
+  - Invoice aging: `get_invoice_aging`
+  - Audit log: `insert_audit_log`, `get_audit_log`
+  - Settings: `get_setting`, `set_setting`
+  - `serde::Serialize` added to all record types for API serialization
+
+- **HTTP API Server** (`crates/server/`)
+  - Axum REST server on port 8060 with domain-organized routes
+  - Bearer token auth middleware (`AEQUI_API_KEY` env var)
+  - Endpoints: accounts, transactions, receipts, tax, invoices, contacts, payments, rules, reconciliation, reports
+  - `GET /health` unauthenticated endpoint for service discovery
+  - CORS headers for cross-origin access
+
+- **MCP Server** (`crates/mcp/`)
+  - Stdio JSON-RPC 2.0 transport with `initialize`, `tools/list`, `tools/call`
+  - `ToolRegistry` with generic `register()` for async handler closures
+  - 24 tools across 8 domains (accounts, transactions, receipts, tax, invoices, rules, import, reconciliation)
+  - `Permissions` system: `read_only` mode and per-tool `disabled_tools` blocklist
+  - SHA-256 audit logging of tool invocations
+  - 33 unit tests: registry, permissions, accounts, transactions, receipts, tax, invoices, rules, import, reconciliation, protocol, audit
+
+- **App Crate** — 12 new Tauri commands
+  - `get_contacts`, `create_contact`, `get_invoices`, `create_invoice`
+  - `get_invoice_aging`, `record_invoice_payment`, `get_1099_summary`
+  - `export_beancount`, `export_qif`
+  - `get_setting`, `set_setting`, `get_audit_log`
+  - Total: 22 Tauri commands
+
+- **Frontend** — 3 new pages
+  - Invoices page with status badges and All/Aging tab toggle
+  - Contacts page with type badges and contractor indicators
+  - Settings page with MCP server toggle, read-only mode, and audit log viewer
+  - Navigation: 7 links (Accounts, Transactions, Receipts, Tax, Invoices, Contacts, Settings)
+
+- **Containerization**
+  - Multi-stage Dockerfile (Rust builder → minimal Debian runtime)
+  - `.dockerignore` for target/, node_modules/, dist/
+
+- **Documentation**
+  - ADR-009: Invoice Engine with Contact Model and Lifecycle State Machine
+  - ADR-010: HTTP API Server with Axum and Docker Containerization
+  - ADR-011: MCP Server with Tool Registry and Permission System
+  - ADR-012: Data Export — Beancount and QIF Formats
+
+- **Tax Engine** (`core/src/tax/`)
+  - `TaxRules` struct with TOML deserialization and validation
+  - `TaxRules::compute_income_tax()` — progressive bracket computation
+  - `compute_quarterly_estimate()` — pure function: TaxRules x LedgerSnapshot → QuarterlyEstimate
+  - `schedule_c_preview()` — Schedule C line totals with deduction caps applied
+  - `ScheduleCLine` enum with `from_tag()` parser for all Schedule C lines
+  - `LedgerSnapshot` — point-in-time ledger aggregation by Schedule C line
+  - SE tax calculation with Social Security wage base cap ($176,100)
+  - 50% SE tax deduction from AGI
+  - Safe harbor: min(100% prior year, 90% current year estimate)
+  - Meals deduction cap (50%) applied automatically to Line 24b
+  - IRS-style rounding (half-up to nearest dollar) via `Money::round_to_dollar()`
+  - 25 unit tests covering brackets, SE tax, wage base cap, loss scenarios, safe harbor
+
+- **Tax Rule File** (`rules/tax/us/2026.toml`)
+  - 2026 US tax rates: SE tax, income brackets (single filer), mileage, meals cap
+  - Quarterly due dates
+  - Community-maintainable TOML format with inline documentation
+
+- **Money type enhancements**
+  - `Mul<Decimal>` implementation for rate calculations
+  - `as_decimal()` accessor for intermediate precision
+  - `round_to_dollar()` with IRS MidpointAwayFromZero rounding
+
+- **Storage Crate** — Phase 4 additions
+  - `tax_periods` table: quarterly estimates, SE tax, income tax, payments
+  - `build_ledger_snapshot()` — SQL aggregation by Schedule C line
+  - `upsert_tax_period()`, `record_tax_payment()`, `get_tax_periods()`
+  - `get_prior_year_total_tax()` for safe harbor calculation
+
+- **App Crate** — Phase 4 additions
+  - `estimate_quarterly_tax` Tauri command (auto-detects current year/quarter)
+  - `get_schedule_c_preview` Tauri command
+  - Tax rules loaded via `include_str!()` for embedded distribution
+
+- **Frontend** — Tax Center
+  - Tax page with Quarterly Estimate and Schedule C Preview tabs
+  - Quarterly payment callout with due date countdown
+  - Summary cards: YTD income, expenses, net profit, SE tax, income tax
+  - Schedule C line-by-line breakdown (income and expense sections)
+  - Navigation: "Tax" added to desktop top nav and mobile bottom nav
+
+- **Documentation**
+  - ADR-008: Tax Engine as Pure Function with TOML Rule Files
+  - ADR-009: Invoice Engine with Contact Model and Lifecycle State Machine
+  - ADR-010: HTTP API Server with Axum and Docker Containerization
+  - ADR-011: MCP Server with Tool Registry and Permission System
+  - ADR-012: Data Export — Beancount and QIF Formats
+
+### Completed
+- Phase 4: Tax Engine
+- Phase 5: Invoicing
+- Phase 6: HTTP API & Containerization
+- Phase 7: MCP Server
+- Phase 8: Polish + Ecosystem (partial — exports and settings)
+
+---
+
 ## [0.3.0] - 2026-02-26
 
 ### Added
@@ -56,10 +182,6 @@ All notable changes to this project will be documented in this file.
 - Phase 1: Desktop Shell (Tauri v2, core bookkeeping, SQLite storage)
 - Phase 2: Import + Reconciliation
 
-### Planned (Phase 3)
-- Receipt OCR pipeline
-- iOS + Android mobile app via Tauri v2 mobile (camera receipt capture)
-
 ---
 
 ## [0.1.0] - 2026-02-26
@@ -93,8 +215,6 @@ All notable changes to this project will be documented in this file.
 - chrono v0.4
 
 ### Known Issues
-- No frontend UI yet
-- No receipt OCR (Phase 3)
-- No tax engine (Phase 4)
 - No invoicing (Phase 5)
-- No MCP server (Phase 6)
+- No HTTP API / containerization (Phase 6)
+- No MCP server (Phase 7)

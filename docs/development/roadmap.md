@@ -1,77 +1,57 @@
 # Development Roadmap
 
-## Phase 3 — Receipt Pipeline + Mobile App ✓
+## Completed Phases
 
-- ✓ OCR pipeline backend (hash, preprocess, recognize, extract) — 35 tests
-- ✓ Tauri commands: ingest, list pending, approve/reject receipts
-- ✓ Watch folder intake (desktop) with notify crate
-- ✓ React + TypeScript + Vite + Tailwind v4 frontend scaffold
-- ✓ App shell with routing (Accounts, Transactions, Receipts pages)
-- ✓ Receipt review queue UI with attachment viewer (image + PDF)
-- ✓ Receipt-to-transaction linking (searchable picker on approve)
-- ✓ **iOS + Android mobile scaffold via Tauri v2 Mobile**
-  - ✓ `lib.rs` mobile entry point (`#[tauri::mobile_entry_point]`)
-  - ✓ Responsive layout: top nav (desktop) / bottom nav (mobile) with iOS safe areas
-  - ✓ Camera capture via `<input type="file" capture="environment">` → OCR pipeline
-  - ✓ `tauri.conf.json` mobile targets (iOS 13.0+, Android API 24+)
-  - ✓ Capability files: `default.json` (desktop) + `mobile.json` (iOS/Android)
-  - Remaining: `cargo tauri ios init` / `android init` (requires macOS + Android SDK)
-  - Remaining: App Store + Google Play distribution setup
-
-**Deliverable:** User can photograph receipts on their phone and review/approve transactions on desktop or mobile.
+- **Phase 1** — Core Bookkeeping (desktop shell, accounts, transactions, SQLite)
+- **Phase 2** — Import + Reconciliation (OFX/CSV, auto-match, categorization rules)
+- **Phase 3** — Receipt OCR + Mobile Scaffold (OCR pipeline, intake watcher, Tauri mobile)
+- **Phase 4** — Tax Engine (quarterly estimates, Schedule C, SE tax, TOML rules)
+- **Phase 5** — Invoicing (contacts, invoice lifecycle, payments, 1099 tracking, PDF text rendering)
+- **Phase 6** — HTTP API & Containerization (Axum REST server, Bearer auth, Dockerfile)
+- **Phase 7** — MCP Server (24 tools, permissions, audit log, stdio transport)
+- **Phase 8** — Polish + Ecosystem (Beancount/QIF export, settings UI, data portability)
 
 ---
 
-## Phase 4 — Tax Engine
+## Remaining Work
 
-- `core/src/tax/` module: `TaxRules`, `TaxEngine::compute_quarterly_estimate()`
-- TOML rule file loader with version validation
-- SE tax, safe harbor, income bracket lookup
-- Schedule C line mapping and aggregation
-- Schedule C preview report + Typst PDF export
-- Quarterly tax dashboard widget with countdown to next due date
-
-**Deliverable:** User can see their estimated quarterly payment and Schedule C preview at any time.
-
----
-
-## Phase 5 — Invoicing
-
-- Contact management with contractor flag and YTD tracker
-- Invoice CRUD + line items + discount + tax lines
-- `InvoiceStatus` state machine with validated transitions
-- Typst PDF generation (customizable template)
+### Deferred from Phase 5
+- Typst PDF generation (currently plain text rendering)
 - lettre SMTP delivery + Resend API option
-- Payment recording (full + partial)
-- Invoice aging report
-- 1099-NEC threshold warnings
+- Mobile push notifications for invoice due dates
 
-**Deliverable:** User can create and send invoices and track payments.
+### Deferred from Phase 6
+- GHCR publish workflow (GitHub Actions)
+- Structured JSON logging via `tracing-bunyan-formatter`
+- OAuth/OIDC authentication (currently API key only)
 
----
+### Deferred from Phase 7
+- SSE/streaming transport option
 
-## Phase 6 — MCP Server
+### Phase 7.5 — AGNOS Marketplace Integration
 
-- `mcp` crate: stdio transport, JSON-RPC framing via tokio-util codec
-- Tool and resource handlers wired to `core` + `storage`
-- Settings UI: enable/disable server, per-tool write permissions, read-only mode
-- Audit log integration
+**Done (AGNOS-side, in agnosticos repo):**
+- ✅ Marketplace recipe (`recipes/marketplace/aequi.toml`)
+- ✅ Sandbox profile in `sandbox_profiles.rs` (desktop mode, network disabled, Tesseract OCR access)
+- ✅ Agnoshi intent patterns (tax estimate, schedule C, import, balances, receipts)
+- ✅ Agnoshi translate module (`translate/aequi.rs`) routing to MCP bridge
+- ✅ Release workflow includes bare binary + tax rules in Linux tarball
+
+**Remaining (aequi-side):**
+- Register Aequi MCP agent with daimon on startup (`POST /v1/agents/register`)
+- Periodic dashboard sync to daimon (`POST /v1/dashboard/sync`)
+- Consumer health reporting (`GET /v1/health/consumers` shows aequi status)
+- `GET /v1/discover` handshake on startup to auto-detect hoosh/daimon URLs
 - MCP server spawned as Tauri sidecar process
 
-**Deliverable:** Any MCP-compatible AI agent (Claude Desktop, SecureYeoman, etc.) can query and operate the accounting system.
-
----
-
-## Phase 7 — Polish + Ecosystem
-
-- AI-assisted categorization via configured MCP endpoint (optional)
+### Deferred from Phase 8
+- AI-assisted categorization via configured MCP endpoint
 - Community tax rule update workflow (PR-based, annual)
 - Import profile sharing (export/import TOML)
 - Backup / restore (compressed SQLite snapshot + attachments)
-- Data export: Beancount format (plain-text portability), QIF (legacy import)
 - Auto-updater via Tauri updater
 - Keyboard shortcuts + accessibility pass (WCAG 2.1 AA)
-- Mobile: push notifications for invoice due dates and quarterly tax reminders
+- Schema migration system (versioned SQL files, up/down)
 
 ---
 

@@ -198,8 +198,7 @@ fn parse_amount(s: &str) -> Result<i64, CsvError> {
         (false, s)
     };
     let s = s.replace([',', '$', ' '], "");
-    let mut dec = Decimal::from_str(&s)
-        .map_err(|_| CsvError::InvalidAmount(s.to_string()))?;
+    let mut dec = Decimal::from_str(&s).map_err(|_| CsvError::InvalidAmount(s.to_string()))?;
     if negative {
         dec = -dec;
     }
@@ -329,7 +328,8 @@ mod tests {
 
     #[test]
     fn import_csv_basic() {
-        let data = b"date,description,amount\n2024-01-15,AMAZON,49.99\n2024-01-16,STARBUCKS,-5.00\n";
+        let data =
+            b"date,description,amount\n2024-01-15,AMAZON,49.99\n2024-01-16,STARBUCKS,-5.00\n";
         let txs = import_csv(data.as_ref(), &default_profile()).unwrap();
         assert_eq!(txs.len(), 2);
         assert_eq!(txs[0].amount, 4999);

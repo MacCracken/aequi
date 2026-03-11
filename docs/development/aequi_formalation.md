@@ -1,7 +1,7 @@
 # Aequi — Open-Source Self-Employed Accounting Platform
 
-**Status:** In Development (Phase 2 Complete — Phase 3 in Progress)
-**Date:** 2026-02-26
+**Status:** In Development (Phases 1-4 Complete — Phase 5 Next)
+**Date:** 2026-03-10
 **Target:** Freelancers, sole proprietors, independent contractors (US-focused v1)
 
 > **Note:** See [roadmap.md](roadmap.md) for current progress and upcoming phases.

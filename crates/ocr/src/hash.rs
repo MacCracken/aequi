@@ -31,11 +31,7 @@ pub fn to_hex(hash: &[u8; 32]) -> String {
 
 /// Derive the content-addressed storage path for a given hash.
 /// Layout: `<base>/<first_2_hex_chars>/<full_hex>.<ext>`
-pub fn attachment_path(
-    attachments_dir: &Path,
-    hash_hex: &str,
-    ext: &str,
-) -> std::path::PathBuf {
+pub fn attachment_path(attachments_dir: &Path, hash_hex: &str, ext: &str) -> std::path::PathBuf {
     attachments_dir
         .join(&hash_hex[..2])
         .join(format!("{hash_hex}.{ext}"))

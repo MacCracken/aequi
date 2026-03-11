@@ -7,11 +7,13 @@ pub(crate) mod util;
 pub use csv::{CsvImportProfile, CsvTransaction};
 pub use match_engine::{AutoMatchEngine, MatchResult, MatchType, MatchableTransaction};
 pub use ofx::{OfxStatement, OfxTransaction};
-pub use rules::{CategoryRule, CategoryRuleEngine, CategorizableTransaction, MatchType as RuleMatchType};
+pub use rules::{
+    CategorizableTransaction, CategoryRule, CategoryRuleEngine, MatchType as RuleMatchType,
+};
 
 pub mod import {
     use crate::*;
-    
+
     pub fn import_ofx(data: &[u8]) -> Result<OfxStatement, crate::ofx::OfxError> {
         crate::ofx::parse(data)
     }

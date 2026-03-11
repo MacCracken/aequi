@@ -5,6 +5,20 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 
+[[bin]]
+name = "aequi-mcp"
+path = "src/main.rs"
+
 [dependencies]
 aequi-core = { path = "../core" }
 aequi-storage = { path = "../storage" }
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["io-util", "io-std"] }
+chrono.workspace = true
+rust_decimal.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+anyhow.workspace = true
+sha2.workspace = true
+sqlx.workspace = true

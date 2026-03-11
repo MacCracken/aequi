@@ -39,7 +39,10 @@ pub struct ReceiptPipeline<R: OcrBackend> {
 
 impl<R: OcrBackend> ReceiptPipeline<R> {
     pub fn new(recognizer: R, attachments_dir: PathBuf) -> Self {
-        Self { recognizer, attachments_dir }
+        Self {
+            recognizer,
+            attachments_dir,
+        }
     }
 
     /// Process a file on disk.
@@ -54,11 +57,7 @@ impl<R: OcrBackend> ReceiptPipeline<R> {
     }
 
     /// Process raw bytes (from camera capture or file read).
-    pub async fn process_bytes(
-        &self,
-        data: &[u8],
-        ext: &str,
-    ) -> Result<OcrResult, PipelineError> {
+    pub async fn process_bytes(&self, data: &[u8], ext: &str) -> Result<OcrResult, PipelineError> {
         // 1. Hash for deduplication / content addressing.
         let hash = hash::sha256_bytes(data);
         let hash_hex = hash::to_hex(&hash);
@@ -152,10 +151,8 @@ mod tests {
     #[tokio::test]
     async fn process_bytes_dedup_path_is_stable() {
         let dir = tempfile::tempdir().unwrap();
-        let pipeline = ReceiptPipeline::new(
-            MockRecognizer::new("irrelevant"),
-            dir.path().to_path_buf(),
-        );
+        let pipeline =
+            ReceiptPipeline::new(MockRecognizer::new("irrelevant"), dir.path().to_path_buf());
         let data = tiny_png();
 
         let r1 = pipeline.process_bytes(&data, "png").await.unwrap();

@@ -114,13 +114,19 @@ mod tests {
     #[test]
     fn fiscal_year_start_date() {
         let fy = FiscalYear::new(2024);
-        assert_eq!(fy.start_date(), NaiveDate::from_ymd_opt(2024, 1, 1).unwrap());
+        assert_eq!(
+            fy.start_date(),
+            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap()
+        );
     }
 
     #[test]
     fn fiscal_year_end_date_is_dec_31() {
         let fy = FiscalYear::new(2024);
-        assert_eq!(fy.end_date(), NaiveDate::from_ymd_opt(2024, 12, 31).unwrap());
+        assert_eq!(
+            fy.end_date(),
+            NaiveDate::from_ymd_opt(2024, 12, 31).unwrap()
+        );
     }
 
     #[test]
@@ -147,19 +153,43 @@ mod tests {
     #[test]
     fn quarter_start_dates() {
         let fy = FiscalYear::new(2024);
-        assert_eq!(Quarter::Q1.start_date(fy), NaiveDate::from_ymd_opt(2024, 1, 1).unwrap());
-        assert_eq!(Quarter::Q2.start_date(fy), NaiveDate::from_ymd_opt(2024, 4, 1).unwrap());
-        assert_eq!(Quarter::Q3.start_date(fy), NaiveDate::from_ymd_opt(2024, 7, 1).unwrap());
-        assert_eq!(Quarter::Q4.start_date(fy), NaiveDate::from_ymd_opt(2024, 10, 1).unwrap());
+        assert_eq!(
+            Quarter::Q1.start_date(fy),
+            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap()
+        );
+        assert_eq!(
+            Quarter::Q2.start_date(fy),
+            NaiveDate::from_ymd_opt(2024, 4, 1).unwrap()
+        );
+        assert_eq!(
+            Quarter::Q3.start_date(fy),
+            NaiveDate::from_ymd_opt(2024, 7, 1).unwrap()
+        );
+        assert_eq!(
+            Quarter::Q4.start_date(fy),
+            NaiveDate::from_ymd_opt(2024, 10, 1).unwrap()
+        );
     }
 
     #[test]
     fn quarter_end_dates() {
         let fy = FiscalYear::new(2024);
-        assert_eq!(Quarter::Q1.end_date(fy), NaiveDate::from_ymd_opt(2024, 3, 31).unwrap());
-        assert_eq!(Quarter::Q2.end_date(fy), NaiveDate::from_ymd_opt(2024, 6, 30).unwrap());
-        assert_eq!(Quarter::Q3.end_date(fy), NaiveDate::from_ymd_opt(2024, 9, 30).unwrap());
-        assert_eq!(Quarter::Q4.end_date(fy), NaiveDate::from_ymd_opt(2024, 12, 31).unwrap());
+        assert_eq!(
+            Quarter::Q1.end_date(fy),
+            NaiveDate::from_ymd_opt(2024, 3, 31).unwrap()
+        );
+        assert_eq!(
+            Quarter::Q2.end_date(fy),
+            NaiveDate::from_ymd_opt(2024, 6, 30).unwrap()
+        );
+        assert_eq!(
+            Quarter::Q3.end_date(fy),
+            NaiveDate::from_ymd_opt(2024, 9, 30).unwrap()
+        );
+        assert_eq!(
+            Quarter::Q4.end_date(fy),
+            NaiveDate::from_ymd_opt(2024, 12, 31).unwrap()
+        );
     }
 
     #[test]

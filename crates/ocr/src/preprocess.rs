@@ -67,15 +67,13 @@ mod tests {
     use image::{DynamicImage, GrayImage, ImageBuffer, Luma};
 
     fn solid_gray(width: u32, height: u32, value: u8) -> DynamicImage {
-        let img: GrayImage =
-            ImageBuffer::from_fn(width, height, |_, _| Luma([value]));
+        let img: GrayImage = ImageBuffer::from_fn(width, height, |_, _| Luma([value]));
         DynamicImage::ImageLuma8(img)
     }
 
     fn gradient_gray(width: u32, height: u32) -> DynamicImage {
-        let img: GrayImage = ImageBuffer::from_fn(width, height, |x, _| {
-            Luma([(x * 255 / width) as u8])
-        });
+        let img: GrayImage =
+            ImageBuffer::from_fn(width, height, |x, _| Luma([(x * 255 / width) as u8]));
         DynamicImage::ImageLuma8(img)
     }
 
@@ -105,8 +103,11 @@ mod tests {
         // Create a tiny PNG in memory and round-trip it.
         let img = solid_gray(4, 4, 100);
         let mut png_bytes = Vec::new();
-        img.write_to(&mut std::io::Cursor::new(&mut png_bytes), image::ImageFormat::Png)
-            .unwrap();
+        img.write_to(
+            &mut std::io::Cursor::new(&mut png_bytes),
+            image::ImageFormat::Png,
+        )
+        .unwrap();
         let result = prepare_for_ocr_from_bytes(&png_bytes).unwrap();
         // PNG magic bytes: 0x89 0x50 0x4E 0x47
         assert_eq!(&result[..4], b"\x89PNG");

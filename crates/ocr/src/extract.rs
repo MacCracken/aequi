@@ -19,33 +19,39 @@ macro_rules! re {
     };
 }
 
-re!(re_amount_label,
-    r"(?i)\b(?:total|grand\s+total|amount\s+due|balance\s+due|total\s+due)\s*[:\$]?\s*\$?\s*([\d,]+\.\d{2})\b");
-re!(re_subtotal,
-    r"(?i)\bsubtotal\b\s*[:\$]?\s*\$?\s*([\d,]+\.\d{2})\b");
-re!(re_tax,
-    r"(?i)\b(?:tax|hst|gst|pst|vat|sales\s*tax)\b\s*[:\$]?\s*\$?\s*([\d,]+\.\d{2})\b");
-re!(re_currency,
-    r"\$\s*([\d,]+\.\d{2})");
+re!(
+    re_amount_label,
+    r"(?i)\b(?:total|grand\s+total|amount\s+due|balance\s+due|total\s+due)\s*[:\$]?\s*\$?\s*([\d,]+\.\d{2})\b"
+);
+re!(
+    re_subtotal,
+    r"(?i)\bsubtotal\b\s*[:\$]?\s*\$?\s*([\d,]+\.\d{2})\b"
+);
+re!(
+    re_tax,
+    r"(?i)\b(?:tax|hst|gst|pst|vat|sales\s*tax)\b\s*[:\$]?\s*\$?\s*([\d,]+\.\d{2})\b"
+);
+re!(re_currency, r"\$\s*([\d,]+\.\d{2})");
 
-re!(re_date_month_name,
-    r"(?i)\b(january|february|march|april|may|june|july|august|september|october|november|december)\s+(\d{1,2}),?\s+(\d{4})\b");
-re!(re_date_abbr_month,
-    r"(?i)\b(\d{1,2})\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\.?\s+(\d{4})\b");
-re!(re_date_iso,
-    r"\b(\d{4})-(\d{2})-(\d{2})\b");
-re!(re_date_slash,
-    r"\b(\d{1,2})/(\d{1,2})/(\d{2,4})\b");
-re!(re_date_dash,
-    r"\b(\d{1,2})-(\d{1,2})-(\d{2,4})\b");
+re!(
+    re_date_month_name,
+    r"(?i)\b(january|february|march|april|may|june|july|august|september|october|november|december)\s+(\d{1,2}),?\s+(\d{4})\b"
+);
+re!(
+    re_date_abbr_month,
+    r"(?i)\b(\d{1,2})\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\.?\s+(\d{4})\b"
+);
+re!(re_date_iso, r"\b(\d{4})-(\d{2})-(\d{2})\b");
+re!(re_date_slash, r"\b(\d{1,2})/(\d{1,2})/(\d{2,4})\b");
+re!(re_date_dash, r"\b(\d{1,2})-(\d{1,2})-(\d{2,4})\b");
 
-re!(re_payment,
-    r"(?i)\b(visa|mastercard|master\s*card|amex|american\s+express|discover|cash|debit|check|cheque)\b");
+re!(
+    re_payment,
+    r"(?i)\b(visa|mastercard|master\s*card|amex|american\s+express|discover|cash|debit|check|cheque)\b"
+);
 
-re!(re_phone,
-    r"\(?\d{3}\)?[\s\-]\d{3}[\s\-]\d{4}");
-re!(re_url,
-    r"(?i)(https?://|www\.)\S+");
+re!(re_phone, r"\(?\d{3}\)?[\s\-]\d{3}[\s\-]\d{4}");
+re!(re_url, r"(?i)(https?://|www\.)\S+");
 
 // ── Public extraction API ─────────────────────────────────────────────────────
 
@@ -69,10 +75,16 @@ impl Extractor {
                 (total_cents.as_ref().map(|f| f.confidence), 0.35),
                 (payment_method.as_ref().map(|f| f.confidence), 0.10),
             ];
-            let (score, weight) = weighted.iter().fold((0.0f32, 0.0f32), |(s, w), (conf, fw)| {
-                (s + conf.unwrap_or(0.0) * fw, w + fw)
-            });
-            if weight > 0.0 { score / weight } else { 0.0 }
+            let (score, weight) = weighted
+                .iter()
+                .fold((0.0f32, 0.0f32), |(s, w), (conf, fw)| {
+                    (s + conf.unwrap_or(0.0) * fw, w + fw)
+                });
+            if weight > 0.0 {
+                score / weight
+            } else {
+                0.0
+            }
         };
 
         ExtractedReceipt {
@@ -102,7 +114,10 @@ impl Extractor {
             // Skip lines that start with a digit (likely address or amount)
             .filter(|l| !l.starts_with(|c: char| c.is_ascii_digit()))
             .max_by_key(|l| {
-                let all_caps = l.chars().filter(|c| c.is_alphabetic()).all(|c| c.is_uppercase());
+                let all_caps = l
+                    .chars()
+                    .filter(|c| c.is_alphabetic())
+                    .all(|c| c.is_uppercase());
                 (if all_caps { 2i32 } else { 0 }) + (l.len() as i32).min(20)
             })?;
 
@@ -224,24 +239,45 @@ fn try_date_dash(text: &str) -> Option<NaiveDate> {
 }
 
 fn expand_year(y: i32) -> i32 {
-    if y < 100 { 2000 + y } else { y }
+    if y < 100 {
+        2000 + y
+    } else {
+        y
+    }
 }
 
 fn month_name_to_num(name: &str) -> Option<u32> {
     match name.to_lowercase().as_str() {
-        "january" => Some(1), "february" => Some(2), "march" => Some(3),
-        "april" => Some(4), "may" => Some(5), "june" => Some(6),
-        "july" => Some(7), "august" => Some(8), "september" => Some(9),
-        "october" => Some(10), "november" => Some(11), "december" => Some(12),
+        "january" => Some(1),
+        "february" => Some(2),
+        "march" => Some(3),
+        "april" => Some(4),
+        "may" => Some(5),
+        "june" => Some(6),
+        "july" => Some(7),
+        "august" => Some(8),
+        "september" => Some(9),
+        "october" => Some(10),
+        "november" => Some(11),
+        "december" => Some(12),
         _ => None,
     }
 }
 
 fn abbr_month_to_num(name: &str) -> Option<u32> {
     match name.to_lowercase().as_str() {
-        "jan" => Some(1), "feb" => Some(2), "mar" => Some(3), "apr" => Some(4),
-        "may" => Some(5), "jun" => Some(6), "jul" => Some(7), "aug" => Some(8),
-        "sep" => Some(9), "oct" => Some(10), "nov" => Some(11), "dec" => Some(12),
+        "jan" => Some(1),
+        "feb" => Some(2),
+        "mar" => Some(3),
+        "apr" => Some(4),
+        "may" => Some(5),
+        "jun" => Some(6),
+        "jul" => Some(7),
+        "aug" => Some(8),
+        "sep" => Some(9),
+        "oct" => Some(10),
+        "nov" => Some(11),
+        "dec" => Some(12),
         _ => None,
     }
 }
@@ -289,28 +325,40 @@ mod tests {
     fn extract_date_iso() {
         let text = "AMAZON\nOrder 2024-03-15\nTotal $49.99";
         let r = Extractor::extract(text);
-        assert_eq!(r.date.unwrap().value, NaiveDate::from_ymd_opt(2024, 3, 15).unwrap());
+        assert_eq!(
+            r.date.unwrap().value,
+            NaiveDate::from_ymd_opt(2024, 3, 15).unwrap()
+        );
     }
 
     #[test]
     fn extract_date_full_month_name() {
         let text = "WHOLE FOODS\nDate: March 15, 2024\nTotal $87.50";
         let r = Extractor::extract(text);
-        assert_eq!(r.date.unwrap().value, NaiveDate::from_ymd_opt(2024, 3, 15).unwrap());
+        assert_eq!(
+            r.date.unwrap().value,
+            NaiveDate::from_ymd_opt(2024, 3, 15).unwrap()
+        );
     }
 
     #[test]
     fn extract_date_slash_format() {
         let text = "STARBUCKS\n01/15/2024\n$5.50";
         let r = Extractor::extract(text);
-        assert_eq!(r.date.unwrap().value, NaiveDate::from_ymd_opt(2024, 1, 15).unwrap());
+        assert_eq!(
+            r.date.unwrap().value,
+            NaiveDate::from_ymd_opt(2024, 1, 15).unwrap()
+        );
     }
 
     #[test]
     fn extract_date_abbreviated_month() {
         let text = "WALMART\n15 Jan 2024\nTotal $120.00";
         let r = Extractor::extract(text);
-        assert_eq!(r.date.unwrap().value, NaiveDate::from_ymd_opt(2024, 1, 15).unwrap());
+        assert_eq!(
+            r.date.unwrap().value,
+            NaiveDate::from_ymd_opt(2024, 1, 15).unwrap()
+        );
     }
 
     // ── Amounts ───────────────────────────────────────────────────────────────

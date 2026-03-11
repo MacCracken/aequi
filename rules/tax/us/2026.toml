@@ -1,0 +1,73 @@
+# Aequi Tax Rules — United States — Tax Year 2026
+#
+# Sources:
+#   - IRS Revenue Procedure (annual inflation adjustments)
+#   - IRS Publication 15 (SE tax rates)
+#   - IRS Standard Mileage Rates announcement
+#
+# IMPORTANT: This file is informational only. Always consult a CPA
+# for your specific tax situation. Aequi does not provide tax advice.
+
+[year]
+value = 2026
+
+[se_tax]
+ss_rate = 0.124              # Social Security: 12.4% (employer + employee)
+medicare_rate = 0.029         # Medicare: 2.9% (employer + employee)
+ss_wage_base = 176100         # Social Security wage base limit
+net_earnings_factor = 0.9235  # Net earnings = net_profit × 0.9235
+deductible_fraction = 0.50    # 50% of SE tax is deductible from AGI
+
+# Single filer 2026 ordinary income brackets (projected)
+[[income_brackets.single]]
+floor = 0
+ceiling = 11925
+rate = 0.10
+
+[[income_brackets.single]]
+floor = 11925
+ceiling = 48475
+rate = 0.12
+
+[[income_brackets.single]]
+floor = 48475
+ceiling = 103350
+rate = 0.22
+
+[[income_brackets.single]]
+floor = 103350
+ceiling = 197300
+rate = 0.24
+
+[[income_brackets.single]]
+floor = 197300
+ceiling = 250525
+rate = 0.32
+
+[[income_brackets.single]]
+floor = 250525
+ceiling = 626350
+rate = 0.35
+
+[[income_brackets.single]]
+floor = 626350
+ceiling = 999999999
+rate = 0.37
+
+[mileage]
+business_cents_per_mile = 70   # IRS standard mileage rate (cents)
+medical_cents_per_mile = 21
+charity_cents_per_mile = 14
+
+[meals_deduction_cap]
+fraction = 0.50                # Business meals are 50% deductible
+
+[home_office_simplified]
+rate_per_sqft = 5.00           # Simplified method: $5/sqft
+max_sqft = 300                 # Maximum 300 sqft
+
+[quarterly_due_dates]
+q1 = "2026-04-15"
+q2 = "2026-06-15"
+q3 = "2026-09-15"
+q4 = "2027-01-15"

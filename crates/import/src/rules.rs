@@ -72,7 +72,10 @@ impl CategoryRuleEngine {
                 } else {
                     None
                 };
-                CompiledRule { rule, compiled_regex }
+                CompiledRule {
+                    rule,
+                    compiled_regex,
+                }
             })
             .collect();
         // Highest priority first.
@@ -156,7 +159,12 @@ mod tests {
         }
     }
 
-    fn make_rule(pattern: &str, match_type: MatchType, account: &str, priority: i32) -> CategoryRule {
+    fn make_rule(
+        pattern: &str,
+        match_type: MatchType,
+        account: &str,
+        priority: i32,
+    ) -> CategoryRule {
         CategoryRule {
             name: "test".to_string(),
             priority,
@@ -194,14 +202,14 @@ mod tests {
 
     #[test]
     fn exact_match() {
-        let engine = CategoryRuleEngine::new(vec![make_rule(
-            "starbucks",
-            MatchType::Exact,
-            "5020",
-            1,
-        )]);
-        assert!(engine.find_matching_rule(&make_tx("STARBUCKS", 500)).is_some());
-        assert!(engine.find_matching_rule(&make_tx("STARBUCKS RESERVE", 500)).is_none());
+        let engine =
+            CategoryRuleEngine::new(vec![make_rule("starbucks", MatchType::Exact, "5020", 1)]);
+        assert!(engine
+            .find_matching_rule(&make_tx("STARBUCKS", 500))
+            .is_some());
+        assert!(engine
+            .find_matching_rule(&make_tx("STARBUCKS RESERVE", 500))
+            .is_none());
     }
 
     #[test]
@@ -212,9 +220,15 @@ mod tests {
             "5100",
             1,
         )]);
-        assert!(engine.find_matching_rule(&make_tx("AMAZON MARKETPLACE", 1999)).is_some());
-        assert!(engine.find_matching_rule(&make_tx("AMZN*PRIME", 1399)).is_some());
-        assert!(engine.find_matching_rule(&make_tx("WHOLE FOODS", 1000)).is_none());
+        assert!(engine
+            .find_matching_rule(&make_tx("AMAZON MARKETPLACE", 1999))
+            .is_some());
+        assert!(engine
+            .find_matching_rule(&make_tx("AMZN*PRIME", 1399))
+            .is_some());
+        assert!(engine
+            .find_matching_rule(&make_tx("WHOLE FOODS", 1000))
+            .is_none());
     }
 
     #[test]
@@ -226,9 +240,13 @@ mod tests {
             1,
         )]);
         // "starbuck" is 1 edit from "starbucks" → score ≈ 0.89
-        assert!(engine.find_matching_rule(&make_tx("starbuck", 500)).is_some());
+        assert!(engine
+            .find_matching_rule(&make_tx("starbuck", 500))
+            .is_some());
         // Completely unrelated — no match
-        assert!(engine.find_matching_rule(&make_tx("WHOLE FOODS", 500)).is_none());
+        assert!(engine
+            .find_matching_rule(&make_tx("WHOLE FOODS", 500))
+            .is_none());
     }
 
     #[test]
@@ -256,9 +274,13 @@ mod tests {
         };
         let engine = CategoryRuleEngine::new(vec![rule]);
         // Below minimum — no match
-        assert!(engine.find_matching_rule(&make_tx("AMAZON", 9_999)).is_none());
+        assert!(engine
+            .find_matching_rule(&make_tx("AMAZON", 9_999))
+            .is_none());
         // At minimum — matches
-        assert!(engine.find_matching_rule(&make_tx("AMAZON", 10_000)).is_some());
+        assert!(engine
+            .find_matching_rule(&make_tx("AMAZON", 10_000))
+            .is_some());
     }
 
     #[test]
@@ -279,12 +301,8 @@ mod tests {
 
     #[test]
     fn apply_rules_returns_matched_indices() {
-        let engine = CategoryRuleEngine::new(vec![make_rule(
-            "github",
-            MatchType::Contains,
-            "5110",
-            1,
-        )]);
+        let engine =
+            CategoryRuleEngine::new(vec![make_rule("github", MatchType::Contains, "5110", 1)]);
         let txs = vec![
             make_tx("GITHUB SUBSCRIPTION", 1000),
             make_tx("STARBUCKS", 500),

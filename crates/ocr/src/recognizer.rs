@@ -50,7 +50,10 @@ pub mod tesseract_backend {
 
     impl TesseractRecognizer {
         pub fn new(data_path: Option<String>, lang: &str) -> Self {
-            Self { data_path, lang: lang.to_string() }
+            Self {
+                data_path,
+                lang: lang.to_string(),
+            }
         }
     }
 
@@ -60,7 +63,8 @@ pub mod tesseract_backend {
                 .map_err(|e| OcrError::Engine(e.to_string()))?;
             lt.set_image_from_mem(image_bytes)
                 .map_err(|e| OcrError::ImageDecode(e.to_string()))?;
-            lt.get_utf8_text().map_err(|e| OcrError::Engine(e.to_string()))
+            lt.get_utf8_text()
+                .map_err(|e| OcrError::Engine(e.to_string()))
         }
     }
 }
@@ -72,7 +76,10 @@ mod tests {
     #[test]
     fn mock_returns_preset_text() {
         let r = MockRecognizer::new("STARBUCKS\n$5.50\nVISA");
-        assert_eq!(r.recognize(b"fake image data").unwrap(), "STARBUCKS\n$5.50\nVISA");
+        assert_eq!(
+            r.recognize(b"fake image data").unwrap(),
+            "STARBUCKS\n$5.50\nVISA"
+        );
     }
 
     #[test]

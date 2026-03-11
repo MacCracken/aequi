@@ -330,7 +330,10 @@ VERSION:102
         assert_eq!(stmt.account.account_id, "000112345");
         assert_eq!(stmt.account.bank_id.as_deref(), Some("123456789"));
         assert_eq!(stmt.account.account_type.as_deref(), Some("CHECKING"));
-        assert_eq!(stmt.start_date, NaiveDate::from_ymd_opt(2024, 1, 1).unwrap());
+        assert_eq!(
+            stmt.start_date,
+            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap()
+        );
         assert_eq!(stmt.end_date, NaiveDate::from_ymd_opt(2024, 1, 31).unwrap());
         assert_eq!(stmt.currency.as_deref(), Some("USD"));
         assert_eq!(stmt.transactions.len(), 2);

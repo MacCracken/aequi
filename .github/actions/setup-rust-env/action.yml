@@ -1,0 +1,75 @@
+name: 'Setup Rust Environment'
+description: 'Install Rust toolchain, system deps, Node.js, and cache dependencies'
+
+inputs:
+  toolchain:
+    description: 'Rust toolchain version'
+    required: false
+    default: 'stable'
+  components:
+    description: 'Rust components to install'
+    required: false
+    default: 'rustfmt, clippy'
+  cache-prefix:
+    description: 'Cache key prefix for segmentation'
+    required: false
+    default: 'aequi'
+  node-version:
+    description: 'Node.js version for frontend build'
+    required: false
+    default: '22'
+  install-tauri-deps:
+    description: 'Install Tauri system dependencies (webkit2gtk, etc.)'
+    required: false
+    default: 'true'
+
+outputs:
+  project-version:
+    description: 'Project version from VERSION file'
+    value: ${{ steps.version.outputs.version }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Read VERSION
+      id: version
+      shell: bash
+      run: echo "version=$(cat VERSION | tr -d '[:space:]')" >> "$GITHUB_OUTPUT"
+
+    - name: Install Tauri system dependencies
+      if: inputs.install-tauri-deps == 'true'
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          libwebkit2gtk-4.1-dev \
+          libayatana-appindicator3-dev \
+          librsvg2-dev \
+          patchelf
+
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@master
+      with:
+        toolchain: ${{ inputs.toolchain }}
+        components: ${{ inputs.components }}
+
+    - name: Cache cargo registry and build
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          target/
+        key: ${{ inputs.cache-prefix }}-${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: |
+          ${{ inputs.cache-prefix }}-${{ runner.os }}-cargo-
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ inputs.node-version }}
+        cache: 'npm'
+
+    - name: Install frontend dependencies
+      shell: bash
+      run: npm ci

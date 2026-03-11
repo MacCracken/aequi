@@ -11,7 +11,10 @@ pub struct ExtractedField<T> {
 
 impl<T> ExtractedField<T> {
     pub fn new(value: T, confidence: f32) -> Self {
-        Self { value, confidence: confidence.clamp(0.0, 1.0) }
+        Self {
+            value,
+            confidence: confidence.clamp(0.0, 1.0),
+        }
     }
 }
 
@@ -152,7 +155,10 @@ mod tests {
         };
         assert!(low.needs_review());
 
-        let high = ExtractedReceipt { confidence: 0.9, ..low };
+        let high = ExtractedReceipt {
+            confidence: 0.9,
+            ..low
+        };
         assert!(!high.needs_review());
     }
 }

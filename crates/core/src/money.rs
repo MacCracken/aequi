@@ -2,7 +2,7 @@ use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use std::fmt;
-use std::ops::{Add, Sub};
+use std::ops::{Add, Mul, Sub};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Money(Decimal);
@@ -27,6 +27,19 @@ impl Money {
     pub fn is_zero(self) -> bool {
         self.0.is_zero()
     }
+
+    /// Raw decimal value (for tax calculations that need intermediate precision).
+    pub fn as_decimal(self) -> Decimal {
+        self.0
+    }
+
+    /// Round to the nearest whole dollar (IRS rounding: half-up).
+    pub fn round_to_dollar(self) -> Self {
+        Money(
+            self.0
+                .round_dp_with_strategy(0, rust_decimal::RoundingStrategy::MidpointAwayFromZero),
+        )
+    }
 }
 
 impl fmt::Display for Money {
@@ -46,6 +59,13 @@ impl Sub for Money {
     type Output = Self;
     fn sub(self, rhs: Self) -> Self {
         Money(self.0 - rhs.0)
+    }
+}
+
+impl Mul<Decimal> for Money {
+    type Output = Self;
+    fn mul(self, rhs: Decimal) -> Self {
+        Money::from_decimal(self.0 * rhs)
     }
 }
 
@@ -73,16 +93,31 @@ mod tests {
 
     #[test]
     fn add() {
-        assert_eq!((Money::from_cents(1000) + Money::from_cents(250)).to_cents(), 1250);
+        assert_eq!(
+            (Money::from_cents(1000) + Money::from_cents(250)).to_cents(),
+            1250
+        );
         assert_eq!((Money::from_cents(0) + Money::from_cents(0)).to_cents(), 0);
-        assert_eq!((Money::from_cents(-500) + Money::from_cents(1000)).to_cents(), 500);
+        assert_eq!(
+            (Money::from_cents(-500) + Money::from_cents(1000)).to_cents(),
+            500
+        );
     }
 
     #[test]
     fn sub() {
-        assert_eq!((Money::from_cents(1000) - Money::from_cents(250)).to_cents(), 750);
-        assert_eq!((Money::from_cents(500) - Money::from_cents(500)).to_cents(), 0);
-        assert_eq!((Money::from_cents(100) - Money::from_cents(200)).to_cents(), -100);
+        assert_eq!(
+            (Money::from_cents(1000) - Money::from_cents(250)).to_cents(),
+            750
+        );
+        assert_eq!(
+            (Money::from_cents(500) - Money::from_cents(500)).to_cents(),
+            0
+        );
+        assert_eq!(
+            (Money::from_cents(100) - Money::from_cents(200)).to_cents(),
+            -100
+        );
     }
 
     #[test]
@@ -109,5 +144,29 @@ mod tests {
         assert!(Money::from_cents(100) > Money::from_cents(50));
         assert!(Money::from_cents(-10) < Money::from_cents(0));
         assert_eq!(Money::from_cents(100), Money::from_cents(100));
+    }
+
+    #[test]
+    fn mul_by_decimal() {
+        use std::str::FromStr;
+        let rate = Decimal::from_str("0.153").unwrap();
+        // $1000.00 * 0.153 = $153.00
+        assert_eq!((Money::from_cents(100_000) * rate).to_cents(), 15300);
+    }
+
+    #[test]
+    fn round_to_dollar() {
+        // $10.49 → $10.00
+        assert_eq!(Money::from_cents(1049).round_to_dollar().to_cents(), 1000);
+        // $10.50 → $11.00 (IRS half-up)
+        assert_eq!(Money::from_cents(1050).round_to_dollar().to_cents(), 1100);
+        // $10.99 → $11.00
+        assert_eq!(Money::from_cents(1099).round_to_dollar().to_cents(), 1100);
+    }
+
+    #[test]
+    fn as_decimal_roundtrip() {
+        let m = Money::from_cents(1234);
+        assert_eq!(Money::from_decimal(m.as_decimal()), m);
     }
 }

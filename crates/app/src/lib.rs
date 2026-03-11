@@ -45,20 +45,15 @@ pub fn build_app() -> tauri::Builder<tauri::Wry> {
             tauri::async_runtime::spawn(async move {
                 use aequi_ocr::{MockRecognizer, ReceiptPipeline};
 
-                let pipeline = ReceiptPipeline::new(
-                    MockRecognizer::new(""),
-                    attachments_for_pipeline,
-                );
+                let pipeline =
+                    ReceiptPipeline::new(MockRecognizer::new(""), attachments_for_pipeline);
 
                 while let Some(path) = receipt_rx.recv().await {
                     tracing::info!("Processing receipt: {}", path.display());
                     match pipeline.process_file(&path).await {
                         Ok(result) => {
                             let e = &result.extracted;
-                            let ext = path
-                                .extension()
-                                .and_then(|x| x.to_str())
-                                .unwrap_or("bin");
+                            let ext = path.extension().and_then(|x| x.to_str()).unwrap_or("bin");
                             let _ = aequi_storage::insert_receipt(
                                 &db_for_pipeline,
                                 &result.hash_hex,
@@ -90,11 +85,9 @@ pub fn build_app() -> tauri::Builder<tauri::Wry> {
             #[cfg(desktop)]
             {
                 let receipt_tx_for_watcher = receipt_tx.clone();
-                let watcher = aequi_ocr::pipeline::spawn_intake_watcher(
-                    &intake_dir,
-                    receipt_tx_for_watcher,
-                )
-                .expect("Failed to start intake folder watcher");
+                let watcher =
+                    aequi_ocr::pipeline::spawn_intake_watcher(&intake_dir, receipt_tx_for_watcher)
+                        .expect("Failed to start intake folder watcher");
                 // Leak the watcher so it lives for the app's lifetime.
                 // Tauri doesn't provide a place to store arbitrary owned values.
                 std::mem::forget(watcher);
@@ -119,6 +112,20 @@ pub fn build_app() -> tauri::Builder<tauri::Wry> {
             commands::get_pending_receipts,
             commands::approve_receipt,
             commands::reject_receipt,
+            commands::estimate_quarterly_tax,
+            commands::get_schedule_c_preview,
+            commands::get_contacts,
+            commands::create_contact,
+            commands::get_invoices,
+            commands::create_invoice,
+            commands::get_invoice_aging,
+            commands::record_invoice_payment,
+            commands::get_1099_summary,
+            commands::export_beancount,
+            commands::export_qif,
+            commands::get_setting,
+            commands::set_setting,
+            commands::get_audit_log,
         ])
 }
 
