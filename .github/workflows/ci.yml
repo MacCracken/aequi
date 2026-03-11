@@ -36,6 +36,9 @@ jobs:
           mkdir -p crates/app/binaries
           cp target/debug/aequi-mcp crates/app/binaries/aequi-mcp-x86_64-unknown-linux-gnu
 
+      - name: Prepare frontend dist for Tauri compile check
+        run: mkdir -p dist
+
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
@@ -184,6 +187,9 @@ jobs:
           cargo build -p aequi-mcp
           mkdir -p crates/app/binaries
           cp target/debug/aequi-mcp crates/app/binaries/aequi-mcp-x86_64-unknown-linux-gnu
+
+      - name: Prepare frontend dist for Tauri compile check
+        run: mkdir -p dist
 
       - name: Build docs
         env:

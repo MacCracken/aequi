@@ -9,15 +9,13 @@ fn invoice_to_typst(invoice: &Invoice, contact: &Contact) -> String {
     typ.push_str("#set text(size: 10pt)\n\n");
 
     // Header
-    typ.push_str(&format!(
-        "#align(right)[#text(size: 24pt, weight: \"bold\")[INVOICE]]\n\n"
-    ));
+    typ.push_str("#align(right)[#text(size: 24pt, weight: \"bold\")[INVOICE]]\n\n");
 
     // Invoice metadata table
     typ.push_str("#grid(\n");
     typ.push_str("  columns: (1fr, auto),\n");
     typ.push_str("  [\n");
-    typ.push_str(&format!("    #text(weight: \"bold\")[Bill To:]\\\n"));
+    typ.push_str("    #text(weight: \"bold\")[Bill To:]\\\n");
     typ.push_str(&format!("    {}\\\n", escape(&contact.name)));
     if let Some(email) = &contact.email {
         typ.push_str(&format!("    {}\\\n", escape(email)));

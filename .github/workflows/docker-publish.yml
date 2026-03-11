@@ -68,4 +68,9 @@ jobs:
       - name: Verify image
         run: |
           docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}
-          docker run --rm ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }} --version || true
+          docker run -d --name aequi-verify -p 8060:8060 ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}
+          sleep 3
+          curl -sf http://localhost:8060/health || echo "health endpoint not available"
+          docker logs aequi-verify
+          docker stop aequi-verify
+          docker rm aequi-verify
