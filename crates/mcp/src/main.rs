@@ -29,7 +29,7 @@ async fn main() -> Result<()> {
             tracing::info!("aequi-mcp server starting on SSE (port {port})");
             aequi_mcp::sse::transport::run_sse_server(db, permissions, port).await?;
         }
-        "stdio" | _ => {
+        _ => {
             tracing::info!("aequi-mcp server starting on stdio");
             aequi_mcp::server::run_stdio_server(db, permissions).await?;
         }
