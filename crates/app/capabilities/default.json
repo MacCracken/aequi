@@ -10,6 +10,12 @@
     "core:window:allow-maximize",
     "dialog:allow-open",
     "fs:read-files",
-    "fs:write-files"
+    "fs:write-files",
+    "shell:allow-spawn",
+    "shell:allow-stdin-write",
+    {
+      "identifier": "shell:allow-execute",
+      "allow": [{ "name": "binaries/aequi-mcp", "sidecar": true }]
+    }
   ]
 }

@@ -37,12 +37,16 @@
 - ✅ Agnoshi translate module (`translate/aequi.rs`) routing to MCP bridge
 - ✅ Release workflow includes bare binary + tax rules in Linux tarball
 
-**Remaining (aequi-side):**
-- Register Aequi MCP agent with daimon on startup (`POST /v1/agents/register`)
-- Periodic dashboard sync to daimon (`POST /v1/dashboard/sync`)
-- Consumer health reporting (`GET /v1/health/consumers` shows aequi status)
-- `GET /v1/discover` handshake on startup to auto-detect hoosh/daimon URLs
-- MCP server spawned as Tauri sidecar process
+**Done (aequi-side):**
+- ✅ Daimon client module (`crates/server/src/daimon.rs`) with reqwest HTTP client
+- ✅ `GET /v1/discover` handshake on startup to auto-detect daimon capabilities
+- ✅ Register Aequi MCP agent with daimon on startup (`POST /v1/agents/register`)
+- ✅ Periodic dashboard sync to daimon (`POST /v1/dashboard/sync`, 30s interval)
+- ✅ Consumer health reporting via existing `GET /health` endpoint
+- ✅ Graceful shutdown signaling for background daimon task
+- ✅ 8 unit tests for daimon client (serialization, deserialization, shutdown)
+
+- ✅ MCP server spawned as Tauri sidecar process (`tauri-plugin-shell`, `externalBin`)
 
 ### Deferred from Phase 8
 - AI-assisted categorization via configured MCP endpoint

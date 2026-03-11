@@ -26,6 +26,9 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "externalBin": [
+      "binaries/aequi-mcp"
+    ],
     "iOS": {
       "minimumSystemVersion": "13.0"
     },

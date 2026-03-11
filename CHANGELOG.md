@@ -38,6 +38,15 @@ All notable changes to this project will be documented in this file.
   - Endpoints: accounts, transactions, receipts, tax, invoices, contacts, payments, rules, reconciliation, reports
   - `GET /health` unauthenticated endpoint for service discovery
   - CORS headers for cross-origin access
+  - **AGNOS Daimon Integration** (`crates/server/src/daimon.rs`)
+    - `DaimonClient` with reqwest HTTP client for AGNOS orchestrator communication
+    - `GET /v1/discover` handshake on startup to detect daimon capabilities
+    - `POST /v1/agents/register` agent registration with capabilities and metadata
+    - `POST /v1/dashboard/sync` periodic heartbeat (30s interval) with agent status
+    - Background tokio task with graceful shutdown via `watch` channel
+    - Registration retry with backoff (5 attempts, 10s delay)
+    - Configurable daimon URL via `AEQUI_DAIMON_URL` env var (default `127.0.0.1:8090`)
+    - 8 unit tests: serialization, deserialization, client creation, shutdown signal
 
 - **MCP Server** (`crates/mcp/`)
   - Stdio JSON-RPC 2.0 transport with `initialize`, `tools/list`, `tools/call`
@@ -46,6 +55,13 @@ All notable changes to this project will be documented in this file.
   - `Permissions` system: `read_only` mode and per-tool `disabled_tools` blocklist
   - SHA-256 audit logging of tool invocations
   - 33 unit tests: registry, permissions, accounts, transactions, receipts, tax, invoices, rules, import, reconciliation, protocol, audit
+
+- **MCP Sidecar** (`crates/app/`)
+  - `aequi-mcp` binary spawned as Tauri sidecar process on desktop startup
+  - `tauri-plugin-shell` for process management with `externalBin` configuration
+  - Sidecar receives `AEQUI_DB_PATH` env var to share database with main app
+  - Stderr logging forwarded to app tracing system
+  - Graceful lifecycle — sidecar exits when the Tauri app window closes
 
 - **App Crate** — 12 new Tauri commands
   - `get_contacts`, `create_contact`, `get_invoices`, `create_invoice`

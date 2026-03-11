@@ -11,11 +11,60 @@ pub struct AppState {
     pub receipt_tx: mpsc::Sender<PathBuf>,
 }
 
+/// Spawn the MCP server as a sidecar process (desktop only).
+///
+/// The sidecar binary (`aequi-mcp`) communicates via stdio JSON-RPC 2.0.
+/// We pass `AEQUI_DB_PATH` so it shares the same database as the Tauri app.
+#[cfg(desktop)]
+fn spawn_mcp_sidecar(app: &tauri::App, db_path: &std::path::Path) {
+    use tauri_plugin_shell::ShellExt;
+
+    let sidecar = app
+        .shell()
+        .sidecar("binaries/aequi-mcp")
+        .expect("failed to create aequi-mcp sidecar command")
+        .env("AEQUI_DB_PATH", db_path.to_string_lossy().to_string());
+
+    match sidecar.spawn() {
+        Ok((mut _rx, _child)) => {
+            tracing::info!("aequi-mcp sidecar spawned (pid managed by Tauri)");
+            // Log stderr output from the sidecar for debugging
+            tauri::async_runtime::spawn(async move {
+                use tauri_plugin_shell::process::CommandEvent;
+                while let Some(event) = _rx.recv().await {
+                    match event {
+                        CommandEvent::Stderr(line) => {
+                            let msg = String::from_utf8_lossy(&line);
+                            tracing::debug!(target: "aequi-mcp", "{}", msg.trim());
+                        }
+                        CommandEvent::Terminated(payload) => {
+                            tracing::info!(
+                                "aequi-mcp sidecar exited (code={:?}, signal={:?})",
+                                payload.code,
+                                payload.signal,
+                            );
+                            break;
+                        }
+                        CommandEvent::Error(err) => {
+                            tracing::warn!("aequi-mcp sidecar error: {err}");
+                        }
+                        _ => {}
+                    }
+                }
+            });
+        }
+        Err(e) => {
+            tracing::warn!("failed to spawn aequi-mcp sidecar: {e}");
+        }
+    }
+}
+
 /// Build the shared Tauri app (used by both desktop main.rs and mobile lib entry).
 pub fn build_app() -> tauri::Builder<tauri::Wry> {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
+        .plugin(tauri_plugin_shell::init())
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_dir).expect("Failed to create data directory");
@@ -93,6 +142,10 @@ pub fn build_app() -> tauri::Builder<tauri::Wry> {
                 std::mem::forget(watcher);
                 tracing::info!("Watching intake folder: {}", intake_dir.display());
             }
+
+            // Spawn MCP sidecar (desktop only)
+            #[cfg(desktop)]
+            spawn_mcp_sidecar(app, &db_path);
 
             let state = AppState {
                 db,

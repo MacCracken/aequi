@@ -24,3 +24,5 @@ chrono.workspace = true
 rust_decimal.workspace = true
 anyhow.workspace = true
 sqlx.workspace = true
+reqwest.workspace = true
+uuid.workspace = true

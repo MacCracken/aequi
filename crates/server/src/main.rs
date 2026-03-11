@@ -2,8 +2,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Result;
+use tokio::sync::watch;
 use tracing_subscriber::EnvFilter;
 
+mod daimon;
 mod error;
 mod routes;
 mod state;
@@ -30,11 +32,21 @@ async fn main() -> Result<()> {
 
     let state = Arc::new(ServerState { db, api_key });
 
+    // Shutdown signal for background tasks
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+
+    // Spawn daimon integration (non-blocking — server starts regardless)
+    let daimon_handle = daimon::spawn_daimon_task(Arc::clone(&state), shutdown_rx);
+
     let app = routes::router(state);
 
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}")).await?;
     tracing::info!("aequi-server listening on port {port}");
     axum::serve(listener, app).await?;
+
+    // Server stopped — shut down background tasks
+    let _ = shutdown_tx.send(true);
+    let _ = daimon_handle.await;
 
     Ok(())
 }

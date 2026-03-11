@@ -7,3 +7,4 @@ dist/
 *.log
 .env
 .env.local
+crates/app/binaries/
