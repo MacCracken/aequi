@@ -18,8 +18,13 @@ All notable changes to this project will be documented in this file.
   - QIF (Quicken Interchange Format) export with account type mapping
   - 6 unit tests
 
-- **Invoice PDF** (`pdf/src/invoice_pdf.rs`)
-  - Plain text invoice rendering (Typst PDF deferred)
+- **Invoice PDF** (`pdf/src/`)
+  - Plain text invoice rendering (`invoice_pdf.rs`)
+  - **Typst PDF generation** (`typst_pdf.rs`)
+    - Professional invoice PDF rendering via Typst typesetting engine
+    - Full invoice layout: header, bill-to, line items table, subtotal/discount/tax/total
+    - Typst special character escaping (prevents math mode injection from $ in currency)
+    - 8 tests: markup generation, discount/tax variants, PDF byte output validation
 
 - **Storage Crate** — Phase 5-8 additions
   - New tables: `contacts`, `invoices`, `invoice_lines`, `invoice_tax_lines`, `payments`, `audit_log`
@@ -31,6 +36,21 @@ All notable changes to this project will be documented in this file.
   - Audit log: `insert_audit_log`, `get_audit_log`
   - Settings: `get_setting`, `set_setting`
   - `serde::Serialize` added to all record types for API serialization
+  - **Schema Migration System** (`storage/src/migrate.rs`)
+    - Versioned SQL migration files with up/down support
+    - `schema_versions` table tracks applied migrations with checksums
+    - Automatic bootstrap for pre-existing databases (detects existing tables)
+    - Checksum verification prevents running modified migrations
+    - Statement splitter handles comments, string literals, multi-statement files
+    - `run_migrations()`, `rollback_last()`, `get_schema_versions()`, `current_version()`
+    - 14 unit tests: apply, idempotent, rollback, reapply, bootstrap, statement splitting
+  - **Backup / Restore** (`storage/src/backup.rs`)
+    - Compressed `.tar.gz` archive containing SQLite snapshot + attachments
+    - `VACUUM INTO` for consistent point-in-time database snapshot (safe with WAL mode)
+    - `manifest.json` with version, schema version, timestamps, file counts
+    - Path traversal protection on restore (rejects absolute paths and `..`)
+    - `create_backup()`, `restore_backup()` with `BackupManifest` metadata
+    - 7 unit tests: create, roundtrip, empty attachments, invalid archive, file counting
 
 - **HTTP API Server** (`crates/server/`)
   - Axum REST server on port 8060 with domain-organized routes
@@ -54,7 +74,13 @@ All notable changes to this project will be documented in this file.
   - 24 tools across 8 domains (accounts, transactions, receipts, tax, invoices, rules, import, reconciliation)
   - `Permissions` system: `read_only` mode and per-tool `disabled_tools` blocklist
   - SHA-256 audit logging of tool invocations
-  - 33 unit tests: registry, permissions, accounts, transactions, receipts, tax, invoices, rules, import, reconciliation, protocol, audit
+  - **SSE Transport** (`sse` feature flag)
+    - HTTP+SSE transport per MCP specification 2024-11-05
+    - `GET /sse` opens event stream with session ID; `POST /message?sessionId=` sends JSON-RPC requests
+    - Multi-client support via per-session channels
+    - Configurable via `AEQUI_MCP_TRANSPORT=sse` and `AEQUI_MCP_PORT` (default 8061)
+    - 7 tests: event stream, session management, tool list, tool call, unknown method, unknown session, cleanup
+  - 40 unit tests total: registry, permissions, accounts, transactions, receipts, tax, invoices, rules, import, reconciliation, protocol, audit, SSE transport
 
 - **MCP Sidecar** (`crates/app/`)
   - `aequi-mcp` binary spawned as Tauri sidecar process on desktop startup
@@ -67,8 +93,9 @@ All notable changes to this project will be documented in this file.
   - `get_contacts`, `create_contact`, `get_invoices`, `create_invoice`
   - `get_invoice_aging`, `record_invoice_payment`, `get_1099_summary`
   - `export_beancount`, `export_qif`
-  - `get_setting`, `set_setting`, `get_audit_log`
-  - Total: 22 Tauri commands
+  - `get_setting`, `set_setting`, `get_audit_log`, `get_schema_versions`
+  - `create_backup`, `restore_backup`
+  - Total: 25 Tauri commands
 
 - **Frontend** — 3 new pages
   - Invoices page with status badges and All/Aging tab toggle
@@ -77,8 +104,19 @@ All notable changes to this project will be documented in this file.
   - Navigation: 7 links (Accounts, Transactions, Receipts, Tax, Invoices, Contacts, Settings)
 
 - **Containerization**
-  - Multi-stage Dockerfile (Rust builder → minimal Debian runtime)
+  - Multi-stage Dockerfile (Rust 1.85 builder → minimal Debian runtime)
   - `.dockerignore` for target/, node_modules/, dist/
+  - SQLite `?mode=rwc` fix for database creation in fresh containers
+  - **GHCR Publish Workflow** (`docker-publish.yml`)
+    - Automated container build and push to `ghcr.io` on release tags
+    - Docker Buildx with GHA layer caching for fast rebuilds
+    - Version-tagged and `latest` image tags via metadata action
+    - Manual workflow dispatch for ad-hoc publishes
+
+### Fixed
+- SQLite connection string now uses `?mode=rwc` to create database file if missing (fixes Docker startup)
+- Unused `formatCents` import in InvoicesPage.tsx (fixes TypeScript CI check)
+- CI workflows now build `aequi-mcp` sidecar before workspace build/clippy/docs steps
 
 - **Documentation**
   - ADR-009: Invoice Engine with Contact Model and Lifecycle State Machine

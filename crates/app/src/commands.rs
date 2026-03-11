@@ -854,3 +854,50 @@ pub async fn get_audit_log(
             message: e.to_string(),
         })
 }
+
+#[tauri::command]
+pub async fn create_backup(
+    state: State<'_, Arc<Mutex<AppState>>>,
+    output_path: String,
+) -> Result<aequi_storage::backup::BackupManifest, CommandError> {
+    let state = state.lock().await;
+    let output = std::path::PathBuf::from(&output_path);
+    aequi_storage::backup::create_backup(
+        &state.db,
+        &state.db_path,
+        &state.attachments_dir,
+        &output,
+        env!("CARGO_PKG_VERSION"),
+    )
+    .await
+    .map_err(|e| CommandError {
+        message: e.to_string(),
+    })
+}
+
+#[tauri::command]
+pub async fn restore_backup(
+    archive_path: String,
+    target_dir: String,
+) -> Result<String, CommandError> {
+    let result = aequi_storage::backup::restore_backup(
+        std::path::Path::new(&archive_path),
+        std::path::Path::new(&target_dir),
+    )
+    .map_err(|e| CommandError {
+        message: e.to_string(),
+    })?;
+    Ok(result.db_path.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+pub async fn get_schema_versions(
+    state: State<'_, Arc<Mutex<AppState>>>,
+) -> Result<Vec<aequi_storage::migrate::SchemaVersion>, CommandError> {
+    let state = state.lock().await;
+    aequi_storage::migrate::get_schema_versions(&state.db)
+        .await
+        .map_err(|e| CommandError {
+            message: e.to_string(),
+        })
+}

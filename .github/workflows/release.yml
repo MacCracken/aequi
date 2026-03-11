@@ -74,6 +74,14 @@ jobs:
       - name: Install Tauri CLI
         run: cargo install tauri-cli --locked
 
+      - name: Build MCP sidecar binary
+        run: |
+          cargo build -p aequi-mcp --release --target ${{ matrix.target }}
+          mkdir -p crates/app/binaries
+          cp target/${{ matrix.target }}/release/aequi-mcp$([ "${{ runner.os }}" = "Windows" ] && echo ".exe" || echo "") \
+            crates/app/binaries/aequi-mcp-${{ matrix.target }}$([ "${{ runner.os }}" = "Windows" ] && echo ".exe" || echo "")
+        shell: bash
+
       - name: Build Tauri app
         run: cargo tauri build
 
@@ -84,6 +92,8 @@ jobs:
           RELEASE_DIR="aequi-${VERSION}-${{ matrix.arch }}"
           mkdir -p "${RELEASE_DIR}"
           cp target/release/aequi "${RELEASE_DIR}/" 2>/dev/null || true
+          cp target/release/aequi-mcp "${RELEASE_DIR}/" 2>/dev/null || true
+          cp target/release/aequi-server "${RELEASE_DIR}/" 2>/dev/null || true
           cp target/release/bundle/deb/*.deb "${RELEASE_DIR}/" 2>/dev/null || true
           cp target/release/bundle/appimage/*.AppImage "${RELEASE_DIR}/" 2>/dev/null || true
           cp -r rules/ "${RELEASE_DIR}/rules/" 2>/dev/null || true

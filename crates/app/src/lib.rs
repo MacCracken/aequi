@@ -7,6 +7,7 @@ pub mod commands;
 
 pub struct AppState {
     pub db: aequi_storage::DbPool,
+    pub db_path: PathBuf,
     pub attachments_dir: PathBuf,
     pub receipt_tx: mpsc::Sender<PathBuf>,
 }
@@ -149,6 +150,7 @@ pub fn build_app() -> tauri::Builder<tauri::Wry> {
 
             let state = AppState {
                 db,
+                db_path,
                 attachments_dir,
                 receipt_tx,
             };
@@ -179,6 +181,9 @@ pub fn build_app() -> tauri::Builder<tauri::Wry> {
             commands::get_setting,
             commands::set_setting,
             commands::get_audit_log,
+            commands::get_schema_versions,
+            commands::create_backup,
+            commands::restore_backup,
         ])
 }
 

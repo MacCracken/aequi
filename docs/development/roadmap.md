@@ -15,18 +15,18 @@
 
 ## Remaining Work
 
-### Deferred from Phase 5
-- Typst PDF generation (currently plain text rendering)
+### ~~Deferred from Phase 5~~ (Partial)
+- ✅ Typst PDF generation (`crates/pdf/src/typst_pdf.rs`, 8 tests)
 - lettre SMTP delivery + Resend API option
 - Mobile push notifications for invoice due dates
 
 ### Deferred from Phase 6
-- GHCR publish workflow (GitHub Actions)
+- ✅ GHCR publish workflow (`docker-publish.yml`)
 - Structured JSON logging via `tracing-bunyan-formatter`
 - OAuth/OIDC authentication (currently API key only)
 
-### Deferred from Phase 7
-- SSE/streaming transport option
+### ~~Deferred from Phase 7~~ (Done)
+- ✅ SSE/streaming transport option (`sse` feature flag, Axum HTTP+SSE, port 8061)
 
 ### Phase 7.5 — AGNOS Marketplace Integration
 
@@ -52,10 +52,10 @@
 - AI-assisted categorization via configured MCP endpoint
 - Community tax rule update workflow (PR-based, annual)
 - Import profile sharing (export/import TOML)
-- Backup / restore (compressed SQLite snapshot + attachments)
+- ✅ Backup / restore (`storage/src/backup.rs`, 7 tests)
 - Auto-updater via Tauri updater
 - Keyboard shortcuts + accessibility pass (WCAG 2.1 AA)
-- Schema migration system (versioned SQL files, up/down)
+- ✅ Schema migration system (`storage/src/migrate.rs`, 14 tests)
 
 ---
 

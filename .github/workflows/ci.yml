@@ -30,6 +30,12 @@ jobs:
       - name: Format check
         run: cargo fmt --all -- --check
 
+      - name: Prepare sidecar binary
+        run: |
+          cargo build -p aequi-mcp
+          mkdir -p crates/app/binaries
+          cp target/debug/aequi-mcp crates/app/binaries/aequi-mcp-x86_64-unknown-linux-gnu
+
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
@@ -143,6 +149,12 @@ jobs:
       - name: Build frontend
         run: npm run build
 
+      - name: Build MCP sidecar binary
+        run: |
+          cargo build -p aequi-mcp
+          mkdir -p crates/app/binaries
+          cp target/debug/aequi-mcp crates/app/binaries/aequi-mcp-x86_64-unknown-linux-gnu
+
       - name: Build Rust workspace
         run: cargo build --workspace
 
@@ -166,6 +178,12 @@ jobs:
               exit 1
             fi
           done
+
+      - name: Prepare sidecar for doc build
+        run: |
+          cargo build -p aequi-mcp
+          mkdir -p crates/app/binaries
+          cp target/debug/aequi-mcp crates/app/binaries/aequi-mcp-x86_64-unknown-linux-gnu
 
       - name: Build docs
         env:

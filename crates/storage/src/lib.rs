@@ -1,4 +1,6 @@
+pub mod backup;
 pub mod db;
+pub mod migrate;
 
 pub use db::{
     build_ledger_snapshot, check_receipt_duplicate, complete_reconciliation_session, create_db,

@@ -6,7 +6,7 @@ mod tests {
     use serde_json::json;
 
     use crate::permissions::Permissions;
-    use crate::protocol::{JsonRpcRequest, JsonRpcResponse, ToolResult};
+    use crate::protocol::ToolResult;
     use crate::tools::ToolRegistry;
 
     async fn test_db() -> aequi_storage::DbPool {

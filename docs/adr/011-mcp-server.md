@@ -14,9 +14,13 @@ Phase 7 implements a Model Context Protocol (MCP) server so AI agents (Claude De
 
 ## Decision
 
-### Stdio transport
+### Dual transport: Stdio + HTTP/SSE
 
-The MCP server reads newline-delimited JSON-RPC 2.0 from stdin and writes responses to stdout. This matches the MCP specification and works with Claude Desktop's sidecar model. The server handles three methods: `initialize`, `tools/list`, and `tools/call`.
+**Stdio** (default): The MCP server reads newline-delimited JSON-RPC 2.0 from stdin and writes responses to stdout. This matches the MCP specification and works with Claude Desktop's sidecar model.
+
+**HTTP+SSE** (`sse` feature flag): An Axum-based transport for multi-client access. Clients open `GET /sse` to receive an event stream with a session ID, then send JSON-RPC requests via `POST /message?sessionId=<id>`. Responses arrive both as HTTP responses and as SSE `message` events. Selected via `AEQUI_MCP_TRANSPORT=sse` env var, default port 8061.
+
+Both transports handle three methods: `initialize`, `tools/list`, and `tools/call`.
 
 ### Tool registry pattern
 
@@ -49,8 +53,7 @@ The audit log is viewable in the Settings page.
   - Stdio transport requires no network configuration
 
 - **Cons:**
-  - Stdio transport means only one client at a time
-  - No streaming/SSE support in v1
+  - Stdio transport limited to one client at a time (SSE transport supports multiple)
   - Input hashing means audit log can't replay exact parameters
 
 ## References

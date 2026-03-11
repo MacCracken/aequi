@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { getInvoices, getInvoiceAging, type InvoiceRecord } from "../lib/api";
-import { formatCents, formatDate } from "../lib/format";
+import { formatDate } from "../lib/format";
 
 function statusBadge(status: string) {
   const colors: Record<string, string> = {
