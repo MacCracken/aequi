@@ -523,11 +523,8 @@ fn json_rpc_success_response() {
 
 #[test]
 fn json_rpc_error_response() {
-    let resp = crate::protocol::JsonRpcResponse::error(
-        Some(serde_json::json!(1)),
-        -32600,
-        "bad".into(),
-    );
+    let resp =
+        crate::protocol::JsonRpcResponse::error(Some(serde_json::json!(1)), -32600, "bad".into());
     assert!(resp.result.is_none());
     assert_eq!(resp.error.as_ref().unwrap().code, -32600);
 }
