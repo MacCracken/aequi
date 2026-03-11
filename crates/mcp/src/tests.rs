@@ -10,7 +10,9 @@ mod tests {
     use crate::tools::ToolRegistry;
 
     async fn test_db() -> aequi_storage::DbPool {
-        let db = aequi_storage::create_db(&PathBuf::from(":memory:")).await.unwrap();
+        let db = aequi_storage::create_db(&PathBuf::from(":memory:"))
+            .await
+            .unwrap();
         aequi_storage::seed_default_accounts(&db).await.unwrap();
         db
     }
@@ -70,7 +72,11 @@ mod tests {
     fn all_tools_have_descriptions() {
         let registry = ToolRegistry::new();
         for def in registry.list_definitions() {
-            assert!(!def.description.is_empty(), "{} has empty description", def.name);
+            assert!(
+                !def.description.is_empty(),
+                "{} has empty description",
+                def.name
+            );
         }
     }
 
@@ -213,7 +219,12 @@ mod tests {
         assert!(result.content[0].text.contains("created"));
 
         let list = registry
-            .call("aequi_get_transactions", json!({ "limit": 10 }), &db, &perms)
+            .call(
+                "aequi_get_transactions",
+                json!({ "limit": 10 }),
+                &db,
+                &perms,
+            )
             .await;
         assert!(list.is_error.is_none());
         assert!(list.content[0].text.contains("Client payment"));
@@ -514,8 +525,11 @@ mod tests {
 
     #[test]
     fn json_rpc_error_response() {
-        let resp =
-            crate::protocol::JsonRpcResponse::error(Some(serde_json::json!(1)), -32600, "bad".into());
+        let resp = crate::protocol::JsonRpcResponse::error(
+            Some(serde_json::json!(1)),
+            -32600,
+            "bad".into(),
+        );
         assert!(resp.result.is_none());
         assert_eq!(resp.error.as_ref().unwrap().code, -32600);
     }

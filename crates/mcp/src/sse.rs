@@ -52,11 +52,7 @@ pub mod transport {
         let session_id = uuid::Uuid::new_v4().to_string();
         let (tx, rx) = mpsc::channel::<JsonRpcResponse>(64);
 
-        state
-            .sessions
-            .write()
-            .await
-            .insert(session_id.clone(), tx);
+        state.sessions.write().await.insert(session_id.clone(), tx);
 
         let endpoint_url = format!("/message?sessionId={session_id}");
 
@@ -260,7 +256,12 @@ pub mod transport {
                 .unwrap();
 
             assert_eq!(response.status(), StatusCode::OK);
-            let ct = response.headers().get("content-type").unwrap().to_str().unwrap();
+            let ct = response
+                .headers()
+                .get("content-type")
+                .unwrap()
+                .to_str()
+                .unwrap();
             assert!(ct.contains("text/event-stream"));
         }
 
@@ -275,7 +276,11 @@ pub mod transport {
             });
 
             let response = app
-                .oneshot(req("POST", "/message?sessionId=nonexistent", json_body(&body)))
+                .oneshot(req(
+                    "POST",
+                    "/message?sessionId=nonexistent",
+                    json_body(&body),
+                ))
                 .await
                 .unwrap();
 
@@ -383,11 +388,7 @@ pub mod transport {
             let state = test_state().await;
             let session_id = "cleanup-test".to_string();
             let (tx, rx) = mpsc::channel(64);
-            state
-                .sessions
-                .write()
-                .await
-                .insert(session_id.clone(), tx);
+            state.sessions.write().await.insert(session_id.clone(), tx);
 
             assert_eq!(state.sessions.read().await.len(), 1);
 

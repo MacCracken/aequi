@@ -17,9 +17,7 @@ fn invoice_to_typst(invoice: &Invoice, contact: &Contact) -> String {
     typ.push_str("#grid(\n");
     typ.push_str("  columns: (1fr, auto),\n");
     typ.push_str("  [\n");
-    typ.push_str(&format!(
-        "    #text(weight: \"bold\")[Bill To:]\\\n"
-    ));
+    typ.push_str(&format!("    #text(weight: \"bold\")[Bill To:]\\\n"));
     typ.push_str(&format!("    {}\\\n", escape(&contact.name)));
     if let Some(email) = &contact.email {
         typ.push_str(&format!("    {}\\\n", escape(email)));
@@ -153,7 +151,9 @@ pub fn render_invoice_pdf(invoice: &Invoice, contact: &Contact) -> Result<Vec<u8
 
     let result = engine.compile::<typst::layout::PagedDocument>();
 
-    let doc = result.output.map_err(|e| format!("Typst compile error: {e}"))?;
+    let doc = result
+        .output
+        .map_err(|e| format!("Typst compile error: {e}"))?;
 
     let options = typst_pdf::PdfOptions::default();
     typst_pdf::pdf(&doc, &options).map_err(|e| format!("PDF generation error: {e:?}"))
@@ -281,7 +281,9 @@ mod tests {
             id: None,
             invoice_number: "INV-002".to_string(),
             contact_id: ContactId(2),
-            status: InvoiceStatus::Sent { sent_at: Utc::now() },
+            status: InvoiceStatus::Sent {
+                sent_at: Utc::now(),
+            },
             issue_date: NaiveDate::from_ymd_opt(2026, 4, 1).unwrap(),
             due_date: NaiveDate::from_ymd_opt(2026, 4, 30).unwrap(),
             lines: vec![InvoiceLine {

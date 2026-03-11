@@ -37,34 +37,25 @@ pub async fn create_backup(
     app_version: &str,
 ) -> Result<BackupManifest, BackupError> {
     // Create a clean snapshot of the database
-    let temp_dir = output_path
-        .parent()
-        .unwrap_or(Path::new("."));
+    let temp_dir = output_path.parent().unwrap_or(Path::new("."));
     let snapshot_path = temp_dir.join(".aequi-backup-snapshot.db");
 
     // Clean up any previous failed snapshot
     let _ = fs::remove_file(&snapshot_path);
 
     // VACUUM INTO creates an atomic, consistent copy
-    sqlx::query(&format!(
-        "VACUUM INTO '{}'",
-        snapshot_path.display()
-    ))
-    .execute(pool)
-    .await
-    .map_err(|e| BackupError::Database(e.to_string()))?;
+    sqlx::query(&format!("VACUUM INTO '{}'", snapshot_path.display()))
+        .execute(pool)
+        .await
+        .map_err(|e| BackupError::Database(e.to_string()))?;
 
-    let db_size = fs::metadata(&snapshot_path)
-        .map(|m| m.len())
-        .unwrap_or(0);
+    let db_size = fs::metadata(&snapshot_path).map(|m| m.len()).unwrap_or(0);
 
     // Count attachments
     let attachment_count = count_files(attachments_dir);
 
     // Get schema version
-    let schema_version = crate::migrate::current_version(pool)
-        .await
-        .unwrap_or(0);
+    let schema_version = crate::migrate::current_version(pool).await.unwrap_or(0);
 
     let manifest = BackupManifest {
         version: app_version.to_string(),
@@ -138,8 +129,7 @@ pub fn restore_backup(
         .entries()
         .map_err(|e| BackupError::Io(format!("Failed to read archive: {e}")))?
     {
-        let mut entry =
-            entry.map_err(|e| BackupError::Io(format!("Failed to read entry: {e}")))?;
+        let mut entry = entry.map_err(|e| BackupError::Io(format!("Failed to read entry: {e}")))?;
 
         let path = entry
             .path()
@@ -147,7 +137,11 @@ pub fn restore_backup(
             .to_path_buf();
 
         // Security: reject absolute paths and path traversal
-        if path.is_absolute() || path.components().any(|c| c == std::path::Component::ParentDir) {
+        if path.is_absolute()
+            || path
+                .components()
+                .any(|c| c == std::path::Component::ParentDir)
+        {
             return Err(BackupError::InvalidArchive(
                 "Archive contains path traversal".to_string(),
             ));
@@ -167,15 +161,14 @@ pub fn restore_backup(
                 fs::create_dir_all(parent)
                     .map_err(|e| BackupError::Io(format!("Failed to create dir: {e}")))?;
             }
-            entry
-                .unpack(&target)
-                .map_err(|e| BackupError::Io(format!("Failed to extract {}: {e}", path.display())))?;
+            entry.unpack(&target).map_err(|e| {
+                BackupError::Io(format!("Failed to extract {}: {e}", path.display()))
+            })?;
         }
     }
 
-    let manifest = manifest.ok_or_else(|| {
-        BackupError::InvalidArchive("Archive missing manifest.json".to_string())
-    })?;
+    let manifest = manifest
+        .ok_or_else(|| BackupError::InvalidArchive("Archive missing manifest.json".to_string()))?;
 
     Ok(RestoreResult {
         db_path: target_dir.join("ledger.db"),

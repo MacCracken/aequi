@@ -63,33 +63,29 @@ async fn ensure_version_table(pool: &DbPool) -> Result<(), sqlx::Error> {
 /// Detect pre-existing databases that were created before the migration system.
 /// If core tables exist but schema_versions is empty, mark V001 as applied.
 async fn bootstrap_existing_db(pool: &DbPool) -> Result<(), sqlx::Error> {
-    let row: (i64,) =
-        sqlx::query_as("SELECT COUNT(*) FROM schema_versions")
-            .fetch_one(pool)
-            .await?;
+    let row: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM schema_versions")
+        .fetch_one(pool)
+        .await?;
     if row.0 > 0 {
         return Ok(()); // Already has migration history
     }
 
     // Check if tables from V001 already exist
-    let row: (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='accounts'",
-    )
-    .fetch_one(pool)
-    .await?;
+    let row: (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='accounts'")
+            .fetch_one(pool)
+            .await?;
 
     if row.0 == 1 {
         // Pre-existing database — record V001 as already applied
         let migrations = all_migrations();
         let v001 = &migrations[0];
-        sqlx::query(
-            "INSERT INTO schema_versions (version, name, checksum) VALUES (?, ?, ?)",
-        )
-        .bind(v001.version)
-        .bind(v001.name)
-        .bind(checksum(v001.up_sql))
-        .execute(pool)
-        .await?;
+        sqlx::query("INSERT INTO schema_versions (version, name, checksum) VALUES (?, ?, ?)")
+            .bind(v001.version)
+            .bind(v001.name)
+            .bind(checksum(v001.up_sql))
+            .execute(pool)
+            .await?;
     }
 
     Ok(())
@@ -103,10 +99,11 @@ pub async fn run_migrations(pool: &DbPool) -> Result<usize, sqlx::Error> {
     ensure_version_table(pool).await?;
     bootstrap_existing_db(pool).await?;
 
-    let applied: Vec<SchemaVersion> =
-        sqlx::query_as("SELECT version, name, applied_at, checksum FROM schema_versions ORDER BY version")
-            .fetch_all(pool)
-            .await?;
+    let applied: Vec<SchemaVersion> = sqlx::query_as(
+        "SELECT version, name, applied_at, checksum FROM schema_versions ORDER BY version",
+    )
+    .fetch_all(pool)
+    .await?;
 
     let applied_versions: std::collections::HashSet<i64> =
         applied.iter().map(|v| v.version).collect();
@@ -139,14 +136,12 @@ pub async fn run_migrations(pool: &DbPool) -> Result<usize, sqlx::Error> {
         }
 
         // Record the migration
-        sqlx::query(
-            "INSERT INTO schema_versions (version, name, checksum) VALUES (?, ?, ?)",
-        )
-        .bind(migration.version)
-        .bind(migration.name)
-        .bind(checksum(migration.up_sql))
-        .execute(pool)
-        .await?;
+        sqlx::query("INSERT INTO schema_versions (version, name, checksum) VALUES (?, ?, ?)")
+            .bind(migration.version)
+            .bind(migration.name)
+            .bind(checksum(migration.up_sql))
+            .execute(pool)
+            .await?;
 
         count += 1;
     }
@@ -198,18 +193,19 @@ pub async fn rollback_last(pool: &DbPool) -> Result<Option<i64>, sqlx::Error> {
 /// Get all applied schema versions.
 pub async fn get_schema_versions(pool: &DbPool) -> Result<Vec<SchemaVersion>, sqlx::Error> {
     ensure_version_table(pool).await?;
-    sqlx::query_as("SELECT version, name, applied_at, checksum FROM schema_versions ORDER BY version")
-        .fetch_all(pool)
-        .await
+    sqlx::query_as(
+        "SELECT version, name, applied_at, checksum FROM schema_versions ORDER BY version",
+    )
+    .fetch_all(pool)
+    .await
 }
 
 /// Get the current schema version number, or 0 if no migrations applied.
 pub async fn current_version(pool: &DbPool) -> Result<i64, sqlx::Error> {
     ensure_version_table(pool).await?;
-    let row: Option<(i64,)> =
-        sqlx::query_as("SELECT MAX(version) FROM schema_versions")
-            .fetch_optional(pool)
-            .await?;
+    let row: Option<(i64,)> = sqlx::query_as("SELECT MAX(version) FROM schema_versions")
+        .fetch_optional(pool)
+        .await?;
     Ok(row.map(|r| r.0).unwrap_or(0))
 }
 
@@ -294,10 +290,12 @@ mod tests {
         assert_eq!(count, 1, "Should apply 1 migration on fresh db");
 
         // Verify tables exist
-        let row: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='accounts'")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+        let row: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='accounts'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
         assert_eq!(row.0, 1);
     }
 
@@ -333,10 +331,12 @@ mod tests {
         assert_eq!(rolled, Some(1));
 
         // accounts table should be gone
-        let row: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='accounts'")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+        let row: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='accounts'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
         assert_eq!(row.0, 0);
 
         // Version should be 0
@@ -397,7 +397,11 @@ mod tests {
         assert!(names.contains(&"audit_log"));
         assert!(names.contains(&"tax_periods"));
         // 19 domain tables + sqlite_sequence (from AUTOINCREMENT)
-        assert_eq!(names.len(), 20, "Should have 20 tables (19 domain + sqlite_sequence)");
+        assert_eq!(
+            names.len(),
+            20,
+            "Should have 20 tables (19 domain + sqlite_sequence)"
+        );
     }
 
     #[test]

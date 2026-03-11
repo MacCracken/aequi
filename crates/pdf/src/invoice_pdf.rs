@@ -74,7 +74,6 @@ mod tests {
     use chrono::NaiveDate;
     use rust_decimal::Decimal;
 
-
     #[test]
     fn render_basic_invoice() {
         let contact = Contact::new("Acme Corp", ContactType::Client);

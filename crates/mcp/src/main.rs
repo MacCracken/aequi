@@ -17,8 +17,7 @@ async fn main() -> Result<()> {
 
     let permissions = aequi_mcp::permissions::Permissions::default();
 
-    let transport = std::env::var("AEQUI_MCP_TRANSPORT")
-        .unwrap_or_else(|_| "stdio".to_string());
+    let transport = std::env::var("AEQUI_MCP_TRANSPORT").unwrap_or_else(|_| "stdio".to_string());
 
     match transport.as_str() {
         #[cfg(feature = "sse")]
