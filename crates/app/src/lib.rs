@@ -66,6 +66,8 @@ pub fn build_app() -> tauri::Builder<tauri::Wry> {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_notification::init())
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_dir).expect("Failed to create data directory");
@@ -176,6 +178,7 @@ pub fn build_app() -> tauri::Builder<tauri::Wry> {
             commands::get_invoice_aging,
             commands::record_invoice_payment,
             commands::get_1099_summary,
+            commands::send_invoice,
             commands::export_beancount,
             commands::export_qif,
             commands::get_setting,
@@ -184,6 +187,8 @@ pub fn build_app() -> tauri::Builder<tauri::Wry> {
             commands::get_schema_versions,
             commands::create_backup,
             commands::restore_backup,
+            commands::check_for_updates,
+            commands::check_overdue_invoices,
         ])
 }
 

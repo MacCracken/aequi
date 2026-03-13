@@ -1,6 +1,8 @@
+pub mod ai_categorize;
 pub mod csv;
 pub mod match_engine;
 pub mod ofx;
+pub mod profile_sharing;
 pub mod rules;
 pub(crate) mod util;
 

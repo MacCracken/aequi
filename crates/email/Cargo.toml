@@ -1,0 +1,21 @@
+[package]
+name = "aequi-email"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+aequi-core = { path = "../core" }
+aequi-pdf = { path = "../pdf" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+reqwest.workspace = true
+tracing.workspace = true
+lettre = { version = "0.11", default-features = false, features = ["tokio1-rustls-tls", "smtp-transport", "builder"] }
+
+[dev-dependencies]
+chrono.workspace = true
+rust_decimal.workspace = true

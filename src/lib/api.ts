@@ -213,6 +213,21 @@ export function get1099Summary(year?: number): Promise<NecSummaryEntry[]> {
   return invoke("get_1099_summary", { year });
 }
 
+export interface SendInvoiceInput {
+  invoice_id: number;
+  subject?: string;
+}
+
+export interface DeliveryResult {
+  recipient: string;
+  invoice_number: string;
+  backend: string;
+}
+
+export function sendInvoice(input: SendInvoiceInput): Promise<DeliveryResult> {
+  return invoke("send_invoice", { input });
+}
+
 // ── Export commands ──────────────────────────────────────────────────────────
 
 export function exportBeancount(): Promise<string> {
@@ -246,4 +261,16 @@ export interface AuditLogRecord {
 
 export function getAuditLog(limit?: number): Promise<AuditLogRecord[]> {
   return invoke("get_audit_log", { limit });
+}
+
+// ── Update commands ────────────────────────────────────────────────────────
+
+export interface UpdateStatus {
+  update_available: boolean;
+  current_version: string;
+  latest_version: string | null;
+}
+
+export function checkForUpdates(): Promise<UpdateStatus> {
+  return invoke("check_for_updates");
 }

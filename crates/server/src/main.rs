@@ -3,10 +3,13 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use tokio::sync::watch;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::EnvFilter;
 
 mod daimon;
 mod error;
+pub(crate) mod oidc;
 mod routes;
 mod state;
 
@@ -14,9 +17,25 @@ use state::ServerState;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
-        .init();
+    let filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
+
+    // AEQUI_LOG_FORMAT=json enables structured Bunyan-compatible JSON logging
+    if std::env::var("AEQUI_LOG_FORMAT").as_deref() == Ok("json") {
+        let formatting_layer =
+            tracing_bunyan_formatter::BunyanFormattingLayer::new("aequi-server".into(), std::io::stdout);
+        let json_fields_layer = tracing_bunyan_formatter::JsonStorageLayer;
+
+        tracing_subscriber::registry()
+            .with(filter)
+            .with(json_fields_layer)
+            .with(formatting_layer)
+            .init();
+    } else {
+        tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .init();
+    }
 
     let db_path = std::env::var("AEQUI_DB_PATH")
         .map(PathBuf::from)
@@ -30,7 +49,32 @@ async fn main() -> Result<()> {
     let db = aequi_storage::create_db(&db_path).await?;
     aequi_storage::seed_default_accounts(&db).await?;
 
-    let state = Arc::new(ServerState { db, api_key });
+    // Load email config from AEQUI_EMAIL_CONFIG env var (JSON string)
+    let email_config: Option<aequi_email::EmailConfig> =
+        std::env::var("AEQUI_EMAIL_CONFIG")
+            .ok()
+            .and_then(|json| serde_json::from_str(&json).ok());
+
+    if email_config.is_some() {
+        tracing::info!("Email delivery configured");
+    }
+
+    // Load OIDC config from AEQUI_OIDC_CONFIG env var (JSON string)
+    let oidc: Option<oidc::JwksCache> = std::env::var("AEQUI_OIDC_CONFIG")
+        .ok()
+        .and_then(|json| serde_json::from_str::<oidc::OidcConfig>(&json).ok())
+        .map(oidc::JwksCache::new);
+
+    if oidc.is_some() {
+        tracing::info!("OIDC authentication configured");
+    }
+
+    let state = Arc::new(ServerState {
+        db,
+        api_key,
+        email_config,
+        oidc,
+    });
 
     // Shutdown signal for background tasks
     let (shutdown_tx, shutdown_rx) = watch::channel(false);

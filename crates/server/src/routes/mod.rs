@@ -26,18 +26,36 @@ async fn auth_middleware(
     request: Request,
     next: Next,
 ) -> Result<Response, ApiError> {
-    if let Some(ref expected_key) = state.api_key {
-        let provided = headers
-            .get("authorization")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.strip_prefix("Bearer "));
+    // If neither API key nor OIDC is configured, allow all requests
+    if state.api_key.is_none() && state.oidc.is_none() {
+        return Ok(next.run(request).await);
+    }
 
-        match provided {
-            Some(key) if key == expected_key => {}
-            _ => return Err(ApiError::Unauthorized),
+    let token = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "));
+
+    let token = match token {
+        Some(t) => t,
+        None => return Err(ApiError::Unauthorized),
+    };
+
+    // Try API key first
+    if let Some(ref expected_key) = state.api_key {
+        if token == expected_key {
+            return Ok(next.run(request).await);
         }
     }
-    Ok(next.run(request).await)
+
+    // Try OIDC JWT validation
+    if let Some(ref oidc) = state.oidc {
+        if oidc.validate_token(token).await.is_ok() {
+            return Ok(next.run(request).await);
+        }
+    }
+
+    Err(ApiError::Unauthorized)
 }
 
 pub fn router(state: Arc<ServerState>) -> Router {

@@ -1,7 +1,8 @@
 use aequi_core::{
-    Account, FiscalYear, Money, Quarter, TransactionLine, UnvalidatedTransaction,
-    ValidatedTransaction,
+    Account, ContactId, Discount, FiscalYear, InvoiceId, InvoiceLine, Money, Quarter, TaxLine,
+    TransactionLine, UnvalidatedTransaction, ValidatedTransaction,
 };
+use rust_decimal::Decimal;
 use aequi_ocr::{MockRecognizer, ReceiptPipeline};
 use chrono::{Datelike, NaiveDate};
 use serde::{Deserialize, Serialize};
@@ -10,6 +11,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tauri::State;
 use tokio::sync::Mutex;
+
+use tauri_plugin_notification::NotificationExt;
+use tauri_plugin_updater::UpdaterExt;
 
 use crate::AppState;
 
@@ -783,6 +787,146 @@ pub async fn get_1099_summary(
     Ok(entries)
 }
 
+// ── Email delivery ──────────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct SendInvoiceInput {
+    pub invoice_id: i64,
+    pub subject: Option<String>,
+}
+
+/// Reconstruct a domain Invoice from storage records.
+fn records_to_invoice(
+    rec: &aequi_storage::InvoiceRecord,
+    lines: &[aequi_storage::InvoiceLineRecord],
+    tax_lines: &[aequi_storage::InvoiceTaxLineRecord],
+) -> aequi_core::Invoice {
+    let discount = match (rec.discount_type.as_deref(), rec.discount_value) {
+        (Some("Percentage"), Some(bps)) => Some(Discount::Percentage(Decimal::new(bps, 2))),
+        (Some("Flat"), Some(cents)) => Some(Discount::Flat(Money::from_cents(cents))),
+        _ => None,
+    };
+
+    aequi_core::Invoice {
+        id: Some(InvoiceId(rec.id)),
+        invoice_number: rec.invoice_number.clone(),
+        contact_id: ContactId(rec.contact_id),
+        status: aequi_core::InvoiceStatus::Draft,
+        issue_date: NaiveDate::parse_from_str(&rec.issue_date, "%Y-%m-%d")
+            .unwrap_or_else(|_| chrono::Utc::now().date_naive()),
+        due_date: NaiveDate::parse_from_str(&rec.due_date, "%Y-%m-%d")
+            .unwrap_or_else(|_| chrono::Utc::now().date_naive()),
+        lines: lines
+            .iter()
+            .map(|l| InvoiceLine {
+                description: l.description.clone(),
+                quantity: Decimal::new(l.quantity_hundredths, 2),
+                unit_rate: Money::from_cents(l.unit_rate_cents),
+                taxable: l.taxable,
+            })
+            .collect(),
+        discount,
+        tax_lines: tax_lines
+            .iter()
+            .map(|t| TaxLine {
+                label: t.label.clone(),
+                rate: Decimal::new(t.rate_bps, 4),
+            })
+            .collect(),
+        notes: rec.notes.clone(),
+        terms: rec.terms.clone(),
+    }
+}
+
+fn record_to_contact(rec: &aequi_storage::ContactRecord) -> aequi_core::Contact {
+    let contact_type = match rec.contact_type.as_str() {
+        "Vendor" => aequi_core::ContactType::Vendor,
+        "Contractor" => aequi_core::ContactType::Contractor,
+        _ => aequi_core::ContactType::Client,
+    };
+
+    aequi_core::Contact {
+        id: Some(ContactId(rec.id)),
+        name: rec.name.clone(),
+        email: rec.email.clone(),
+        phone: rec.phone.clone(),
+        address: rec.address.clone(),
+        contact_type,
+        is_contractor: rec.is_contractor,
+        tax_id: rec.tax_id.clone(),
+        notes: rec.notes.clone(),
+    }
+}
+
+#[tauri::command]
+pub async fn send_invoice(
+    state: State<'_, Arc<Mutex<AppState>>>,
+    input: SendInvoiceInput,
+) -> Result<aequi_email::DeliveryResult, CommandError> {
+    let state = state.lock().await;
+
+    // Load email config from settings
+    let config_json = aequi_storage::get_setting(&state.db, "email_config")
+        .await
+        .map_err(|e| CommandError {
+            message: e.to_string(),
+        })?
+        .ok_or(CommandError {
+            message: "Email not configured — set email_config in Settings".into(),
+        })?;
+
+    let config: aequi_email::EmailConfig =
+        serde_json::from_str(&config_json).map_err(|e| CommandError {
+            message: format!("Invalid email config: {e}"),
+        })?;
+
+    let rec = aequi_storage::get_invoice_by_id(&state.db, input.invoice_id)
+        .await
+        .map_err(|e| CommandError {
+            message: e.to_string(),
+        })?
+        .ok_or(CommandError {
+            message: "Invoice not found".into(),
+        })?;
+
+    let lines = aequi_storage::get_invoice_lines(&state.db, input.invoice_id)
+        .await
+        .map_err(|e| CommandError {
+            message: e.to_string(),
+        })?;
+    let tax_lines = aequi_storage::get_invoice_tax_lines(&state.db, input.invoice_id)
+        .await
+        .map_err(|e| CommandError {
+            message: e.to_string(),
+        })?;
+    let invoice = records_to_invoice(&rec, &lines, &tax_lines);
+
+    let contact_rec = aequi_storage::get_contact_by_id(&state.db, rec.contact_id)
+        .await
+        .map_err(|e| CommandError {
+            message: e.to_string(),
+        })?
+        .ok_or(CommandError {
+            message: "Contact not found".into(),
+        })?;
+    let contact = record_to_contact(&contact_rec);
+
+    let result = aequi_email::send_invoice(&config, &invoice, &contact, input.subject.as_deref())
+        .await
+        .map_err(|e| CommandError {
+            message: e.to_string(),
+        })?;
+
+    // Update invoice status to Sent
+    let sent_data =
+        serde_json::json!({ "sent_at": chrono::Utc::now().to_rfc3339() }).to_string();
+    let _ =
+        aequi_storage::update_invoice_status(&state.db, input.invoice_id, "Sent", Some(&sent_data))
+            .await;
+
+    Ok(result)
+}
+
 // ── Export commands ──────────────────────────────────────────────────────────
 
 #[tauri::command]
@@ -900,4 +1044,87 @@ pub async fn get_schema_versions(
         .map_err(|e| CommandError {
             message: e.to_string(),
         })
+}
+
+// ── Update commands ─────────────────────────────────────────────────────────
+
+#[derive(Debug, Serialize)]
+pub struct UpdateStatus {
+    pub update_available: bool,
+    pub current_version: String,
+    pub latest_version: Option<String>,
+}
+
+#[tauri::command]
+pub async fn check_for_updates(
+    app: tauri::AppHandle,
+) -> Result<UpdateStatus, CommandError> {
+    let current = app.package_info().version.to_string();
+
+    match app.updater().map_err(|e: tauri_plugin_updater::Error| CommandError {
+        message: e.to_string(),
+    })?.check().await {
+        Ok(Some(update)) => Ok(UpdateStatus {
+            update_available: true,
+            current_version: current,
+            latest_version: Some(update.version.clone()),
+        }),
+        Ok(None) => Ok(UpdateStatus {
+            update_available: false,
+            current_version: current,
+            latest_version: None,
+        }),
+        Err(e) => {
+            tracing::warn!("Update check failed: {e}");
+            Ok(UpdateStatus {
+                update_available: false,
+                current_version: current,
+                latest_version: None,
+            })
+        }
+    }
+}
+
+// ── Notification commands ───────────────────────────────────────────────────
+
+#[tauri::command]
+pub async fn check_overdue_invoices(
+    app: tauri::AppHandle,
+    state: State<'_, Arc<Mutex<AppState>>>,
+) -> Result<u32, CommandError> {
+    let state = state.lock().await;
+    let aging = aequi_storage::get_invoice_aging(&state.db)
+        .await
+        .map_err(|e| CommandError {
+            message: e.to_string(),
+        })?;
+
+    let today = chrono::Utc::now().date_naive();
+    let overdue: Vec<_> = aging
+        .iter()
+        .filter(|inv| {
+            NaiveDate::parse_from_str(&inv.due_date, "%Y-%m-%d")
+                .map(|d| d < today)
+                .unwrap_or(false)
+        })
+        .collect();
+
+    let count = overdue.len() as u32;
+
+    if count > 0 {
+        let body = if count == 1 {
+            format!("Invoice {} is overdue", overdue[0].invoice_number)
+        } else {
+            format!("{count} invoices are past due")
+        };
+
+        let _ = app
+            .notification()
+            .builder()
+            .title("Overdue Invoices")
+            .body(&body)
+            .show();
+    }
+
+    Ok(count)
 }

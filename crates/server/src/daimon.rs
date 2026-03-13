@@ -363,6 +363,8 @@ mod tests {
                 .await
                 .unwrap(),
             api_key: None,
+            email_config: None,
+            oidc: None,
         });
 
         let (tx, rx) = watch::channel(false);

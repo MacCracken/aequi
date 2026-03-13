@@ -12,6 +12,7 @@ path = "src/main.rs"
 [dependencies]
 aequi-core = { path = "../core" }
 aequi-storage = { path = "../storage" }
+aequi-email = { path = "../email" }
 axum.workspace = true
 tokio.workspace = true
 serde.workspace = true
@@ -26,3 +27,5 @@ anyhow.workspace = true
 sqlx.workspace = true
 reqwest.workspace = true
 uuid.workspace = true
+tracing-bunyan-formatter = "0.3.10"
+jsonwebtoken = "10.3.0"

@@ -11,6 +11,8 @@ csv = "1.3"
 thiserror = "2.0"
 chrono = { workspace = true }
 serde = { workspace = true }
+serde_json.workspace = true
 rust_decimal = { workspace = true }
 toml = "0.8"
 regex = { workspace = true }
+reqwest.workspace = true
