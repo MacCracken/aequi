@@ -69,11 +69,17 @@ async fn main() -> Result<()> {
         tracing::info!("OIDC authentication configured");
     }
 
+    let stripe_webhook_secret = std::env::var("STRIPE_WEBHOOK_SECRET").ok();
+    if stripe_webhook_secret.is_some() {
+        tracing::info!("Stripe webhook listener configured");
+    }
+
     let state = Arc::new(ServerState {
         db,
         api_key,
         email_config,
         oidc,
+        stripe_webhook_secret,
     });
 
     // Shutdown signal for background tasks

@@ -29,3 +29,5 @@ reqwest.workspace = true
 uuid.workspace = true
 tracing-bunyan-formatter = "0.3.10"
 jsonwebtoken = "10.3.0"
+sha2.workspace = true
+hex = "0.4"

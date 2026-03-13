@@ -5,6 +5,7 @@ mod receipts;
 mod reconciliation;
 mod reports;
 mod rules;
+mod stripe;
 mod tax;
 mod transactions;
 
@@ -73,9 +74,14 @@ pub fn router(state: Arc<ServerState>) -> Router {
             auth_middleware,
         ));
 
+    // Stripe webhook sits outside auth middleware (has its own signature verification)
+    let stripe_api = Router::new()
+        .merge(stripe::routes());
+
     Router::new()
         .merge(health::routes())
         .nest("/api/v1", api)
+        .nest("/api/v1", stripe_api)
         .layer(CorsLayer::permissive())
         .with_state(state)
 }

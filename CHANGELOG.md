@@ -2,6 +2,102 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2026.3.13] - 2026-03-13
+
+### Added
+- **Email Delivery** (`crates/email/`)
+  - New `aequi-email` crate with two backends: lettre SMTP and Resend HTTP API
+  - Invoice PDF attachment with plain-text body
+  - Tagged `EmailConfig` enum (SMTP or Resend) with serde JSON config
+  - `send_invoice` Tauri command (reads config from `email_config` setting)
+  - `POST /api/v1/invoices/{id}/send` server endpoint
+  - Auto-transitions invoice status to Sent after delivery
+  - 5 unit tests
+
+- **Structured JSON Logging**
+  - `tracing-bunyan-formatter` for Bunyan-compatible JSON output
+  - Enable via `AEQUI_LOG_FORMAT=json` env var
+  - Falls back to human-readable format when unset
+
+- **OAuth/OIDC Authentication** (`crates/server/src/oidc.rs`)
+  - JWKS-based JWT validation from any OIDC provider
+  - Auto-discovery via `.well-known/openid-configuration`
+  - Key rotation with automatic JWKS refresh on validation failure
+  - Configurable via `AEQUI_OIDC_CONFIG` env var (JSON with issuer + audience)
+  - Auth middleware accepts both API key and OIDC JWT Bearer tokens
+  - 4 unit tests
+
+- **Auto-Updater**
+  - `tauri-plugin-updater` with GitHub Releases endpoint
+  - `check_for_updates` Tauri command returning version info
+  - Updater config in `tauri.conf.json`
+
+- **Keyboard Shortcuts + Accessibility**
+  - `Ctrl+1`–`Ctrl+7` navigation to all pages
+  - `Ctrl+/` toggles keyboard shortcut help overlay
+  - Skip-to-content link for keyboard/screen reader users
+  - ARIA landmarks: `role="banner"`, `role="main"`, `aria-label` on nav regions
+  - `aria-hidden="true"` on decorative SVG icons
+  - `focus-visible` outline ring (2px primary color) on all interactive elements
+  - 44px minimum touch target on mobile nav (WCAG 2.1 AA)
+  - `prefers-reduced-motion` media query disables all animations
+  - `prefers-contrast: more` media query for high-contrast mode
+
+- **AI-Assisted Categorization** (`crates/import/src/ai_categorize.rs`)
+  - `AiCategorizationConfig` with endpoint URL, API key, confidence threshold
+  - `suggest_category()` calls external MCP endpoint with transaction details
+  - `suggest_categories_batch()` for bulk categorization
+  - Filters suggestions below configurable confidence threshold
+  - 4 unit tests
+
+- **Community Tax Rule Workflow** (`crates/core/src/tax/community.rs`)
+  - `CommunityTaxRules` package format with `TaxRulesMeta` (country, jurisdiction, year, author, version)
+  - `validate_submission()` checks metadata completeness, year consistency, jurisdiction validity, and rules parsability
+  - `rules_path()` generates canonical file paths for tax rule files
+  - Supported jurisdictions: us-federal, ca, ny, tx, fl, wa
+  - 5 unit tests
+
+- **Import Profile Sharing** (`crates/import/src/profile_sharing.rs`)
+  - `SharedProfile` bundle: metadata + CSV profile + optional categorization rules
+  - `export_profile()` serializes to shareable TOML
+  - `import_profile()` parses and validates TOML submissions
+  - 4 unit tests
+
+- **Mobile Push Notifications**
+  - `tauri-plugin-notification` for iOS/Android native notifications
+  - `check_overdue_invoices` Tauri command sends notification when invoices are past due
+
+- **Frontend API Bindings**
+  - `sendInvoice()` for email delivery
+  - `checkForUpdates()` for auto-updater
+
+- **Stripe Webhook Listener** (`crates/server/src/routes/stripe.rs`)
+  - `POST /api/v1/stripe/webhook` endpoint (outside auth middleware, uses Stripe signature verification)
+  - HMAC-SHA256 signature verification per Stripe's webhook spec
+  - Auto-creates double-entry transactions for `charge.succeeded`, `charge.refunded`, `payout.paid`
+  - Stripe fees recorded as separate line items to Bank Fees account (5010)
+  - Configurable via `STRIPE_WEBHOOK_SECRET` env var
+  - 9 unit tests: signature verification, event mapping, deserialization
+
+- **Actual Budget Import** (`crates/import/src/actual.rs`)
+  - Parses Actual Budget JSON export format (accounts, transactions, payees, categories)
+  - Supports both string dates ("YYYY-MM-DD") and integer dates (YYYYMMDD)
+  - Resolves payee and category names from ID lookups
+  - Transfer detection with optional skip (avoids double-counting)
+  - `ImportSummary` with account/transaction counts and error details
+  - 8 unit tests: parsing, name resolution, date formats, transfers, empty exports
+
+### Changed
+- Version bumped to 2026.3.13 (CalVer)
+- Server state now includes optional `email_config` and `oidc` fields
+- Auth middleware supports API key + OIDC JWT (previously API key only)
+- Import crate gains `reqwest` and `serde_json` dependencies for AI categorization
+- App crate gains `rust_decimal` dependency for invoice record reconstruction
+- All deferred roadmap items complete — roadmap now shows only post-v1 integrations
+- Stripe webhook listener and Actual Budget import added as first post-v1 integrations
+
+---
+
 ## [2026.3.10] - 2026-03-10
 
 ### Added
