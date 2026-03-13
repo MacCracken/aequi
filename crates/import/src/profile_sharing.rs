@@ -38,12 +38,21 @@ pub fn export_profile(profile: &SharedProfile) -> Result<String, ProfileSharingE
 
 /// Import a profile from a TOML string.
 pub fn import_profile(toml_str: &str) -> Result<SharedProfile, ProfileSharingError> {
+    if toml_str.len() > MAX_PROFILE_SIZE {
+        return Err(ProfileSharingError::Validation(
+            format!("profile too large ({} bytes, max {})", toml_str.len(), MAX_PROFILE_SIZE),
+        ));
+    }
+
     let profile: SharedProfile =
         toml::from_str(toml_str).map_err(|e| ProfileSharingError::Parse(e.to_string()))?;
 
     validate_profile(&profile)?;
     Ok(profile)
 }
+
+/// Maximum size of a TOML profile string (1 MB).
+const MAX_PROFILE_SIZE: usize = 1_048_576;
 
 fn validate_profile(profile: &SharedProfile) -> Result<(), ProfileSharingError> {
     if profile.meta.name.is_empty() {
@@ -54,6 +63,11 @@ fn validate_profile(profile: &SharedProfile) -> Result<(), ProfileSharingError> 
     if profile.meta.institution.is_empty() {
         return Err(ProfileSharingError::Validation(
             "institution is required".into(),
+        ));
+    }
+    if profile.meta.version == 0 {
+        return Err(ProfileSharingError::Validation(
+            "version must be >= 1".into(),
         ));
     }
     Ok(())
@@ -125,6 +139,44 @@ mod tests {
             import_profile(&toml),
             Err(ProfileSharingError::Validation(_))
         ));
+    }
+
+    #[test]
+    fn version_zero_rejected() {
+        let mut profile = sample_profile();
+        profile.meta.version = 0;
+        let toml = export_profile(&profile).unwrap();
+        assert!(matches!(
+            import_profile(&toml),
+            Err(ProfileSharingError::Validation(_))
+        ));
+    }
+
+    #[test]
+    fn malformed_toml_rejected() {
+        assert!(matches!(
+            import_profile("this is {{{{ not valid toml"),
+            Err(ProfileSharingError::Parse(_))
+        ));
+    }
+
+    #[test]
+    fn profile_with_rules_roundtrips() {
+        use crate::rules::{CategoryRule, MatchType};
+        let mut profile = sample_profile();
+        profile.categorization_rules = vec![CategoryRule {
+            name: "GitHub".to_string(),
+            priority: 1,
+            pattern: "github".to_string(),
+            match_type: MatchType::Contains,
+            account_code: "5110".to_string(),
+            amount_min_cents: None,
+            amount_max_cents: None,
+        }];
+        let toml = export_profile(&profile).unwrap();
+        let restored = import_profile(&toml).unwrap();
+        assert_eq!(restored.categorization_rules.len(), 1);
+        assert_eq!(restored.categorization_rules[0].name, "GitHub");
     }
 
     #[test]

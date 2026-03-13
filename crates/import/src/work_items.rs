@@ -1,4 +1,5 @@
 use chrono::NaiveDate;
+use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -190,10 +191,7 @@ pub fn estimate_line_items(
                 .unwrap_or_else(|| Decimal::new(1, 0));
             let rate = Decimal::new(hourly_rate_cents, 0);
             let total = hours * rate;
-            // Truncate to whole cents.
-            let total_cents = total.trunc().to_string()
-                .parse::<i64>()
-                .unwrap_or(0);
+            let total_cents = total.trunc().to_i64().unwrap_or(0);
 
             InvoiceLineEstimate {
                 description: item.title.clone(),
@@ -221,11 +219,20 @@ async fn fetch_github_issues(
         "https://api.github.com/repos/{owner}/{repo}/issues?state=closed&per_page=100"
     );
 
+    // URL-encode filter values to prevent query parameter injection
     if let Some(ref milestone) = filter.milestone {
-        url.push_str(&format!("&milestone={milestone}"));
+        let encoded: String = milestone.bytes().map(|b| match b {
+            b'0'..=b'9' | b'a'..=b'z' | b'A'..=b'Z' | b'-' | b'_' | b'.' => (b as char).to_string(),
+            _ => format!("%{b:02X}"),
+        }).collect();
+        url.push_str(&format!("&milestone={encoded}"));
     }
     if let Some(ref label) = filter.label {
-        url.push_str(&format!("&labels={label}"));
+        let encoded: String = label.bytes().map(|b| match b {
+            b'0'..=b'9' | b'a'..=b'z' | b'A'..=b'Z' | b'-' | b'_' | b'.' => (b as char).to_string(),
+            _ => format!("%{b:02X}"),
+        }).collect();
+        url.push_str(&format!("&labels={encoded}"));
     }
     if let Some(since) = filter.since {
         url.push_str(&format!("&since={since}T00:00:00Z"));
@@ -258,7 +265,8 @@ async fn fetch_github_issues(
             let completed_at = i
                 .closed_at
                 .as_deref()
-                .and_then(|s| NaiveDate::parse_from_str(&s[..10], "%Y-%m-%d").ok());
+                .and_then(|s| s.get(..10))
+                .and_then(|s| NaiveDate::parse_from_str(s, "%Y-%m-%d").ok());
 
             WorkItem {
                 id: i.number.to_string(),
@@ -297,24 +305,24 @@ async fn fetch_linear_issues(
 ) -> Result<Vec<WorkItem>, WorkItemError> {
     let client = reqwest::Client::new();
 
-    let mut filter_parts: Vec<String> = vec![
-        format!("{{ team: {{ id: {{ eq: \"{team_id}\" }} }}, completedAt: {{ neq: null }} }}")
-    ];
+    // Escape GraphQL string values to prevent injection
+    fn gql_escape(s: &str) -> String {
+        s.replace('\\', "\\\\").replace('"', "\\\"")
+    }
 
-    // Build a combined filter string. Linear uses a nested filter object; for
-    // simplicity we pass conditions through the `filter` argument.
-    // We'll rebuild the whole filter to include optional conditions.
+    let safe_team_id = gql_escape(team_id);
     let mut conditions = vec![
-        format!("team: {{ id: {{ eq: \"{team_id}\" }} }}"),
+        format!("team: {{ id: {{ eq: \"{safe_team_id}\" }} }}"),
         "completedAt: { neq: null }".to_string(),
     ];
 
     if let Some(ref label) = filter.label {
-        conditions.push(format!("labels: {{ name: {{ eq: \"{label}\" }} }}"));
+        conditions.push(format!("labels: {{ name: {{ eq: \"{}\" }} }}", gql_escape(label)));
     }
     if let Some(ref assignee) = filter.assignee {
         conditions.push(format!(
-            "assignee: {{ name: {{ eq: \"{assignee}\" }} }}"
+            "assignee: {{ name: {{ eq: \"{}\" }} }}",
+            gql_escape(assignee)
         ));
     }
     if let Some(since) = filter.since {
@@ -323,8 +331,6 @@ async fn fetch_linear_issues(
         ));
     }
 
-    // We don't use `filter_parts` above any more — clear it.
-    filter_parts.clear();
     let filter_str = conditions.join(", ");
 
     let query = format!(

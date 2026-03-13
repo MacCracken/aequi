@@ -134,7 +134,7 @@ async fn sync_transactions(
         .await
         .map_err(|e| ApiError::Internal(format!("Plaid transactions error: {e}")))?;
 
-    // Look up the default checking account for Plaid imports.
+    // Look up accounts for Plaid imports
     let checking = aequi_storage::get_account_by_code(&state.db, "1000")
         .await?
         .ok_or_else(|| ApiError::Internal("Checking account (1000) not found".to_string()))?;
@@ -143,11 +143,21 @@ async fn sync_transactions(
         .await?
         .ok_or_else(|| ApiError::Internal("Expense account (5000) not found".to_string()))?;
 
-    let checking_id = checking.id.unwrap();
-    let expense_id = expense.id.unwrap();
+    // Use revenue account for income (negative Plaid amounts = inflows)
+    let revenue = aequi_storage::get_account_by_code(&state.db, "4000")
+        .await?
+        .ok_or_else(|| ApiError::Internal("Revenue account (4000) not found".to_string()))?;
+
+    let checking_id = checking.id.unwrap_or(aequi_core::AccountId(0));
+    let expense_id = expense.id.unwrap_or(aequi_core::AccountId(0));
+    let revenue_id = revenue.id.unwrap_or(aequi_core::AccountId(0));
 
     let mut imported = 0usize;
     let mut skipped = 0usize;
+
+    // Wrap all inserts in a DB transaction for atomicity
+    let mut db_tx = state.db.begin().await
+        .map_err(|e| ApiError::Internal(format!("DB transaction begin failed: {e}")))?;
 
     for ptx in &resp.transactions {
         // Skip pending transactions
@@ -162,6 +172,21 @@ async fn sync_transactions(
             continue;
         }
 
+        // Duplicate detection: skip if transaction_id already imported
+        let memo_marker = format!("Plaid: {}", ptx.transaction_id);
+        let exists = sqlx::query_as::<_, (i64,)>(
+            "SELECT 1 FROM transactions WHERE memo = ? LIMIT 1",
+        )
+        .bind(&memo_marker)
+        .fetch_optional(&mut *db_tx)
+        .await
+        .map_err(|e| ApiError::Internal(format!("Duplicate check: {e}")))?;
+
+        if exists.is_some() {
+            skipped += 1;
+            continue;
+        }
+
         let date = chrono::NaiveDate::parse_from_str(&ptx.date, "%Y-%m-%d")
             .map_err(|e| ApiError::Internal(format!("Bad date '{}': {e}", ptx.date)))?;
 
@@ -171,12 +196,12 @@ async fn sync_transactions(
             .unwrap_or(&ptx.name)
             .to_string();
 
-        // Plaid: positive amount = money leaving the account (debit/expense),
-        // negative amount = money entering the account (credit/income).
+        // Plaid: positive amount = money leaving the account (expense),
+        // negative amount = money entering the account (income/revenue).
         let (debit_id, credit_id, abs_cents) = if amount_cents > 0 {
             (expense_id, checking_id, amount_cents)
         } else {
-            (checking_id, expense_id, -amount_cents)
+            (checking_id, revenue_id, -amount_cents)
         };
 
         let lines = vec![
@@ -198,7 +223,7 @@ async fn sync_transactions(
             date,
             description,
             lines,
-            memo: Some(format!("Plaid: {}", ptx.transaction_id)),
+            memo: Some(memo_marker),
         };
 
         let validated = ValidatedTransaction::validate(tx)
@@ -212,7 +237,7 @@ async fn sync_transactions(
         .bind(&validated.description)
         .bind(&validated.memo)
         .bind(validated.balanced_total.to_cents())
-        .fetch_one(&state.db)
+        .fetch_one(&mut *db_tx)
         .await
         .map_err(|e| ApiError::Internal(format!("Insert transaction: {e}")))?;
 
@@ -229,13 +254,16 @@ async fn sync_transactions(
             .bind(line.debit.to_cents())
             .bind(line.credit.to_cents())
             .bind(&line.memo)
-            .execute(&state.db)
+            .execute(&mut *db_tx)
             .await
             .map_err(|e| ApiError::Internal(format!("Insert line: {e}")))?;
         }
 
         imported += 1;
     }
+
+    db_tx.commit().await
+        .map_err(|e| ApiError::Internal(format!("DB commit failed: {e}")))?;
 
     tracing::info!(
         imported,

@@ -36,7 +36,7 @@ pub enum WaveImportError {
 }
 
 /// Summary statistics for a Wave import.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct WaveImportSummary {
     pub account_count: usize,
     pub transaction_count: usize,
@@ -181,16 +181,20 @@ fn parse_wave_date(s: &str) -> Result<NaiveDate, WaveImportError> {
 }
 
 fn parse_wave_amount(s: &str) -> Result<i64, WaveImportError> {
-    let s = s.trim().replace([',', '$', ' '], "");
-    if s.is_empty() {
-        return Err(WaveImportError::InvalidAmount("empty".to_string()));
+    // Strip all non-numeric characters except '.', '-', and digits
+    let cleaned: String = s
+        .chars()
+        .filter(|c| c.is_ascii_digit() || *c == '.' || *c == '-')
+        .collect();
+    if cleaned.is_empty() {
+        return Err(WaveImportError::InvalidAmount(s.trim().to_string()));
     }
-    let dec = Decimal::from_str(&s)
-        .map_err(|_| WaveImportError::InvalidAmount(s.to_string()))?;
+    let dec = Decimal::from_str(&cleaned)
+        .map_err(|_| WaveImportError::InvalidAmount(s.trim().to_string()))?;
     let cents = (dec * Decimal::from(100))
         .round()
         .to_i64()
-        .ok_or_else(|| WaveImportError::InvalidAmount(s.to_string()))?;
+        .ok_or_else(|| WaveImportError::InvalidAmount(s.trim().to_string()))?;
     Ok(cents)
 }
 

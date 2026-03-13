@@ -23,11 +23,22 @@ impl PlaidEnvironment {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct PlaidConfig {
     pub client_id: String,
     pub secret: String,
     pub environment: PlaidEnvironment,
+}
+
+// Redact secret in Debug output
+impl std::fmt::Debug for PlaidConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PlaidConfig")
+            .field("client_id", &self.client_id)
+            .field("secret", &"[REDACTED]")
+            .field("environment", &self.environment)
+            .finish()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -233,33 +244,61 @@ impl PlaidClient {
         self.handle_response(resp).await
     }
 
-    /// Fetch transactions for the given date range.
+    /// Fetch all transactions for the given date range (handles pagination).
     pub async fn get_transactions(
         &self,
         access_token: &str,
         start_date: &str,
         end_date: &str,
     ) -> Result<TransactionsGetResponse, PlaidError> {
-        let body = TransactionsGetRequest {
-            client_id: self.config.client_id.clone(),
-            secret: self.config.secret.clone(),
-            access_token: access_token.to_string(),
-            start_date: start_date.to_string(),
-            end_date: end_date.to_string(),
-            options: TransactionsGetOptions {
-                count: 500,
-                offset: 0,
-            },
-        };
+        let mut all_transactions = Vec::new();
+        let mut accounts = Vec::new();
+        let mut offset = 0u32;
+        let page_size = 500u32;
+        let mut total;
+        let mut request_id;
 
-        let resp = self
-            .http
-            .post(format!("{}/transactions/get", self.base_url()))
-            .json(&body)
-            .send()
-            .await?;
+        loop {
+            let body = TransactionsGetRequest {
+                client_id: self.config.client_id.clone(),
+                secret: self.config.secret.clone(),
+                access_token: access_token.to_string(),
+                start_date: start_date.to_string(),
+                end_date: end_date.to_string(),
+                options: TransactionsGetOptions {
+                    count: page_size,
+                    offset,
+                },
+            };
 
-        self.handle_response(resp).await
+            let resp = self
+                .http
+                .post(format!("{}/transactions/get", self.base_url()))
+                .json(&body)
+                .send()
+                .await?;
+
+            let page: TransactionsGetResponse = self.handle_response(resp).await?;
+
+            total = page.total_transactions;
+            request_id = page.request_id;
+            if accounts.is_empty() {
+                accounts = page.accounts;
+            }
+            all_transactions.extend(page.transactions);
+
+            offset += page_size;
+            if offset >= total {
+                break;
+            }
+        }
+
+        Ok(TransactionsGetResponse {
+            accounts,
+            transactions: all_transactions,
+            total_transactions: total,
+            request_id,
+        })
     }
 
     async fn handle_response<T: serde::de::DeserializeOwned>(
@@ -277,8 +316,10 @@ impl PlaidClient {
                     error_message: err_body.error_message,
                 });
             }
+            let mut truncated = text;
+            truncated.truncate(500);
             return Err(PlaidError::Deserialize(format!(
-                "HTTP {status}: {text}"
+                "HTTP {status}: {truncated}"
             )));
         }
 
@@ -295,17 +336,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn config_serializes_and_deserializes() {
-        let config = PlaidConfig {
-            client_id: "test_id".to_string(),
-            secret: "test_secret".to_string(),
-            environment: PlaidEnvironment::Sandbox,
-        };
-        let json = serde_json::to_string(&config).unwrap();
-        let parsed: PlaidConfig = serde_json::from_str(&json).unwrap();
+    fn config_deserializes() {
+        let json = r#"{"client_id":"test_id","secret":"test_secret","environment":"sandbox"}"#;
+        let parsed: PlaidConfig = serde_json::from_str(json).unwrap();
         assert_eq!(parsed.client_id, "test_id");
         assert_eq!(parsed.secret, "test_secret");
         assert_eq!(parsed.environment.base_url(), "https://sandbox.plaid.com");
+    }
+
+    #[test]
+    fn config_debug_redacts_secret() {
+        let config = PlaidConfig {
+            client_id: "test_id".to_string(),
+            secret: "super_secret_key".to_string(),
+            environment: PlaidEnvironment::Sandbox,
+        };
+        let debug = format!("{config:?}");
+        assert!(!debug.contains("super_secret_key"));
+        assert!(debug.contains("[REDACTED]"));
     }
 
     #[test]

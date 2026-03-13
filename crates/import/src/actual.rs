@@ -90,7 +90,7 @@ pub struct ActualPayee {
 // ── Converted types ────────────────────────────────────────────────────────
 
 /// An imported transaction ready for aequi ingestion.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ImportedTransaction {
     pub date: NaiveDate,
     pub description: String,
@@ -102,7 +102,7 @@ pub struct ImportedTransaction {
 }
 
 /// Summary of an import operation.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ImportSummary {
     pub accounts_found: usize,
     pub transactions_imported: usize,
@@ -126,6 +126,9 @@ fn parse_actual_date(value: &serde_json::Value) -> Result<NaiveDate, ActualImpor
             let d = n
                 .as_i64()
                 .ok_or_else(|| ActualImportError::InvalidDate(format!("{n}")))?;
+            if !(10000101..=99991231).contains(&d) {
+                return Err(ActualImportError::InvalidDate(format!("{d}")));
+            }
             let year = (d / 10000) as i32;
             let month = ((d % 10000) / 100) as u32;
             let day = (d % 100) as u32;

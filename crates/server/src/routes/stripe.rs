@@ -107,6 +107,14 @@ fn verify_stripe_signature(payload: &[u8], sig_header: &str, secret: &str) -> bo
     })
 }
 
+/// Extract the `t=` timestamp from a Stripe-Signature header.
+fn parse_stripe_timestamp(sig_header: &str) -> Option<i64> {
+    sig_header
+        .split(',')
+        .find_map(|part| part.trim().strip_prefix("t="))
+        .and_then(|t| t.parse::<i64>().ok())
+}
+
 // ── Account mapping ────────────────────────────────────────────────────────
 
 /// Map Stripe event types to debit/credit account codes.
@@ -132,17 +140,36 @@ async fn handle_webhook(
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> impl IntoResponse {
-    // Verify signature if webhook secret is configured
-    if let Some(ref secret) = state.stripe_webhook_secret {
-        let sig = headers
-            .get("stripe-signature")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("");
+    // SECURITY: Always require webhook secret — reject if not configured
+    let secret = match state.stripe_webhook_secret.as_ref() {
+        Some(s) => s,
+        None => {
+            return (
+                StatusCode::FORBIDDEN,
+                axum::Json(serde_json::json!({ "error": "Stripe webhook not configured" })),
+            );
+        }
+    };
 
-        if !verify_stripe_signature(&body, sig, secret) {
+    let sig = headers
+        .get("stripe-signature")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+
+    if !verify_stripe_signature(&body, sig, secret) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            axum::Json(serde_json::json!({ "error": "Invalid signature" })),
+        );
+    }
+
+    // Replay protection: reject signatures older than 300 seconds
+    if let Some(timestamp) = parse_stripe_timestamp(sig) {
+        let now = chrono::Utc::now().timestamp();
+        if (now - timestamp).unsigned_abs() > 300 {
             return (
                 StatusCode::UNAUTHORIZED,
-                axum::Json(serde_json::json!({ "error": "Invalid signature" })),
+                axum::Json(serde_json::json!({ "error": "Signature timestamp too old" })),
             );
         }
     }
@@ -238,34 +265,52 @@ async fn handle_webhook(
         .and_then(|v| v.as_i64())
         .unwrap_or(0);
 
+    // Guard against negative amounts
+    if amount_cents < 0 {
+        return (
+            StatusCode::BAD_REQUEST,
+            axum::Json(serde_json::json!({ "error": "Negative amount" })),
+        );
+    }
+
+    let debit_id = debit_account.id.unwrap_or(aequi_core::AccountId(0));
+    let credit_id = credit_account.id.unwrap_or(aequi_core::AccountId(0));
+
+    // Fee accounting: gross revenue + separate fee expense
+    // Debit: full amount to debit account
+    // Credit: full amount to credit account (revenue at gross)
+    // If fees: Debit Bank Fees, Credit debit account (net payout reduced)
     let mut lines = vec![
         TransactionLine {
-            account_id: debit_account.id.unwrap(),
+            account_id: debit_id,
             debit: Money::from_cents(amount_cents),
             credit: Money::from_cents(0),
             memo: Some(format!("Stripe {}", event.event_type)),
         },
         TransactionLine {
-            account_id: credit_account.id.unwrap(),
+            account_id: credit_id,
             debit: Money::from_cents(0),
-            credit: Money::from_cents(if fee_cents > 0 {
-                amount_cents - fee_cents
-            } else {
-                amount_cents
-            }),
+            credit: Money::from_cents(amount_cents),
             memo: None,
         },
     ];
 
-    // Add fee line if present (debit to Bank Fees)
+    // Add fee as separate balanced entries (debit expense, credit asset)
     if fee_cents > 0 {
         match aequi_storage::get_account_by_code(&state.db, "5010").await {
             Ok(Some(fee_account)) => {
+                let fee_id = fee_account.id.unwrap_or(aequi_core::AccountId(0));
                 lines.push(TransactionLine {
-                    account_id: fee_account.id.unwrap(),
+                    account_id: fee_id,
+                    debit: Money::from_cents(fee_cents),
+                    credit: Money::from_cents(0),
+                    memo: Some("Stripe processing fee".to_string()),
+                });
+                lines.push(TransactionLine {
+                    account_id: debit_id,
                     debit: Money::from_cents(0),
                     credit: Money::from_cents(fee_cents),
-                    memo: Some("Stripe processing fee".to_string()),
+                    memo: Some("Stripe fee offset".to_string()),
                 });
             }
             _ => {
@@ -291,7 +336,17 @@ async fn handle_webhook(
         }
     };
 
-    // Insert transaction
+    // Insert transaction atomically
+    let mut db_tx = match state.db.begin().await {
+        Ok(tx) => tx,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                axum::Json(serde_json::json!({ "error": format!("DB transaction begin failed: {e}") })),
+            );
+        }
+    };
+
     let row = match sqlx::query_as::<_, (i64,)>(
         "INSERT INTO transactions (date, description, memo, balanced_total_cents) VALUES (?, ?, ?, ?) RETURNING id"
     )
@@ -299,11 +354,12 @@ async fn handle_webhook(
     .bind(&validated.description)
     .bind(&validated.memo)
     .bind(validated.balanced_total.to_cents())
-    .fetch_one(&state.db)
+    .fetch_one(&mut *db_tx)
     .await
     {
         Ok(r) => r,
         Err(e) => {
+            let _ = db_tx.rollback().await;
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 axum::Json(serde_json::json!({ "error": format!("Failed to insert transaction: {e}") })),
@@ -322,11 +378,22 @@ async fn handle_webhook(
         .bind(line.debit.to_cents())
         .bind(line.credit.to_cents())
         .bind(&line.memo)
-        .execute(&state.db)
+        .execute(&mut *db_tx)
         .await
         {
-            tracing::error!("Failed to insert transaction line: {e}");
+            let _ = db_tx.rollback().await;
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                axum::Json(serde_json::json!({ "error": format!("Failed to insert line: {e}") })),
+            );
         }
+    }
+
+    if let Err(e) = db_tx.commit().await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            axum::Json(serde_json::json!({ "error": format!("DB commit failed: {e}") })),
+        );
     }
 
     tracing::info!(

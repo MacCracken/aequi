@@ -163,7 +163,10 @@ async fn send_resend(
         }]
     });
 
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| DeliveryError::Resend(e.to_string()))?;
     let resp = client
         .post("https://api.resend.com/emails")
         .bearer_auth(api_key)
@@ -174,10 +177,11 @@ async fn send_resend(
 
     if !resp.status().is_success() {
         let status = resp.status();
-        let text = resp
+        let mut text = resp
             .text()
             .await
             .unwrap_or_else(|_| "no body".to_string());
+        text.truncate(500); // avoid leaking verbose error bodies
         return Err(DeliveryError::Resend(format!("{status}: {text}")));
     }
 
@@ -238,13 +242,6 @@ mod tests {
         }
     }
 
-    #[allow(dead_code)]
-    fn sample_contact() -> Contact {
-        let mut c = Contact::new("Acme Corp", ContactType::Client);
-        c.email = Some("billing@acme.example.com".to_string());
-        c
-    }
-
     #[test]
     fn no_email_returns_error() {
         let invoice = sample_invoice();
@@ -297,6 +294,52 @@ mod tests {
         let (name, email) = config.from_address();
         assert_eq!(name, "Aequi");
         assert_eq!(email, "invoices@example.com");
+    }
+
+    #[test]
+    fn base64_empty() {
+        assert_eq!(base64_encode(b""), "");
+    }
+
+    #[test]
+    fn base64_one_byte() {
+        assert_eq!(base64_encode(b"A"), "QQ==");
+    }
+
+    #[test]
+    fn base64_two_bytes() {
+        assert_eq!(base64_encode(b"AB"), "QUI=");
+    }
+
+    #[test]
+    fn base64_three_bytes() {
+        assert_eq!(base64_encode(b"ABC"), "QUJD");
+    }
+
+    #[test]
+    fn config_debug_redacts_secrets() {
+        let config = EmailConfig::Resend {
+            from_name: "Test".into(),
+            from_email: "test@example.com".into(),
+            api_key: "re_super_secret_key".into(),
+        };
+        let debug = format!("{config:?}");
+        assert!(!debug.contains("re_super_secret_key"));
+        assert!(debug.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn smtp_debug_redacts_password() {
+        let config = crate::config::SmtpConfig {
+            host: "smtp.example.com".into(),
+            port: 587,
+            username: "user".into(),
+            password: "s3cret".into(),
+            starttls: true,
+        };
+        let debug = format!("{config:?}");
+        assert!(!debug.contains("s3cret"));
+        assert!(debug.contains("[REDACTED]"));
     }
 
     #[test]
