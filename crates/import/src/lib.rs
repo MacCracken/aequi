@@ -3,9 +3,12 @@ pub mod ai_categorize;
 pub mod csv;
 pub mod match_engine;
 pub mod ofx;
+pub mod plaid;
 pub mod profile_sharing;
 pub mod rules;
 pub(crate) mod util;
+pub mod wave;
+pub mod work_items;
 
 pub use csv::{CsvImportProfile, CsvTransaction};
 pub use match_engine::{AutoMatchEngine, MatchResult, MatchType, MatchableTransaction};

@@ -4,4 +4,5 @@ pub struct ServerState {
     pub email_config: Option<aequi_email::EmailConfig>,
     pub oidc: Option<crate::oidc::JwksCache>,
     pub stripe_webhook_secret: Option<String>,
+    pub plaid_config: Option<aequi_import::plaid::PlaidConfig>,
 }

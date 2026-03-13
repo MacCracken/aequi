@@ -1,0 +1,453 @@
+use serde::{Deserialize, Serialize};
+use thiserror::Error;
+
+// ---------------------------------------------------------------------------
+// Configuration
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PlaidEnvironment {
+    Sandbox,
+    Development,
+    Production,
+}
+
+impl PlaidEnvironment {
+    pub fn base_url(&self) -> &str {
+        match self {
+            PlaidEnvironment::Sandbox => "https://sandbox.plaid.com",
+            PlaidEnvironment::Development => "https://development.plaid.com",
+            PlaidEnvironment::Production => "https://production.plaid.com",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlaidConfig {
+    pub client_id: String,
+    pub secret: String,
+    pub environment: PlaidEnvironment,
+}
+
+// ---------------------------------------------------------------------------
+// Error
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Error)]
+pub enum PlaidError {
+    #[error("HTTP error: {0}")]
+    Http(#[from] reqwest::Error),
+
+    #[error("Plaid API error: {error_type} — {error_message}")]
+    Api {
+        error_type: String,
+        error_code: String,
+        error_message: String,
+    },
+
+    #[error("Deserialization error: {0}")]
+    Deserialize(String),
+}
+
+// ---------------------------------------------------------------------------
+// API request/response types
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Serialize)]
+struct LinkTokenCreateRequest {
+    client_id: String,
+    secret: String,
+    user: LinkTokenUser,
+    client_name: String,
+    products: Vec<String>,
+    country_codes: Vec<String>,
+    language: String,
+}
+
+#[derive(Debug, Serialize)]
+struct LinkTokenUser {
+    client_user_id: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct LinkTokenResponse {
+    pub link_token: String,
+    pub expiration: String,
+    pub request_id: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ExchangeTokenRequest {
+    client_id: String,
+    secret: String,
+    public_token: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct ExchangeTokenResponse {
+    pub access_token: String,
+    pub item_id: String,
+    pub request_id: String,
+}
+
+#[derive(Debug, Serialize)]
+struct TransactionsGetRequest {
+    client_id: String,
+    secret: String,
+    access_token: String,
+    start_date: String,
+    end_date: String,
+    options: TransactionsGetOptions,
+}
+
+#[derive(Debug, Serialize)]
+struct TransactionsGetOptions {
+    count: u32,
+    offset: u32,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct TransactionsGetResponse {
+    pub accounts: Vec<PlaidAccount>,
+    pub transactions: Vec<PlaidTransaction>,
+    pub total_transactions: u32,
+    pub request_id: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct PlaidTransaction {
+    pub transaction_id: String,
+    pub name: String,
+    pub amount: f64,
+    pub date: String,
+    pub category: Option<Vec<String>>,
+    pub account_id: String,
+    pub pending: bool,
+    pub iso_currency_code: Option<String>,
+    pub merchant_name: Option<String>,
+}
+
+impl PlaidTransaction {
+    /// Convert the Plaid amount (f64 dollars) to cents (i64).
+    /// Plaid amounts are positive for debits and negative for credits
+    /// (from the user's perspective).
+    pub fn amount_cents(&self) -> i64 {
+        (self.amount * 100.0).round() as i64
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct PlaidAccount {
+    pub account_id: String,
+    pub name: String,
+    #[serde(rename = "type")]
+    pub account_type: String,
+    pub subtype: Option<String>,
+    pub balances: PlaidBalances,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct PlaidBalances {
+    pub available: Option<f64>,
+    pub current: Option<f64>,
+    pub limit: Option<f64>,
+    pub iso_currency_code: Option<String>,
+}
+
+/// Plaid API error response body.
+#[derive(Debug, Deserialize)]
+struct PlaidApiErrorBody {
+    error_type: String,
+    error_code: String,
+    error_message: String,
+}
+
+// ---------------------------------------------------------------------------
+// Client
+// ---------------------------------------------------------------------------
+
+pub struct PlaidClient {
+    http: reqwest::Client,
+    config: PlaidConfig,
+}
+
+impl PlaidClient {
+    pub fn new(config: PlaidConfig) -> Self {
+        let http = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .expect("failed to build HTTP client");
+        Self { http, config }
+    }
+
+    fn base_url(&self) -> &str {
+        self.config.environment.base_url()
+    }
+
+    /// Create a Link token for initializing Plaid Link in the frontend.
+    pub async fn create_link_token(
+        &self,
+        user_id: &str,
+    ) -> Result<LinkTokenResponse, PlaidError> {
+        let body = LinkTokenCreateRequest {
+            client_id: self.config.client_id.clone(),
+            secret: self.config.secret.clone(),
+            user: LinkTokenUser {
+                client_user_id: user_id.to_string(),
+            },
+            client_name: "Aequi".to_string(),
+            products: vec!["transactions".to_string()],
+            country_codes: vec!["US".to_string()],
+            language: "en".to_string(),
+        };
+
+        let resp = self
+            .http
+            .post(format!("{}/link/token/create", self.base_url()))
+            .json(&body)
+            .send()
+            .await?;
+
+        self.handle_response(resp).await
+    }
+
+    /// Exchange a public token (received from Plaid Link) for an access token.
+    pub async fn exchange_public_token(
+        &self,
+        public_token: &str,
+    ) -> Result<ExchangeTokenResponse, PlaidError> {
+        let body = ExchangeTokenRequest {
+            client_id: self.config.client_id.clone(),
+            secret: self.config.secret.clone(),
+            public_token: public_token.to_string(),
+        };
+
+        let resp = self
+            .http
+            .post(format!("{}/item/public_token/exchange", self.base_url()))
+            .json(&body)
+            .send()
+            .await?;
+
+        self.handle_response(resp).await
+    }
+
+    /// Fetch transactions for the given date range.
+    pub async fn get_transactions(
+        &self,
+        access_token: &str,
+        start_date: &str,
+        end_date: &str,
+    ) -> Result<TransactionsGetResponse, PlaidError> {
+        let body = TransactionsGetRequest {
+            client_id: self.config.client_id.clone(),
+            secret: self.config.secret.clone(),
+            access_token: access_token.to_string(),
+            start_date: start_date.to_string(),
+            end_date: end_date.to_string(),
+            options: TransactionsGetOptions {
+                count: 500,
+                offset: 0,
+            },
+        };
+
+        let resp = self
+            .http
+            .post(format!("{}/transactions/get", self.base_url()))
+            .json(&body)
+            .send()
+            .await?;
+
+        self.handle_response(resp).await
+    }
+
+    async fn handle_response<T: serde::de::DeserializeOwned>(
+        &self,
+        resp: reqwest::Response,
+    ) -> Result<T, PlaidError> {
+        let status = resp.status();
+        let text = resp.text().await?;
+
+        if !status.is_success() {
+            if let Ok(err_body) = serde_json::from_str::<PlaidApiErrorBody>(&text) {
+                return Err(PlaidError::Api {
+                    error_type: err_body.error_type,
+                    error_code: err_body.error_code,
+                    error_message: err_body.error_message,
+                });
+            }
+            return Err(PlaidError::Deserialize(format!(
+                "HTTP {status}: {text}"
+            )));
+        }
+
+        serde_json::from_str(&text).map_err(|e| PlaidError::Deserialize(e.to_string()))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn config_serializes_and_deserializes() {
+        let config = PlaidConfig {
+            client_id: "test_id".to_string(),
+            secret: "test_secret".to_string(),
+            environment: PlaidEnvironment::Sandbox,
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let parsed: PlaidConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.client_id, "test_id");
+        assert_eq!(parsed.secret, "test_secret");
+        assert_eq!(parsed.environment.base_url(), "https://sandbox.plaid.com");
+    }
+
+    #[test]
+    fn environment_base_urls() {
+        assert_eq!(
+            PlaidEnvironment::Sandbox.base_url(),
+            "https://sandbox.plaid.com"
+        );
+        assert_eq!(
+            PlaidEnvironment::Development.base_url(),
+            "https://development.plaid.com"
+        );
+        assert_eq!(
+            PlaidEnvironment::Production.base_url(),
+            "https://production.plaid.com"
+        );
+    }
+
+    #[test]
+    fn plaid_transaction_deserializes() {
+        let json = r#"{
+            "transaction_id": "txn_abc123",
+            "name": "Starbucks Coffee",
+            "amount": 4.33,
+            "date": "2026-03-10",
+            "category": ["Food and Drink", "Coffee Shop"],
+            "account_id": "acc_xyz",
+            "pending": false,
+            "iso_currency_code": "USD",
+            "merchant_name": "Starbucks"
+        }"#;
+        let tx: PlaidTransaction = serde_json::from_str(json).unwrap();
+        assert_eq!(tx.transaction_id, "txn_abc123");
+        assert_eq!(tx.name, "Starbucks Coffee");
+        assert_eq!(tx.amount_cents(), 433);
+        assert!(!tx.pending);
+        assert_eq!(tx.category.as_ref().unwrap().len(), 2);
+        assert_eq!(tx.merchant_name.as_deref(), Some("Starbucks"));
+    }
+
+    #[test]
+    fn plaid_transaction_negative_amount() {
+        let json = r#"{
+            "transaction_id": "txn_dep",
+            "name": "Direct Deposit",
+            "amount": -1500.50,
+            "date": "2026-03-01",
+            "category": null,
+            "account_id": "acc_xyz",
+            "pending": false,
+            "iso_currency_code": "USD",
+            "merchant_name": null
+        }"#;
+        let tx: PlaidTransaction = serde_json::from_str(json).unwrap();
+        assert_eq!(tx.amount_cents(), -150050);
+    }
+
+    #[test]
+    fn plaid_account_deserializes() {
+        let json = r#"{
+            "account_id": "acc_checking",
+            "name": "My Checking",
+            "type": "depository",
+            "subtype": "checking",
+            "balances": {
+                "available": 1200.50,
+                "current": 1300.00,
+                "limit": null,
+                "iso_currency_code": "USD"
+            }
+        }"#;
+        let account: PlaidAccount = serde_json::from_str(json).unwrap();
+        assert_eq!(account.account_id, "acc_checking");
+        assert_eq!(account.account_type, "depository");
+        assert_eq!(account.subtype.as_deref(), Some("checking"));
+        assert_eq!(account.balances.available, Some(1200.50));
+        assert!(account.balances.limit.is_none());
+    }
+
+    #[test]
+    fn transactions_response_deserializes() {
+        let json = r#"{
+            "accounts": [{
+                "account_id": "acc_1",
+                "name": "Checking",
+                "type": "depository",
+                "subtype": "checking",
+                "balances": { "available": 100.0, "current": 100.0, "limit": null, "iso_currency_code": "USD" }
+            }],
+            "transactions": [{
+                "transaction_id": "txn_1",
+                "name": "Coffee",
+                "amount": 5.00,
+                "date": "2026-03-10",
+                "category": ["Food"],
+                "account_id": "acc_1",
+                "pending": false,
+                "iso_currency_code": "USD",
+                "merchant_name": null
+            }],
+            "total_transactions": 1,
+            "request_id": "req_abc"
+        }"#;
+        let resp: TransactionsGetResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.accounts.len(), 1);
+        assert_eq!(resp.transactions.len(), 1);
+        assert_eq!(resp.total_transactions, 1);
+        assert_eq!(resp.transactions[0].amount_cents(), 500);
+    }
+
+    #[test]
+    fn link_token_response_deserializes() {
+        let json = r#"{
+            "link_token": "link-sandbox-abc123",
+            "expiration": "2026-03-11T00:00:00Z",
+            "request_id": "req_xyz"
+        }"#;
+        let resp: LinkTokenResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.link_token, "link-sandbox-abc123");
+    }
+
+    #[test]
+    fn exchange_token_response_deserializes() {
+        let json = r#"{
+            "access_token": "access-sandbox-token",
+            "item_id": "item_abc",
+            "request_id": "req_123"
+        }"#;
+        let resp: ExchangeTokenResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.access_token, "access-sandbox-token");
+        assert_eq!(resp.item_id, "item_abc");
+    }
+
+    #[test]
+    fn plaid_error_display() {
+        let err = PlaidError::Api {
+            error_type: "INVALID_REQUEST".to_string(),
+            error_code: "MISSING_FIELDS".to_string(),
+            error_message: "client_id is required".to_string(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("INVALID_REQUEST"));
+        assert!(msg.contains("client_id is required"));
+    }
+}

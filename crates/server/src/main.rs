@@ -74,12 +74,23 @@ async fn main() -> Result<()> {
         tracing::info!("Stripe webhook listener configured");
     }
 
+    // Load Plaid config from AEQUI_PLAID_CONFIG env var (JSON string)
+    let plaid_config: Option<aequi_import::plaid::PlaidConfig> =
+        std::env::var("AEQUI_PLAID_CONFIG")
+            .ok()
+            .and_then(|json| serde_json::from_str(&json).ok());
+
+    if plaid_config.is_some() {
+        tracing::info!("Plaid bank sync configured");
+    }
+
     let state = Arc::new(ServerState {
         db,
         api_key,
         email_config,
         oidc,
         stripe_webhook_secret,
+        plaid_config,
     });
 
     // Shutdown signal for background tasks

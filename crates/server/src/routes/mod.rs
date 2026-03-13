@@ -1,6 +1,7 @@
 mod accounts;
 mod health;
 mod invoices;
+mod plaid;
 mod receipts;
 mod reconciliation;
 mod reports;
@@ -69,6 +70,7 @@ pub fn router(state: Arc<ServerState>) -> Router {
         .merge(rules::routes())
         .merge(reconciliation::routes())
         .merge(reports::routes())
+        .merge(plaid::routes())
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             auth_middleware,

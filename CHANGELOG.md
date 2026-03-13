@@ -87,6 +87,28 @@ All notable changes to this project will be documented in this file.
   - `ImportSummary` with account/transaction counts and error details
   - 8 unit tests: parsing, name resolution, date formats, transfers, empty exports
 
+- **Plaid Bank Sync** (`crates/import/src/plaid.rs` + `crates/server/src/routes/plaid.rs`)
+  - `PlaidClient` with Link token creation, public token exchange, and transaction fetch
+  - `PlaidConfig` with sandbox/development/production environment support
+  - Server endpoints: `POST /plaid/link-token`, `/plaid/exchange`, `/plaid/sync`
+  - Auto-creates double-entry transactions from Plaid data (checking vs expense)
+  - Access token stored in settings table for persistent bank connection
+  - Configurable via `AEQUI_PLAID_CONFIG` env var
+  - 12 unit tests (client + routes)
+
+- **Wave Accounting Import** (`crates/import/src/wave.rs`)
+  - Parses Wave's CSV export format (Transaction ID, Date, Account, Type, Amount, etc.)
+  - Converts dollar amounts to cents, parses MM/DD/YYYY dates
+  - `WaveImportSummary` with account counts, transaction counts, date range
+  - 7 unit tests
+
+- **GitHub / Linear Work Items** (`crates/import/src/work_items.rs`)
+  - `WorkItemSource` enum: GitHub (owner/repo/token) or Linear (API key/team)
+  - `fetch_work_items()` calls GitHub REST API or Linear GraphQL
+  - `WorkItemFilter` by milestone, label, date, assignee
+  - `estimate_line_items()` converts work items to invoice line estimates with hourly rates
+  - 6 unit tests
+
 ### Changed
 - Version bumped to 2026.3.13 (CalVer)
 - Server state now includes optional `email_config` and `oidc` fields
@@ -94,7 +116,8 @@ All notable changes to this project will be documented in this file.
 - Import crate gains `reqwest` and `serde_json` dependencies for AI categorization
 - App crate gains `rust_decimal` dependency for invoice record reconstruction
 - All deferred roadmap items complete — roadmap now shows only post-v1 integrations
-- Stripe webhook listener and Actual Budget import added as first post-v1 integrations
+- Stripe, Actual Budget, Plaid, Wave, and GitHub/Linear integrations added as post-v1 features
+- Server crate now depends on `aequi-import` for Plaid client
 
 ---
 

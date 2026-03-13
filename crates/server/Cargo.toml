@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 aequi-core = { path = "../core" }
+aequi-import = { path = "../import" }
 aequi-storage = { path = "../storage" }
 aequi-email = { path = "../email" }
 axum.workspace = true

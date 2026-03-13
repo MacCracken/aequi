@@ -366,6 +366,7 @@ mod tests {
             email_config: None,
             oidc: None,
             stripe_webhook_secret: None,
+            plaid_config: None,
         });
 
         let (tx, rx) = watch::channel(false);
