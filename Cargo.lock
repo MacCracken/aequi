@@ -10,7 +10,7 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
 name = "aequi"
-version = "2026.3.13"
+version = "2026.3.18"
 dependencies = [
  "aequi-core",
  "aequi-email",
@@ -37,7 +37,7 @@ dependencies = [
 
 [[package]]
 name = "aequi-core"
-version = "2026.3.13"
+version = "2026.3.18"
 dependencies = [
  "chrono",
  "rust_decimal",
@@ -49,7 +49,7 @@ dependencies = [
 
 [[package]]
 name = "aequi-email"
-version = "2026.3.13"
+version = "2026.3.18"
 dependencies = [
  "aequi-core",
  "aequi-pdf",
@@ -66,7 +66,7 @@ dependencies = [
 
 [[package]]
 name = "aequi-import"
-version = "2026.3.13"
+version = "2026.3.18"
 dependencies = [
  "aequi-core",
  "chrono",
@@ -82,7 +82,7 @@ dependencies = [
 
 [[package]]
 name = "aequi-mcp"
-version = "2026.3.13"
+version = "2026.3.18"
 dependencies = [
  "aequi-core",
  "aequi-storage",
@@ -106,7 +106,7 @@ dependencies = [
 
 [[package]]
 name = "aequi-ocr"
-version = "2026.3.13"
+version = "2026.3.18"
 dependencies = [
  "aequi-core",
  "chrono",
@@ -125,7 +125,7 @@ dependencies = [
 
 [[package]]
 name = "aequi-pdf"
-version = "2026.3.13"
+version = "2026.3.18"
 dependencies = [
  "aequi-core",
  "chrono",
@@ -137,7 +137,7 @@ dependencies = [
 
 [[package]]
 name = "aequi-server"
-version = "2026.3.13"
+version = "2026.3.18"
 dependencies = [
  "aequi-core",
  "aequi-email",
@@ -165,7 +165,7 @@ dependencies = [
 
 [[package]]
 name = "aequi-storage"
-version = "2026.3.13"
+version = "2026.3.18"
 dependencies = [
  "aequi-core",
  "chrono",

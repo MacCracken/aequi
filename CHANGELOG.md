@@ -2,6 +2,81 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2026.3.18] - 2026-03-18
+
+### Added
+- **Dashboard Page** (`src/pages/DashboardPage.tsx`)
+  - New landing page with account summaries and recent transaction overview
+  - Keyboard shortcut `Ctrl+0` for quick navigation
+
+- **CRUD Forms**
+  - Transaction create/edit forms with validated input
+  - Contact create/edit forms with type selection
+  - Invoice creation form with line items
+  - Search and filter on accounts, transactions, contacts, and invoices pages
+  - Pagination on transactions and invoices pages
+
+- **Error Boundary** (`src/components/ErrorBoundary.tsx`)
+  - React error boundary wrapping entire app with graceful fallback UI
+
+- **Toast Notification System** (`src/components/Toast.tsx`)
+  - Success, error, and info toasts with auto-dismiss
+  - Used across CRUD operations for user feedback
+
+- **Loading Skeletons** (`src/components/Skeleton.tsx`)
+  - Animated placeholder skeletons on all data-fetching pages
+
+- **Database Indexes** (`V002__indexes_and_constraints.sql`)
+  - New migration adding indexes on frequently queried columns
+  - Rollback support via `V002__indexes_and_constraints.down.sql`
+
+- **Typed Command Errors**
+  - `CommandError` with `code` field (VALIDATION, NOT_FOUND, DATABASE, INTERNAL)
+  - Frontend error handling uses error codes for contextual messages
+
+- **Input Validation**
+  - Server-side validation on all Tauri commands with descriptive error messages
+  - Frontend form validation before submission
+
+- **Content Security Policy**
+  - CSP headers configured in `tauri.conf.json` for XSS protection
+
+- **Environment Reference** (`.env.example`)
+  - Documented all environment variables for server, OIDC, Stripe, Plaid, email, MCP
+
+- **Settings Page Expansion**
+  - Backup/restore controls
+  - Export (Beancount/QIF) UI
+  - Schema version viewer
+
+- **Accessibility Improvements**
+  - Skip-to-content link, ARIA landmarks, `focus-visible` outlines
+  - `prefers-reduced-motion` and `prefers-contrast: more` media queries
+  - 44px minimum touch targets on mobile
+
+### Changed
+- Version bumped to 2026.3.18 (CalVer)
+- Test suite expanded to **472 tests** (core 113, import 147, mcp 52, ocr 52, storage 44, server 29, email 27, pdf 8), 0 failures, clippy clean
+- Extensive code quality pass: input sanitization, error handling hardening, dead code removal
+- Storage backup hardened with path traversal checks and improved error reporting
+- OIDC module hardened with key rotation retry logic and better error messages
+- Stripe webhook handler hardened with constant-time signature comparison
+- Plaid integration hardened with input validation and error mapping
+- AI categorization module improved with confidence threshold validation
+- Import profile sharing improved with TOML validation and size limits
+- Email delivery improved with attachment size validation and config checks
+- Graceful startup handling when database or config is missing
+
+### Fixed
+- `schedule_c.rs` quality repair for tag parsing edge case
+- Frontend capture utility type safety improvements
+- Dashboard data loading race conditions
+- Invoice and receipt page rendering with missing optional fields
+- Settings page layout issues on smaller viewports
+- MCP test coverage gaps filled (52 tests, up from 33)
+
+---
+
 ## [2026.3.13] - 2026-03-13
 
 ### Added

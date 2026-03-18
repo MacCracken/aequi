@@ -13,7 +13,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "2026.3.13"
+version = "2026.3.18"
 edition = "2021"
 authors = ["Robert MacCracken <robert.maccracken@gmail.com>"]
 license = "MIT OR AGPL-3.0"

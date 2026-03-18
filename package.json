@@ -1,6 +1,6 @@
 {
   "name": "aequi",
-  "version": "2026.3.13",
+  "version": "2026.3.18",
   "description": "**Status:** In Development (Phase 2 Complete — Phase 3 in Progress) **Target:** Freelancers, sole proprietors, independent contractors (US-focused v1)",
   "scripts": {
     "dev": "vite",
