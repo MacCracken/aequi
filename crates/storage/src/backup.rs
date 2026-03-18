@@ -153,7 +153,7 @@ pub fn restore_backup(
             .map_err(|e| BackupError::Io(format!("Invalid path in archive: {e}")))?
             .to_path_buf();
 
-        // Security: reject absolute paths and path traversal
+        // Security: reject absolute paths, path traversal, and symlinks
         if path.is_absolute()
             || path
                 .components()
@@ -161,6 +161,13 @@ pub fn restore_backup(
         {
             return Err(BackupError::InvalidArchive(
                 "Archive contains path traversal".to_string(),
+            ));
+        }
+        if entry.header().entry_type().is_symlink()
+            || entry.header().entry_type().is_hard_link()
+        {
+            return Err(BackupError::InvalidArchive(
+                "Archive contains symlinks (not allowed)".to_string(),
             ));
         }
 

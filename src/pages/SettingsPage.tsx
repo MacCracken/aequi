@@ -90,9 +90,10 @@ export function SettingsPage() {
         <h3 className="font-medium">Business Profile</h3>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           <div>
-            <label className="block text-xs text-text-muted mb-1">Business Name</label>
+            <label htmlFor="settings-businessName" className="block text-xs text-text-muted mb-1">Business Name</label>
             <div className="flex gap-2">
               <input
+                id="settings-businessName"
                 type="text"
                 value={businessName}
                 onChange={(e) => setBusinessName(e.target.value)}
@@ -108,9 +109,10 @@ export function SettingsPage() {
             </div>
           </div>
           <div>
-            <label className="block text-xs text-text-muted mb-1">EIN / Tax ID</label>
+            <label htmlFor="settings-ein" className="block text-xs text-text-muted mb-1">EIN / Tax ID</label>
             <div className="flex gap-2">
               <input
+                id="settings-ein"
                 type="text"
                 value={businessEin}
                 onChange={(e) => setBusinessEin(e.target.value)}
@@ -150,12 +152,12 @@ export function SettingsPage() {
       {/* MCP Server */}
       <section className="space-y-3">
         <h3 className="font-medium">MCP Server</h3>
-        <label className="flex items-center gap-3 text-sm">
-          <input type="checkbox" checked={mcpEnabled} onChange={toggleMcp} className="rounded" />
+        <label htmlFor="settings-mcpEnabled" className="flex items-center gap-3 text-sm">
+          <input id="settings-mcpEnabled" type="checkbox" checked={mcpEnabled} onChange={toggleMcp} className="rounded" />
           Enable MCP server
         </label>
-        <label className="flex items-center gap-3 text-sm">
-          <input type="checkbox" checked={readOnly} onChange={toggleReadOnly} className="rounded" />
+        <label htmlFor="settings-readOnly" className="flex items-center gap-3 text-sm">
+          <input id="settings-readOnly" type="checkbox" checked={readOnly} onChange={toggleReadOnly} className="rounded" />
           Read-only mode (disables all write tools)
         </label>
       </section>

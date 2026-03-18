@@ -11,21 +11,22 @@ import {
 import { formatCents, formatDate, confidenceLabel, confidenceColor } from "../lib/format";
 import { CameraCapture } from "../components/CameraCapture";
 import { writeCapturedFile } from "../lib/capture";
+import { useToast } from "../components/Toast";
 
 export function ReceiptsPage() {
   const [receipts, setReceipts] = useState<ReceiptOutput[]>([]);
   const [transactions, setTransactions] = useState<TransactionOutput[]>([]);
   const [selected, setSelected] = useState<ReceiptOutput | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const { toast } = useToast();
 
   const refresh = useCallback(() => {
     getPendingReceipts()
       .then(setReceipts)
-      .catch((e) => setError(String(e)));
+      .catch((e) => toast("error", String(e)));
     getTransactions()
       .then(setTransactions)
-      .catch((e) => setError(String(e)));
-  }, []);
+      .catch((e) => toast("error", String(e)));
+  }, [toast]);
 
   useEffect(() => {
     refresh();
@@ -36,8 +37,9 @@ export function ReceiptsPage() {
       await approveReceipt(id, transactionId);
       setSelected(null);
       refresh();
+      toast("success", "Receipt approved");
     } catch (e) {
-      setError(String(e));
+      toast("error", String(e));
     }
   }
 
@@ -46,8 +48,9 @@ export function ReceiptsPage() {
       await rejectReceipt(id);
       setSelected(null);
       refresh();
+      toast("success", "Receipt rejected");
     } catch (e) {
-      setError(String(e));
+      toast("error", String(e));
     }
   }
 
@@ -56,13 +59,10 @@ export function ReceiptsPage() {
       const filePath = await writeCapturedFile(file);
       await ingestReceipt(filePath);
       refresh();
+      toast("success", "Receipt captured");
     } catch (e) {
-      setError(String(e));
+      toast("error", String(e));
     }
-  }
-
-  if (error) {
-    return <p className="text-danger">Error: {error}</p>;
   }
 
   return (

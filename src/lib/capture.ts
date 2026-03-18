@@ -9,7 +9,9 @@ export async function writeCapturedFile(file: File): Promise<string> {
   const dir = "intake";
   await mkdir(dir, { baseDir: BaseDirectory.AppData, recursive: true });
 
-  const ext = file.name.split(".").pop() ?? "jpg";
+  const rawExt = (file.name.split(".").pop() ?? "jpg").toLowerCase();
+  const allowedExts = ["jpg", "jpeg", "png", "gif", "webp", "tiff", "tif", "bmp", "pdf"];
+  const ext = allowedExts.includes(rawExt) ? rawExt : "jpg";
   const name = `capture_${Date.now()}.${ext}`;
   const path = `${dir}/${name}`;
 

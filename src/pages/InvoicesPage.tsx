@@ -243,8 +243,9 @@ function InvoiceForm({
     <form onSubmit={handleSubmit} className="bg-surface rounded-lg border border-border p-4 space-y-4 mb-4">
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         <div>
-          <label className="block text-xs text-text-muted mb-1">Invoice Number *</label>
+          <label htmlFor="inv-invoiceNumber" className="block text-xs text-text-muted mb-1">Invoice Number *</label>
           <input
+            id="inv-invoiceNumber"
             type="text"
             value={invoiceNumber}
             onChange={(e) => setInvoiceNumber(e.target.value)}
@@ -254,8 +255,9 @@ function InvoiceForm({
           />
         </div>
         <div>
-          <label className="block text-xs text-text-muted mb-1">Contact *</label>
+          <label htmlFor="inv-contactId" className="block text-xs text-text-muted mb-1">Contact *</label>
           <select
+            id="inv-contactId"
             value={contactId}
             onChange={(e) => setContactId(e.target.value ? Number(e.target.value) : "")}
             required
@@ -270,8 +272,9 @@ function InvoiceForm({
           </select>
         </div>
         <div>
-          <label className="block text-xs text-text-muted mb-1">Issue Date</label>
+          <label htmlFor="inv-issueDate" className="block text-xs text-text-muted mb-1">Issue Date</label>
           <input
+            id="inv-issueDate"
             type="date"
             value={issueDate}
             onChange={(e) => setIssueDate(e.target.value)}
@@ -280,8 +283,9 @@ function InvoiceForm({
           />
         </div>
         <div>
-          <label className="block text-xs text-text-muted mb-1">Due Date *</label>
+          <label htmlFor="inv-dueDate" className="block text-xs text-text-muted mb-1">Due Date *</label>
           <input
+            id="inv-dueDate"
             type="date"
             value={dueDate}
             onChange={(e) => setDueDate(e.target.value)}
@@ -291,8 +295,9 @@ function InvoiceForm({
           />
         </div>
         <div>
-          <label className="block text-xs text-text-muted mb-1">Terms</label>
+          <label htmlFor="inv-terms" className="block text-xs text-text-muted mb-1">Terms</label>
           <input
+            id="inv-terms"
             type="text"
             value={terms}
             onChange={(e) => setTerms(e.target.value)}
@@ -301,8 +306,9 @@ function InvoiceForm({
           />
         </div>
         <div>
-          <label className="block text-xs text-text-muted mb-1">Notes</label>
+          <label htmlFor="inv-notes" className="block text-xs text-text-muted mb-1">Notes</label>
           <input
+            id="inv-notes"
             type="text"
             value={notes}
             onChange={(e) => setNotes(e.target.value)}

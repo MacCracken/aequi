@@ -214,8 +214,9 @@ function ContactForm({
     <form onSubmit={handleSubmit} className="bg-surface rounded-lg border border-border p-4 space-y-4 mb-4">
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         <div>
-          <label className="block text-xs text-text-muted mb-1">Name *</label>
+          <label htmlFor="contact-name" className="block text-xs text-text-muted mb-1">Name *</label>
           <input
+            id="contact-name"
             type="text"
             value={name}
             onChange={(e) => setName(e.target.value)}
@@ -224,8 +225,9 @@ function ContactForm({
           />
         </div>
         <div>
-          <label className="block text-xs text-text-muted mb-1">Email</label>
+          <label htmlFor="contact-email" className="block text-xs text-text-muted mb-1">Email</label>
           <input
+            id="contact-email"
             type="email"
             value={email}
             onChange={(e) => setEmail(e.target.value)}
@@ -233,8 +235,9 @@ function ContactForm({
           />
         </div>
         <div>
-          <label className="block text-xs text-text-muted mb-1">Phone</label>
+          <label htmlFor="contact-phone" className="block text-xs text-text-muted mb-1">Phone</label>
           <input
+            id="contact-phone"
             type="tel"
             value={phone}
             onChange={(e) => setPhone(e.target.value)}
@@ -242,8 +245,9 @@ function ContactForm({
           />
         </div>
         <div>
-          <label className="block text-xs text-text-muted mb-1">Type</label>
+          <label htmlFor="contact-type" className="block text-xs text-text-muted mb-1">Type</label>
           <select
+            id="contact-type"
             value={contactType}
             onChange={(e) => setContactType(e.target.value)}
             className="w-full px-3 py-1.5 text-sm border border-border rounded-md bg-bg focus:outline-none focus:border-primary"
@@ -254,8 +258,9 @@ function ContactForm({
           </select>
         </div>
         <div className="md:col-span-2">
-          <label className="block text-xs text-text-muted mb-1">Address</label>
+          <label htmlFor="contact-address" className="block text-xs text-text-muted mb-1">Address</label>
           <input
+            id="contact-address"
             type="text"
             value={address}
             onChange={(e) => setAddress(e.target.value)}
@@ -263,8 +268,9 @@ function ContactForm({
           />
         </div>
         <div>
-          <label className="block text-xs text-text-muted mb-1">Tax ID</label>
+          <label htmlFor="contact-taxId" className="block text-xs text-text-muted mb-1">Tax ID</label>
           <input
+            id="contact-taxId"
             type="text"
             value={taxId}
             onChange={(e) => setTaxId(e.target.value)}
@@ -272,8 +278,9 @@ function ContactForm({
           />
         </div>
         <div className="flex items-end">
-          <label className="flex items-center gap-2 text-sm pb-1">
+          <label htmlFor="contact-isContractor" className="flex items-center gap-2 text-sm pb-1">
             <input
+              id="contact-isContractor"
               type="checkbox"
               checked={isContractor}
               onChange={(e) => setIsContractor(e.target.checked)}
@@ -283,8 +290,9 @@ function ContactForm({
           </label>
         </div>
         <div className="md:col-span-2">
-          <label className="block text-xs text-text-muted mb-1">Notes</label>
+          <label htmlFor="contact-notes" className="block text-xs text-text-muted mb-1">Notes</label>
           <textarea
+            id="contact-notes"
             value={notes}
             onChange={(e) => setNotes(e.target.value)}
             rows={2}

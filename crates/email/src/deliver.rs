@@ -48,6 +48,20 @@ pub async fn send_invoice(
 
     let default_subject = format!("Invoice {}", invoice.invoice_number);
     let subject = subject.unwrap_or(&default_subject);
+
+    // Reject CRLF in header-sensitive fields to prevent email header injection
+    for (field, value) in [
+        ("subject", subject),
+        ("contact name", &contact.name),
+        ("invoice number", &invoice.invoice_number),
+    ] {
+        if value.contains('\r') || value.contains('\n') {
+            return Err(DeliveryError::MessageBuild(format!(
+                "Invalid {field}: must not contain line breaks"
+            )));
+        }
+    }
+
     let filename = format!("{}.pdf", invoice.invoice_number);
 
     let (from_name, from_email) = config.from_address();

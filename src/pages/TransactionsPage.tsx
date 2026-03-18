@@ -244,8 +244,9 @@ function TransactionForm({
     <form onSubmit={handleSubmit} className="bg-surface rounded-lg border border-border p-4 space-y-4">
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         <div>
-          <label className="block text-xs text-text-muted mb-1">Date</label>
+          <label htmlFor="tx-date" className="block text-xs text-text-muted mb-1">Date</label>
           <input
+            id="tx-date"
             type="date"
             value={date}
             onChange={(e) => setDate(e.target.value)}
@@ -254,8 +255,9 @@ function TransactionForm({
           />
         </div>
         <div>
-          <label className="block text-xs text-text-muted mb-1">Description</label>
+          <label htmlFor="tx-description" className="block text-xs text-text-muted mb-1">Description</label>
           <input
+            id="tx-description"
             type="text"
             value={description}
             onChange={(e) => setDescription(e.target.value)}
@@ -279,7 +281,9 @@ function TransactionForm({
         </div>
         {lines.map((line, idx) => (
           <div key={idx} className="flex gap-2 items-center">
+            <label htmlFor={`line-${idx}-account`} className="sr-only">Line {idx + 1} account</label>
             <select
+              id={`line-${idx}-account`}
               value={line.account_code}
               onChange={(e) => updateLine(idx, "account_code", e.target.value)}
               className="flex-1 px-2 py-1.5 text-sm border border-border rounded-md bg-bg focus:outline-none focus:border-primary"
@@ -291,7 +295,9 @@ function TransactionForm({
                 </option>
               ))}
             </select>
+            <label htmlFor={`line-${idx}-debit`} className="sr-only">Line {idx + 1} debit</label>
             <input
+              id={`line-${idx}-debit`}
               type="number"
               step="0.01"
               min="0"
@@ -302,7 +308,9 @@ function TransactionForm({
               }
               className="w-24 px-2 py-1.5 text-sm border border-border rounded-md bg-bg focus:outline-none focus:border-primary"
             />
+            <label htmlFor={`line-${idx}-credit`} className="sr-only">Line {idx + 1} credit</label>
             <input
+              id={`line-${idx}-credit`}
               type="number"
               step="0.01"
               min="0"

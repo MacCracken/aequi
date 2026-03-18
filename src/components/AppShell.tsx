@@ -42,6 +42,7 @@ export function AppShell() {
             <NavLink
               key={link.to}
               to={link.to}
+              end={link.to === "/"}
               aria-label={`${link.label} (Ctrl+${link.shortcut})`}
               className={({ isActive }) =>
                 `px-3 py-1.5 rounded-md text-sm font-medium transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary ${
@@ -67,6 +68,7 @@ export function AppShell() {
           <NavLink
             key={link.to}
             to={link.to}
+            end={link.to === "/"}
             aria-label={link.label}
             className={({ isActive }) =>
               `flex flex-col items-center gap-0.5 px-2 py-1 rounded-lg text-xs font-medium transition-colors min-w-[48px] min-h-[44px] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary ${
