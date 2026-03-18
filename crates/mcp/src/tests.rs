@@ -568,9 +568,19 @@ async fn draft_invoice_and_list_unpaid() {
     let perms = Permissions::default();
 
     // Insert a contact first so we have a valid contact_id
-    aequi_storage::insert_contact(&db, "Test Client", Some("test@example.com"), None, None, "customer", false, None, None)
-        .await
-        .unwrap();
+    aequi_storage::insert_contact(
+        &db,
+        "Test Client",
+        Some("test@example.com"),
+        None,
+        None,
+        "customer",
+        false,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
 
     let result = registry
         .call(
@@ -585,7 +595,11 @@ async fn draft_invoice_and_list_unpaid() {
             &perms,
         )
         .await;
-    assert!(result.is_error.is_none(), "Expected success, got: {:?}", result);
+    assert!(
+        result.is_error.is_none(),
+        "Expected success, got: {:?}",
+        result
+    );
     assert!(result.content[0].text.contains("invoice_id"));
     assert!(result.content[0].text.contains("Draft"));
 }
@@ -596,9 +610,11 @@ async fn draft_invoice_with_notes() {
     let registry = ToolRegistry::new();
     let perms = Permissions::default();
 
-    aequi_storage::insert_contact(&db, "Client B", None, None, None, "customer", false, None, None)
-        .await
-        .unwrap();
+    aequi_storage::insert_contact(
+        &db, "Client B", None, None, None, "customer", false, None, None,
+    )
+    .await
+    .unwrap();
 
     let result = registry
         .call(
@@ -638,9 +654,19 @@ async fn record_payment_against_invoice() {
     let registry = ToolRegistry::new();
     let perms = Permissions::default();
 
-    aequi_storage::insert_contact(&db, "Pay Client", None, None, None, "customer", false, None, None)
-        .await
-        .unwrap();
+    aequi_storage::insert_contact(
+        &db,
+        "Pay Client",
+        None,
+        None,
+        None,
+        "customer",
+        false,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
 
     // Create a draft invoice first
     let draft = registry
@@ -684,9 +710,11 @@ async fn record_payment_without_method() {
     let registry = ToolRegistry::new();
     let perms = Permissions::default();
 
-    aequi_storage::insert_contact(&db, "Client C", None, None, None, "customer", false, None, None)
-        .await
-        .unwrap();
+    aequi_storage::insert_contact(
+        &db, "Client C", None, None, None, "customer", false, None, None,
+    )
+    .await
+    .unwrap();
 
     let draft = registry
         .call(
@@ -727,13 +755,25 @@ async fn list_unpaid_invoices_with_sent_status() {
     let registry = ToolRegistry::new();
     let perms = Permissions::default();
 
-    aequi_storage::insert_contact(&db, "Client D", None, None, None, "customer", false, None, None)
-        .await
-        .unwrap();
+    aequi_storage::insert_contact(
+        &db, "Client D", None, None, None, "customer", false, None, None,
+    )
+    .await
+    .unwrap();
 
     // Insert an invoice with "Sent" status directly
     aequi_storage::insert_invoice(
-        &db, "INV-SENT-001", 1, "Sent", None, "2026-03-01", "2026-03-31", None, None, None, None,
+        &db,
+        "INV-SENT-001",
+        1,
+        "Sent",
+        None,
+        "2026-03-01",
+        "2026-03-31",
+        None,
+        None,
+        None,
+        None,
     )
     .await
     .unwrap();
@@ -960,7 +1000,9 @@ async fn ingest_receipt_supported_extensions_pass_validation() {
     let perms = Permissions::default();
 
     // These should pass validation but fail on "Cannot read file" since files don't exist
-    for ext in &["jpg", "jpeg", "png", "gif", "webp", "tiff", "tif", "bmp", "pdf"] {
+    for ext in &[
+        "jpg", "jpeg", "png", "gif", "webp", "tiff", "tif", "bmp", "pdf",
+    ] {
         let result = registry
             .call(
                 "aequi_ingest_receipt",
@@ -1001,8 +1043,18 @@ async fn approve_receipt_without_transaction() {
 
     // Insert a receipt directly for testing
     aequi_storage::insert_receipt(
-        &db, "abc123hash", "jpg", "/tmp/test.jpg", None,
-        Some("TestVendor"), Some("2026-03-01"), Some(1500), None, None, None, 0.0,
+        &db,
+        "abc123hash",
+        "jpg",
+        "/tmp/test.jpg",
+        None,
+        Some("TestVendor"),
+        Some("2026-03-01"),
+        Some(1500),
+        None,
+        None,
+        None,
+        0.0,
     )
     .await
     .unwrap();
@@ -1026,8 +1078,18 @@ async fn reject_receipt() {
     let perms = Permissions::default();
 
     aequi_storage::insert_receipt(
-        &db, "def456hash", "png", "/tmp/test2.png", None,
-        Some("Vendor2"), Some("2026-03-02"), Some(2000), None, None, None, 0.0,
+        &db,
+        "def456hash",
+        "png",
+        "/tmp/test2.png",
+        None,
+        Some("Vendor2"),
+        Some("2026-03-02"),
+        Some(2000),
+        None,
+        None,
+        None,
+        0.0,
     )
     .await
     .unwrap();

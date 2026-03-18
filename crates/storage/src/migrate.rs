@@ -452,7 +452,10 @@ mod tests {
         // Run migrations — should detect existing tables, skip V001, and apply remaining
         let count = run_migrations(&pool).await.unwrap();
         let remaining = all_migrations().len() - 1; // V001 bootstrapped, rest applied
-        assert_eq!(count, remaining, "Should apply remaining migrations after bootstrap");
+        assert_eq!(
+            count, remaining,
+            "Should apply remaining migrations after bootstrap"
+        );
 
         let total = all_migrations().len() as i64;
         let ver = current_version(&pool).await.unwrap();

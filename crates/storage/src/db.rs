@@ -948,11 +948,9 @@ pub async fn update_invoice_status(
 }
 
 pub async fn get_all_invoices(pool: &DbPool) -> Result<Vec<InvoiceRecord>, sqlx::Error> {
-    sqlx::query_as::<_, InvoiceRecord>(
-        "SELECT * FROM invoices ORDER BY created_at DESC LIMIT 5000",
-    )
-    .fetch_all(pool)
-    .await
+    sqlx::query_as::<_, InvoiceRecord>("SELECT * FROM invoices ORDER BY created_at DESC LIMIT 5000")
+        .fetch_all(pool)
+        .await
 }
 
 pub async fn get_invoice_by_id(
@@ -1283,9 +1281,7 @@ mod tests {
         assert!(found.is_some());
         assert_eq!(found.unwrap().code, first.code);
 
-        let missing = get_account_by_code(&pool, "NONEXISTENT-999")
-            .await
-            .unwrap();
+        let missing = get_account_by_code(&pool, "NONEXISTENT-999").await.unwrap();
         assert!(missing.is_none());
     }
 
@@ -1616,7 +1612,18 @@ mod tests {
     async fn test_link_receipt_to_transaction() {
         let pool = test_pool().await;
         let receipt_id = insert_receipt(
-            &pool, "link_hash", "jpg", "/r/link.jpg", None, None, None, None, None, None, None, 0.5,
+            &pool,
+            "link_hash",
+            "jpg",
+            "/r/link.jpg",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            0.5,
         )
         .await
         .unwrap();
@@ -1626,8 +1633,10 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
-        let tx_id: (i64,) =
-            sqlx::query_as("SELECT last_insert_rowid()").fetch_one(&pool).await.unwrap();
+        let tx_id: (i64,) = sqlx::query_as("SELECT last_insert_rowid()")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
 
         link_receipt_to_transaction(&pool, receipt_id, tx_id.0)
             .await
@@ -1645,9 +1654,15 @@ mod tests {
     async fn test_audit_log() {
         let pool = test_pool().await;
 
-        let id1 = insert_audit_log(&pool, "create_invoice", Some("hash1"), "success", Some("Created INV-001"))
-            .await
-            .unwrap();
+        let id1 = insert_audit_log(
+            &pool,
+            "create_invoice",
+            Some("hash1"),
+            "success",
+            Some("Created INV-001"),
+        )
+        .await
+        .unwrap();
         let id2 = insert_audit_log(&pool, "delete_contact", None, "error", Some("Not found"))
             .await
             .unwrap();
@@ -1660,10 +1675,16 @@ mod tests {
         let tool_names: Vec<&str> = logs.iter().map(|l| l.tool_name.as_str()).collect();
         assert!(tool_names.contains(&"create_invoice"));
         assert!(tool_names.contains(&"delete_contact"));
-        let create_log = logs.iter().find(|l| l.tool_name == "create_invoice").unwrap();
+        let create_log = logs
+            .iter()
+            .find(|l| l.tool_name == "create_invoice")
+            .unwrap();
         assert_eq!(create_log.input_hash.as_deref(), Some("hash1"));
         assert_eq!(create_log.outcome, "success");
-        let delete_log = logs.iter().find(|l| l.tool_name == "delete_contact").unwrap();
+        let delete_log = logs
+            .iter()
+            .find(|l| l.tool_name == "delete_contact")
+            .unwrap();
         assert_eq!(delete_log.outcome, "error");
 
         // Limit works
@@ -1699,9 +1720,19 @@ mod tests {
         let pool = test_pool().await;
 
         // Upsert Q1
-        let id = upsert_tax_period(&pool, 2026, 1, 500000, 200000, 300000, 1000000, "2026-04-15", 2026)
-            .await
-            .unwrap();
+        let id = upsert_tax_period(
+            &pool,
+            2026,
+            1,
+            500000,
+            200000,
+            300000,
+            1000000,
+            "2026-04-15",
+            2026,
+        )
+        .await
+        .unwrap();
         assert!(id > 0);
 
         // Get periods
@@ -1714,9 +1745,19 @@ mod tests {
         assert_eq!(periods[0].payment_recorded_cents, 0);
 
         // Upsert same quarter updates
-        upsert_tax_period(&pool, 2026, 1, 550000, 210000, 340000, 1100000, "2026-04-15", 2026)
-            .await
-            .unwrap();
+        upsert_tax_period(
+            &pool,
+            2026,
+            1,
+            550000,
+            210000,
+            340000,
+            1100000,
+            "2026-04-15",
+            2026,
+        )
+        .await
+        .unwrap();
         let periods = get_tax_periods(&pool, 2026).await.unwrap();
         assert_eq!(periods.len(), 1);
         assert_eq!(periods[0].estimated_tax_cents, 550000);
@@ -1739,12 +1780,32 @@ mod tests {
         assert!(none.is_none());
 
         // Add 2025 tax periods
-        upsert_tax_period(&pool, 2025, 1, 100000, 50000, 50000, 400000, "2025-04-15", 2025)
-            .await
-            .unwrap();
-        upsert_tax_period(&pool, 2025, 2, 120000, 60000, 60000, 500000, "2025-06-15", 2025)
-            .await
-            .unwrap();
+        upsert_tax_period(
+            &pool,
+            2025,
+            1,
+            100000,
+            50000,
+            50000,
+            400000,
+            "2025-04-15",
+            2025,
+        )
+        .await
+        .unwrap();
+        upsert_tax_period(
+            &pool,
+            2025,
+            2,
+            120000,
+            60000,
+            60000,
+            500000,
+            "2025-06-15",
+            2025,
+        )
+        .await
+        .unwrap();
 
         let total = get_prior_year_total_tax(&pool, 2026).await.unwrap();
         assert_eq!(total, Some(220000)); // 100000 + 120000
@@ -1848,10 +1909,9 @@ mod tests {
         assert!(!sessions[0].is_completed);
 
         // Add items
-        let item_id =
-            add_reconciliation_item(&pool, session_id, None, None, "unmatched", 1500)
-                .await
-                .unwrap();
+        let item_id = add_reconciliation_item(&pool, session_id, None, None, "unmatched", 1500)
+            .await
+            .unwrap();
         assert!(item_id > 0);
 
         let items = get_reconciliation_items(&pool, session_id).await.unwrap();

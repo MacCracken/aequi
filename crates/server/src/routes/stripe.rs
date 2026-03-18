@@ -209,10 +209,7 @@ async fn handle_webhook(
     let obj = &event.data.object;
 
     // Extract amount (Stripe uses cents)
-    let amount_cents = obj
-        .get("amount")
-        .and_then(|v| v.as_i64())
-        .unwrap_or(0);
+    let amount_cents = obj.get("amount").and_then(|v| v.as_i64()).unwrap_or(0);
 
     if amount_cents == 0 {
         return (
@@ -232,10 +229,7 @@ async fn handle_webhook(
         .unwrap_or_else(|| chrono::Utc::now().date_naive());
 
     // Extract description details
-    let stripe_id = obj
-        .get("id")
-        .and_then(|v| v.as_str())
-        .unwrap_or(&event.id);
+    let stripe_id = obj.get("id").and_then(|v| v.as_str()).unwrap_or(&event.id);
     let description = format!("{desc_prefix}: {stripe_id}");
 
     // Look up accounts
@@ -244,7 +238,9 @@ async fn handle_webhook(
         _ => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                axum::Json(serde_json::json!({ "error": format!("Debit account {debit_code} not found") })),
+                axum::Json(
+                    serde_json::json!({ "error": format!("Debit account {debit_code} not found") }),
+                ),
             );
         }
     };
@@ -254,16 +250,15 @@ async fn handle_webhook(
         _ => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                axum::Json(serde_json::json!({ "error": format!("Credit account {credit_code} not found") })),
+                axum::Json(
+                    serde_json::json!({ "error": format!("Credit account {credit_code} not found") }),
+                ),
             );
         }
     };
 
     // Handle Stripe fees as a separate line if present
-    let fee_cents = obj
-        .get("fee")
-        .and_then(|v| v.as_i64())
-        .unwrap_or(0);
+    let fee_cents = obj.get("fee").and_then(|v| v.as_i64()).unwrap_or(0);
 
     // Guard against negative amounts
     if amount_cents < 0 {
@@ -331,7 +326,9 @@ async fn handle_webhook(
         Err(e) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                axum::Json(serde_json::json!({ "error": format!("Transaction validation failed: {e}") })),
+                axum::Json(
+                    serde_json::json!({ "error": format!("Transaction validation failed: {e}") }),
+                ),
             );
         }
     };
@@ -342,7 +339,9 @@ async fn handle_webhook(
         Err(e) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                axum::Json(serde_json::json!({ "error": format!("DB transaction begin failed: {e}") })),
+                axum::Json(
+                    serde_json::json!({ "error": format!("DB transaction begin failed: {e}") }),
+                ),
             );
         }
     };
@@ -502,7 +501,11 @@ mod tests {
         let expected = hex::encode(outer.finalize());
 
         let sig_header = format!("t={timestamp},v1={expected}");
-        assert!(verify_stripe_signature(payload.as_bytes(), &sig_header, secret));
+        assert!(verify_stripe_signature(
+            payload.as_bytes(),
+            &sig_header,
+            secret
+        ));
     }
 
     #[test]

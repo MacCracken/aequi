@@ -206,10 +206,7 @@ impl PlaidClient {
     }
 
     /// Create a Link token for initializing Plaid Link in the frontend.
-    pub async fn create_link_token(
-        &self,
-        user_id: &str,
-    ) -> Result<LinkTokenResponse, PlaidError> {
+    pub async fn create_link_token(&self, user_id: &str) -> Result<LinkTokenResponse, PlaidError> {
         let body = LinkTokenCreateRequest {
             client_id: self.config.client_id.clone(),
             secret: self.config.secret.clone(),

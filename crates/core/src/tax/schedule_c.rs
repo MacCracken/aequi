@@ -146,11 +146,7 @@ mod tests {
             ScheduleCLine::Line30,
         ];
         for line in expense_lines {
-            assert!(
-                !line.is_income(),
-                "{:?} should not be income",
-                line
-            );
+            assert!(!line.is_income(), "{:?} should not be income", line);
         }
     }
 
@@ -185,7 +181,11 @@ mod tests {
         for line in all {
             let s = line.to_string();
             assert!(!s.is_empty(), "{:?} has empty display", line);
-            assert!(s.contains("Line"), "{:?} display should contain 'Line': {s}", line);
+            assert!(
+                s.contains("Line"),
+                "{:?} display should contain 'Line': {s}",
+                line
+            );
         }
     }
 

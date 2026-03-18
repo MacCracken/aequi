@@ -93,8 +93,7 @@ pub fn router(state: Arc<ServerState>) -> Router {
         ));
 
     // Stripe webhook sits outside auth middleware (has its own signature verification)
-    let stripe_api = Router::new()
-        .merge(stripe::routes());
+    let stripe_api = Router::new().merge(stripe::routes());
 
     // Restrict CORS to configured origins or localhost for development
     let cors = match std::env::var("AEQUI_CORS_ORIGINS") {

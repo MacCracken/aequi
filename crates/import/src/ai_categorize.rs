@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 /// Configuration for the AI categorization endpoint.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AiCategorizationConfig {
-    /// MCP server endpoint URL (e.g. "http://localhost:8061")
+    /// MCP server endpoint URL (e.g. `http://localhost:8061`)
     pub endpoint: String,
     /// Optional Bearer token for authentication
     pub api_key: Option<String>,
@@ -105,7 +105,10 @@ pub async fn suggest_category(
         .map_err(|e| AiCategorizeError::RequestFailed(e.to_string()))?;
 
     let mut req = client
-        .post(format!("{}/categorize", config.endpoint.trim_end_matches('/')))
+        .post(format!(
+            "{}/categorize",
+            config.endpoint.trim_end_matches('/')
+        ))
         .json(&request);
 
     if let Some(ref key) = config.api_key {
@@ -119,10 +122,7 @@ pub async fn suggest_category(
 
     if !resp.status().is_success() {
         let status = resp.status();
-        let mut body = resp
-            .text()
-            .await
-            .unwrap_or_else(|_| "no body".to_string());
+        let mut body = resp.text().await.unwrap_or_else(|_| "no body".to_string());
         body.truncate(500);
         return Err(AiCategorizeError::RequestFailed(format!(
             "{status}: {body}"
@@ -134,7 +134,10 @@ pub async fn suggest_category(
         .await
         .map_err(|e| AiCategorizeError::InvalidResponse(e.to_string()))?;
 
-    Ok(filter_by_confidence(response.suggestions, config.min_confidence))
+    Ok(filter_by_confidence(
+        response.suggestions,
+        config.min_confidence,
+    ))
 }
 
 /// Batch-suggest categories for multiple transactions.
@@ -145,15 +148,7 @@ pub async fn suggest_categories_batch(
 ) -> Vec<Result<Vec<AiSuggestion>, AiCategorizeError>> {
     let mut results = Vec::with_capacity(transactions.len());
     for (desc, amount, date, memo) in transactions {
-        let result = suggest_category(
-            config,
-            desc,
-            *amount,
-            date,
-            memo.as_deref(),
-            accounts,
-        )
-        .await;
+        let result = suggest_category(config, desc, *amount, date, memo.as_deref(), accounts).await;
         results.push(result);
     }
     results
@@ -277,14 +272,12 @@ mod tests {
 
     #[test]
     fn filter_by_confidence_none_pass() {
-        let suggestions = vec![
-            AiSuggestion {
-                account_code: "5020".into(),
-                account_name: "Meals".into(),
-                confidence: 0.3,
-                reasoning: None,
-            },
-        ];
+        let suggestions = vec![AiSuggestion {
+            account_code: "5020".into(),
+            account_name: "Meals".into(),
+            confidence: 0.3,
+            reasoning: None,
+        }];
         let filtered = filter_by_confidence(suggestions, 0.5);
         assert!(filtered.is_empty());
     }

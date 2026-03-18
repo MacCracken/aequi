@@ -56,15 +56,23 @@ export function getAccounts(): Promise<Account[]> {
   return invoke("get_accounts");
 }
 
-export function createTransaction(input: TransactionInput): Promise<TransactionOutput> {
+export function createTransaction(
+  input: TransactionInput,
+): Promise<TransactionOutput> {
   return invoke("create_transaction", { input });
 }
 
-export function getTransactions(startDate?: string, endDate?: string): Promise<TransactionOutput[]> {
+export function getTransactions(
+  startDate?: string,
+  endDate?: string,
+): Promise<TransactionOutput[]> {
   return invoke("get_transactions", { startDate, endDate });
 }
 
-export function getProfitLoss(startDate?: string, endDate?: string): Promise<ProfitLossEntry[]> {
+export function getProfitLoss(
+  startDate?: string,
+  endDate?: string,
+): Promise<ProfitLossEntry[]> {
   return invoke("get_profit_loss", { startDate, endDate });
 }
 
@@ -76,7 +84,10 @@ export function getPendingReceipts(): Promise<ReceiptOutput[]> {
   return invoke("get_pending_receipts");
 }
 
-export function approveReceipt(receiptId: number, transactionId?: number): Promise<void> {
+export function approveReceipt(
+  receiptId: number,
+  transactionId?: number,
+): Promise<void> {
   return invoke("approve_receipt", { receiptId, transactionId });
 }
 
@@ -119,12 +130,14 @@ export interface ScheduleCPreviewOutput {
 
 export function estimateQuarterlyTax(
   year?: number,
-  quarter?: number
+  quarter?: number,
 ): Promise<QuarterlyEstimateOutput> {
   return invoke("estimate_quarterly_tax", { year, quarter });
 }
 
-export function getScheduleCPreview(year?: number): Promise<ScheduleCPreviewOutput> {
+export function getScheduleCPreview(
+  year?: number,
+): Promise<ScheduleCPreviewOutput> {
   return invoke("get_schedule_c_preview", { year });
 }
 
@@ -319,6 +332,8 @@ export interface UpdateContactInput {
   notes?: string;
 }
 
-export function updateContact(input: UpdateContactInput): Promise<ContactRecord> {
+export function updateContact(
+  input: UpdateContactInput,
+): Promise<ContactRecord> {
   return invoke("update_contact", { input });
 }

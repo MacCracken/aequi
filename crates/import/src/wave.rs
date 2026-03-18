@@ -54,10 +54,7 @@ pub fn parse_wave_csv<R: Read>(reader: R) -> Result<Vec<WaveTransaction>, WaveIm
         .trim(csv::Trim::All)
         .from_reader(reader);
 
-    let headers = csv_reader
-        .headers()
-        .map_err(WaveImportError::Csv)?
-        .clone();
+    let headers = csv_reader.headers().map_err(WaveImportError::Csv)?.clone();
 
     let col = |name: &str| -> Result<usize, WaveImportError> {
         headers
@@ -247,7 +244,8 @@ mod tests {
 
     #[test]
     fn empty_input_errors() {
-        let data = "Transaction ID,Date,Account,Transaction Type,Amount,Description,Category,Notes\n";
+        let data =
+            "Transaction ID,Date,Account,Transaction Type,Amount,Description,Category,Notes\n";
         let result = parse_wave_csv(data.as_bytes());
         assert!(matches!(result, Err(WaveImportError::NoDataRows)));
     }

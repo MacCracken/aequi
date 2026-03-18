@@ -178,7 +178,11 @@ mod tests {
             tax_cents: Some(ExtractedField::new(100, 0.8)),
             total_cents: Some(ExtractedField::new(1100, 0.85)),
             payment_method: Some(ExtractedField::new(PaymentMethod::Visa, 0.7)),
-            line_items: vec![LineItem { description: "Widget".into(), amount_cents: Some(1000), quantity: Some(1.0) }],
+            line_items: vec![LineItem {
+                description: "Widget".into(),
+                amount_cents: Some(1000),
+                quantity: Some(1.0),
+            }],
             confidence: 0.85,
         };
         let json = serde_json::to_string(&receipt).unwrap();

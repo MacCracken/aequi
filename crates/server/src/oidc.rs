@@ -5,7 +5,7 @@ use tokio::sync::RwLock;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OidcConfig {
-    /// OIDC issuer URL (e.g. "https://accounts.google.com")
+    /// OIDC issuer URL (e.g. `https://accounts.google.com`)
     pub issuer: String,
     /// Expected audience (client ID)
     pub audience: String,
@@ -135,25 +135,21 @@ impl JwksCache {
         token: &str,
         jwks: &jsonwebtoken::jwk::JwkSet,
     ) -> Result<Claims, String> {
-        let header = jsonwebtoken::decode_header(token)
-            .map_err(|e| format!("invalid JWT header: {e}"))?;
+        let header =
+            jsonwebtoken::decode_header(token).map_err(|e| format!("invalid JWT header: {e}"))?;
 
         // Reject algorithms not in the allowed list (prevents algorithm confusion)
         if !ALLOWED_ALGORITHMS.contains(&header.alg) {
             return Err(format!("algorithm {:?} not allowed", header.alg));
         }
 
-        let kid = header
-            .kid
-            .as_ref()
-            .ok_or("JWT missing kid header")?;
+        let kid = header.kid.as_ref().ok_or("JWT missing kid header")?;
 
         let jwk = jwks
             .find(kid)
             .ok_or_else(|| format!("no matching key for kid: {kid}"))?;
 
-        let decoding_key = DecodingKey::from_jwk(jwk)
-            .map_err(|e| format!("invalid JWK: {e}"))?;
+        let decoding_key = DecodingKey::from_jwk(jwk).map_err(|e| format!("invalid JWK: {e}"))?;
 
         let mut validation = Validation::new(header.alg);
         validation.set_audience(&[&self.config.audience]);

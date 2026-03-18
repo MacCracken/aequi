@@ -17,13 +17,14 @@ use state::ServerState;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let filter =
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
 
     // AEQUI_LOG_FORMAT=json enables structured Bunyan-compatible JSON logging
     if std::env::var("AEQUI_LOG_FORMAT").as_deref() == Ok("json") {
-        let formatting_layer =
-            tracing_bunyan_formatter::BunyanFormattingLayer::new("aequi-server".into(), std::io::stdout);
+        let formatting_layer = tracing_bunyan_formatter::BunyanFormattingLayer::new(
+            "aequi-server".into(),
+            std::io::stdout,
+        );
         let json_fields_layer = tracing_bunyan_formatter::JsonStorageLayer;
 
         tracing_subscriber::registry()
@@ -32,9 +33,7 @@ async fn main() -> Result<()> {
             .with(formatting_layer)
             .init();
     } else {
-        tracing_subscriber::fmt()
-            .with_env_filter(filter)
-            .init();
+        tracing_subscriber::fmt().with_env_filter(filter).init();
     }
 
     let db_path = std::env::var("AEQUI_DB_PATH")
@@ -50,10 +49,9 @@ async fn main() -> Result<()> {
     aequi_storage::seed_default_accounts(&db).await?;
 
     // Load email config from AEQUI_EMAIL_CONFIG env var (JSON string)
-    let email_config: Option<aequi_email::EmailConfig> =
-        std::env::var("AEQUI_EMAIL_CONFIG")
-            .ok()
-            .and_then(|json| serde_json::from_str(&json).ok());
+    let email_config: Option<aequi_email::EmailConfig> = std::env::var("AEQUI_EMAIL_CONFIG")
+        .ok()
+        .and_then(|json| serde_json::from_str(&json).ok());
 
     if email_config.is_some() {
         tracing::info!("Email delivery configured");

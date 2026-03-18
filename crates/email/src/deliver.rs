@@ -43,8 +43,7 @@ pub async fn send_invoice(
         .ok_or(DeliveryError::NoRecipientEmail)?;
 
     let text_body = render_invoice_text(invoice, contact);
-    let pdf_bytes =
-        render_invoice_pdf(invoice, contact).map_err(DeliveryError::PdfError)?;
+    let pdf_bytes = render_invoice_pdf(invoice, contact).map_err(DeliveryError::PdfError)?;
 
     let default_subject = format!("Invoice {}", invoice.invoice_number);
     let subject = subject.unwrap_or(&default_subject);
@@ -157,10 +156,7 @@ async fn send_smtp(
     Ok(())
 }
 
-async fn send_resend(
-    parts: &EmailParts<'_>,
-    api_key: &str,
-) -> Result<(), DeliveryError> {
+async fn send_resend(parts: &EmailParts<'_>, api_key: &str) -> Result<(), DeliveryError> {
     use serde_json::json;
 
     let encoded = base64_encode(parts.pdf_bytes);
@@ -191,10 +187,7 @@ async fn send_resend(
 
     if !resp.status().is_success() {
         let status = resp.status();
-        let mut text = resp
-            .text()
-            .await
-            .unwrap_or_else(|_| "no body".to_string());
+        let mut text = resp.text().await.unwrap_or_else(|_| "no body".to_string());
         text.truncate(500); // avoid leaking verbose error bodies
         return Err(DeliveryError::Resend(format!("{status}: {text}")));
     }
@@ -552,10 +545,7 @@ mod tests {
         assert_eq!(e2.to_string(), "PDF generation failed: typst failed");
 
         let e3 = DeliveryError::MessageBuild("bad header".into());
-        assert_eq!(
-            e3.to_string(),
-            "failed to build email message: bad header"
-        );
+        assert_eq!(e3.to_string(), "failed to build email message: bad header");
 
         let e4 = DeliveryError::Smtp("timeout".into());
         assert_eq!(e4.to_string(), "SMTP delivery failed: timeout");

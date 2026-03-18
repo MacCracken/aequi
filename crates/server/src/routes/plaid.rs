@@ -156,7 +156,10 @@ async fn sync_transactions(
     let mut skipped = 0usize;
 
     // Wrap all inserts in a DB transaction for atomicity
-    let mut db_tx = state.db.begin().await
+    let mut db_tx = state
+        .db
+        .begin()
+        .await
         .map_err(|e| ApiError::Internal(format!("DB transaction begin failed: {e}")))?;
 
     for ptx in &resp.transactions {
@@ -174,13 +177,12 @@ async fn sync_transactions(
 
         // Duplicate detection: skip if transaction_id already imported
         let memo_marker = format!("Plaid: {}", ptx.transaction_id);
-        let exists = sqlx::query_as::<_, (i64,)>(
-            "SELECT 1 FROM transactions WHERE memo = ? LIMIT 1",
-        )
-        .bind(&memo_marker)
-        .fetch_optional(&mut *db_tx)
-        .await
-        .map_err(|e| ApiError::Internal(format!("Duplicate check: {e}")))?;
+        let exists =
+            sqlx::query_as::<_, (i64,)>("SELECT 1 FROM transactions WHERE memo = ? LIMIT 1")
+                .bind(&memo_marker)
+                .fetch_optional(&mut *db_tx)
+                .await
+                .map_err(|e| ApiError::Internal(format!("Duplicate check: {e}")))?;
 
         if exists.is_some() {
             skipped += 1;
@@ -262,7 +264,9 @@ async fn sync_transactions(
         imported += 1;
     }
 
-    db_tx.commit().await
+    db_tx
+        .commit()
+        .await
         .map_err(|e| ApiError::Internal(format!("DB commit failed: {e}")))?;
 
     tracing::info!(

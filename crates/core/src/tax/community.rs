@@ -51,7 +51,11 @@ pub fn validate_submission(submission: &CommunityTaxRules) -> Result<TaxRules, C
         return Err(CommunityError::MissingField("author".into()));
     }
 
-    let jurisdiction_key = format!("{}-{}", meta.country.to_lowercase(), meta.jurisdiction.to_lowercase());
+    let jurisdiction_key = format!(
+        "{}-{}",
+        meta.country.to_lowercase(),
+        meta.jurisdiction.to_lowercase()
+    );
     if meta.jurisdiction != "federal"
         && !VALID_JURISDICTIONS.contains(&jurisdiction_key.as_str())
         && !VALID_JURISDICTIONS.contains(&meta.jurisdiction.to_lowercase().as_str())
@@ -61,8 +65,8 @@ pub fn validate_submission(submission: &CommunityTaxRules) -> Result<TaxRules, C
         ));
     }
 
-    let rules =
-        TaxRules::from_toml(&submission.rules_toml).map_err(|e| CommunityError::ParseError(e.to_string()))?;
+    let rules = TaxRules::from_toml(&submission.rules_toml)
+        .map_err(|e| CommunityError::ParseError(e.to_string()))?;
 
     if rules.year.value != meta.year {
         return Err(CommunityError::YearMismatch {

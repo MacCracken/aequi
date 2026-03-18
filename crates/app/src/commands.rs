@@ -2,9 +2,9 @@ use aequi_core::{
     Account, ContactId, Discount, FiscalYear, InvoiceId, InvoiceLine, Money, Quarter, TaxLine,
     TransactionLine, UnvalidatedTransaction, ValidatedTransaction,
 };
-use rust_decimal::Decimal;
 use aequi_ocr::{MockRecognizer, ReceiptPipeline};
 use chrono::{Datelike, NaiveDate};
+use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
 use std::path::PathBuf;
@@ -117,7 +117,10 @@ pub struct ProfitLossEntry {
 pub async fn get_accounts(
     state: State<'_, Arc<Mutex<AppState>>>,
 ) -> Result<Vec<Account>, CommandError> {
-    let db = { let s = state.lock().await; s.db.clone() };
+    let db = {
+        let s = state.lock().await;
+        s.db.clone()
+    };
     let accounts = aequi_storage::get_all_accounts(&db).await?;
     Ok(accounts)
 }
@@ -127,15 +130,22 @@ pub async fn create_transaction(
     state: State<'_, Arc<Mutex<AppState>>>,
     input: TransactionInput,
 ) -> Result<TransactionOutput, CommandError> {
-    let db = { let s = state.lock().await; s.db.clone() };
+    let db = {
+        let s = state.lock().await;
+        s.db.clone()
+    };
     let db = &db;
 
     let description = input.description.trim().to_string();
     if description.is_empty() {
-        return Err(CommandError::validation("Transaction description is required"));
+        return Err(CommandError::validation(
+            "Transaction description is required",
+        ));
     }
     if input.lines.is_empty() {
-        return Err(CommandError::validation("Transaction must have at least one line"));
+        return Err(CommandError::validation(
+            "Transaction must have at least one line",
+        ));
     }
 
     let date = NaiveDate::parse_from_str(&input.date, "%Y-%m-%d")
@@ -145,17 +155,23 @@ pub async fn create_transaction(
     for line in input.lines {
         let account = aequi_storage::get_account_by_code(db, &line.account_code)
             .await?
-            .ok_or_else(|| CommandError::not_found(format!("Account not found: {}", line.account_code)))?;
+            .ok_or_else(|| {
+                CommandError::not_found(format!("Account not found: {}", line.account_code))
+            })?;
 
         if line.debit_cents < 0 || line.credit_cents < 0 {
-            return Err(CommandError::validation("Debit and credit amounts must be non-negative"));
+            return Err(CommandError::validation(
+                "Debit and credit amounts must be non-negative",
+            ));
         }
 
         let debit = Money::from_cents(line.debit_cents);
         let credit = Money::from_cents(line.credit_cents);
 
         lines.push(TransactionLine {
-            account_id: account.id.ok_or_else(|| CommandError::internal("Account missing ID"))?,
+            account_id: account
+                .id
+                .ok_or_else(|| CommandError::internal("Account missing ID"))?,
             debit,
             credit,
             memo: line.memo,
@@ -220,7 +236,10 @@ pub async fn get_transactions(
     start_date: Option<String>,
     end_date: Option<String>,
 ) -> Result<Vec<TransactionOutput>, CommandError> {
-    let db = { let s = state.lock().await; s.db.clone() };
+    let db = {
+        let s = state.lock().await;
+        s.db.clone()
+    };
     let db = &db;
 
     let query = match (start_date, end_date) {
@@ -261,7 +280,10 @@ pub async fn get_profit_loss(
     start_date: Option<String>,
     end_date: Option<String>,
 ) -> Result<Vec<ProfitLossEntry>, CommandError> {
-    let db = { let s = state.lock().await; s.db.clone() };
+    let db = {
+        let s = state.lock().await;
+        s.db.clone()
+    };
     let db = &db;
 
     let (start, end) = match (start_date, end_date) {
@@ -412,7 +434,10 @@ pub async fn ingest_receipt(
 pub async fn get_pending_receipts(
     state: State<'_, Arc<Mutex<AppState>>>,
 ) -> Result<Vec<ReceiptOutput>, CommandError> {
-    let db = { let s = state.lock().await; s.db.clone() };
+    let db = {
+        let s = state.lock().await;
+        s.db.clone()
+    };
     let records = aequi_storage::get_receipts_pending_review(&db)
         .await
         .map_err(|e| CommandError::internal(e.to_string()))?;
@@ -426,7 +451,10 @@ pub async fn approve_receipt(
     receipt_id: i64,
     transaction_id: Option<i64>,
 ) -> Result<(), CommandError> {
-    let db = { let s = state.lock().await; s.db.clone() };
+    let db = {
+        let s = state.lock().await;
+        s.db.clone()
+    };
 
     // Validate receipt exists and is still pending
     let receipt = aequi_storage::get_receipt_by_id(&db, receipt_id)
@@ -442,12 +470,11 @@ pub async fn approve_receipt(
 
     if let Some(tx_id) = transaction_id {
         // Validate transaction exists
-        let exists: Option<(i64,)> =
-            sqlx::query_as("SELECT id FROM transactions WHERE id = ?")
-                .bind(tx_id)
-                .fetch_optional(&db)
-                .await
-                .map_err(|e| CommandError::internal(e.to_string()))?;
+        let exists: Option<(i64,)> = sqlx::query_as("SELECT id FROM transactions WHERE id = ?")
+            .bind(tx_id)
+            .fetch_optional(&db)
+            .await
+            .map_err(|e| CommandError::internal(e.to_string()))?;
         if exists.is_none() {
             return Err(CommandError::not_found("Transaction not found"));
         }
@@ -469,7 +496,10 @@ pub async fn reject_receipt(
     state: State<'_, Arc<Mutex<AppState>>>,
     receipt_id: i64,
 ) -> Result<(), CommandError> {
-    let db = { let s = state.lock().await; s.db.clone() };
+    let db = {
+        let s = state.lock().await;
+        s.db.clone()
+    };
     aequi_storage::update_receipt_status(&db, receipt_id, "rejected")
         .await
         .map_err(|e| CommandError::internal(e.to_string()))?;
@@ -510,7 +540,10 @@ pub async fn estimate_quarterly_tax(
     year: Option<u16>,
     quarter: Option<u8>,
 ) -> Result<QuarterlyEstimateOutput, CommandError> {
-    let db = { let s = state.lock().await; s.db.clone() };
+    let db = {
+        let s = state.lock().await;
+        s.db.clone()
+    };
     let db = &db;
 
     let now = chrono::Utc::now().date_naive();
@@ -582,7 +615,10 @@ pub async fn get_schedule_c_preview(
     state: State<'_, Arc<Mutex<AppState>>>,
     year: Option<u16>,
 ) -> Result<ScheduleCPreviewOutput, CommandError> {
-    let db = { let s = state.lock().await; s.db.clone() };
+    let db = {
+        let s = state.lock().await;
+        s.db.clone()
+    };
     let db = &db;
 
     let yr = year.unwrap_or(chrono::Utc::now().date_naive().year() as u16);
@@ -630,7 +666,8 @@ fn load_tax_rules(year: u16) -> Result<aequi_core::TaxRules, CommandError> {
     // the app's resource directory; for now we embed the 2026 rules.
     let toml_str = include_str!("../../../rules/tax/us/2026.toml");
 
-    let rules = aequi_core::TaxRules::from_toml(toml_str).map_err(|e| CommandError::internal(e.to_string()))?;
+    let rules = aequi_core::TaxRules::from_toml(toml_str)
+        .map_err(|e| CommandError::internal(e.to_string()))?;
 
     if rules.year.value != year {
         return Err(CommandError::not_found(format!(
@@ -669,7 +706,10 @@ pub struct ContactInput {
 pub async fn get_contacts(
     state: State<'_, Arc<Mutex<AppState>>>,
 ) -> Result<Vec<aequi_storage::ContactRecord>, CommandError> {
-    let db = { let s = state.lock().await; s.db.clone() };
+    let db = {
+        let s = state.lock().await;
+        s.db.clone()
+    };
     let contacts = aequi_storage::get_all_contacts(&db)
         .await
         .map_err(|e| CommandError::internal(e.to_string()))?;
@@ -698,7 +738,10 @@ pub async fn create_contact(
         ));
     }
 
-    let db = { let s = state.lock().await; s.db.clone() };
+    let db = {
+        let s = state.lock().await;
+        s.db.clone()
+    };
     let id = aequi_storage::insert_contact(
         &db,
         &name,
@@ -741,7 +784,10 @@ pub struct InvoiceInput {
 pub async fn get_invoices(
     state: State<'_, Arc<Mutex<AppState>>>,
 ) -> Result<Vec<aequi_storage::InvoiceRecord>, CommandError> {
-    let db = { let s = state.lock().await; s.db.clone() };
+    let db = {
+        let s = state.lock().await;
+        s.db.clone()
+    };
     aequi_storage::get_all_invoices(&db)
         .await
         .map_err(|e| CommandError::internal(e.to_string()))
@@ -762,10 +808,15 @@ pub async fn create_invoice(
     let due_date = NaiveDate::parse_from_str(&input.due_date, "%Y-%m-%d")
         .map_err(|_| CommandError::validation("Invalid due date format (expected YYYY-MM-DD)"))?;
     if due_date < issue_date {
-        return Err(CommandError::validation("Due date must be on or after issue date"));
+        return Err(CommandError::validation(
+            "Due date must be on or after issue date",
+        ));
     }
 
-    let db = { let s = state.lock().await; s.db.clone() };
+    let db = {
+        let s = state.lock().await;
+        s.db.clone()
+    };
 
     // Verify contact exists
     aequi_storage::get_contact_by_id(&db, input.contact_id)
@@ -808,7 +859,10 @@ pub async fn create_invoice(
 pub async fn get_invoice_aging(
     state: State<'_, Arc<Mutex<AppState>>>,
 ) -> Result<Vec<aequi_storage::InvoiceRecord>, CommandError> {
-    let db = { let s = state.lock().await; s.db.clone() };
+    let db = {
+        let s = state.lock().await;
+        s.db.clone()
+    };
     aequi_storage::get_invoice_aging(&db)
         .await
         .map_err(|e| CommandError::internal(e.to_string()))
@@ -827,7 +881,10 @@ pub async fn record_invoice_payment(
     state: State<'_, Arc<Mutex<AppState>>>,
     input: PaymentInput,
 ) -> Result<i64, CommandError> {
-    let db = { let s = state.lock().await; s.db.clone() };
+    let db = {
+        let s = state.lock().await;
+        s.db.clone()
+    };
     aequi_storage::insert_payment(
         &db,
         input.invoice_id,
@@ -853,7 +910,10 @@ pub async fn get_1099_summary(
     state: State<'_, Arc<Mutex<AppState>>>,
     year: Option<u16>,
 ) -> Result<Vec<NecSummaryEntry>, CommandError> {
-    let db = { let s = state.lock().await; s.db.clone() };
+    let db = {
+        let s = state.lock().await;
+        s.db.clone()
+    };
     let yr = year.unwrap_or(chrono::Utc::now().date_naive().year() as u16);
 
     // Single JOIN query instead of N+1
@@ -949,16 +1009,21 @@ pub async fn send_invoice(
     state: State<'_, Arc<Mutex<AppState>>>,
     input: SendInvoiceInput,
 ) -> Result<aequi_email::DeliveryResult, CommandError> {
-    let db = { let s = state.lock().await; s.db.clone() };
+    let db = {
+        let s = state.lock().await;
+        s.db.clone()
+    };
 
     // Load email config from settings
     let config_json = aequi_storage::get_setting(&db, "email_config")
         .await
         .map_err(|e| CommandError::internal(e.to_string()))?
-        .ok_or(CommandError::internal("Email not configured — set email_config in Settings"))?;
+        .ok_or(CommandError::internal(
+            "Email not configured — set email_config in Settings",
+        ))?;
 
-    let config: aequi_email::EmailConfig =
-        serde_json::from_str(&config_json).map_err(|e| CommandError::internal(format!("Invalid email config: {e}")))?;
+    let config: aequi_email::EmailConfig = serde_json::from_str(&config_json)
+        .map_err(|e| CommandError::internal(format!("Invalid email config: {e}")))?;
 
     let rec = aequi_storage::get_invoice_by_id(&db, input.invoice_id)
         .await
@@ -984,11 +1049,9 @@ pub async fn send_invoice(
         .map_err(|e| CommandError::internal(e.to_string()))?;
 
     // Update invoice status to Sent
-    let sent_data =
-        serde_json::json!({ "sent_at": chrono::Utc::now().to_rfc3339() }).to_string();
+    let sent_data = serde_json::json!({ "sent_at": chrono::Utc::now().to_rfc3339() }).to_string();
     let _ =
-        aequi_storage::update_invoice_status(&db, input.invoice_id, "Sent", Some(&sent_data))
-            .await;
+        aequi_storage::update_invoice_status(&db, input.invoice_id, "Sent", Some(&sent_data)).await;
 
     Ok(result)
 }
@@ -999,7 +1062,10 @@ pub async fn send_invoice(
 pub async fn export_beancount(
     state: State<'_, Arc<Mutex<AppState>>>,
 ) -> Result<String, CommandError> {
-    let db = { let s = state.lock().await; s.db.clone() };
+    let db = {
+        let s = state.lock().await;
+        s.db.clone()
+    };
     let accounts = aequi_storage::get_all_accounts(&db)
         .await
         .map_err(|e| CommandError::internal(e.to_string()))?;
@@ -1026,7 +1092,10 @@ pub async fn get_setting(
     state: State<'_, Arc<Mutex<AppState>>>,
     key: String,
 ) -> Result<Option<String>, CommandError> {
-    let db = { let s = state.lock().await; s.db.clone() };
+    let db = {
+        let s = state.lock().await;
+        s.db.clone()
+    };
     aequi_storage::get_setting(&db, &key)
         .await
         .map_err(|e| CommandError::internal(e.to_string()))
@@ -1038,7 +1107,10 @@ pub async fn set_setting(
     key: String,
     value: String,
 ) -> Result<(), CommandError> {
-    let db = { let s = state.lock().await; s.db.clone() };
+    let db = {
+        let s = state.lock().await;
+        s.db.clone()
+    };
     aequi_storage::set_setting(&db, &key, &value)
         .await
         .map_err(|e| CommandError::internal(e.to_string()))
@@ -1051,7 +1123,10 @@ pub async fn get_audit_log(
     state: State<'_, Arc<Mutex<AppState>>>,
     limit: Option<i64>,
 ) -> Result<Vec<aequi_storage::AuditLogRecord>, CommandError> {
-    let db = { let s = state.lock().await; s.db.clone() };
+    let db = {
+        let s = state.lock().await;
+        s.db.clone()
+    };
     aequi_storage::get_audit_log(&db, limit.unwrap_or(100))
         .await
         .map_err(|e| CommandError::internal(e.to_string()))
@@ -1095,7 +1170,10 @@ pub async fn restore_backup(
 pub async fn get_schema_versions(
     state: State<'_, Arc<Mutex<AppState>>>,
 ) -> Result<Vec<aequi_storage::migrate::SchemaVersion>, CommandError> {
-    let db = { let s = state.lock().await; s.db.clone() };
+    let db = {
+        let s = state.lock().await;
+        s.db.clone()
+    };
     aequi_storage::migrate::get_schema_versions(&db)
         .await
         .map_err(|e| CommandError::internal(e.to_string()))
@@ -1111,12 +1189,15 @@ pub struct UpdateStatus {
 }
 
 #[tauri::command]
-pub async fn check_for_updates(
-    app: tauri::AppHandle,
-) -> Result<UpdateStatus, CommandError> {
+pub async fn check_for_updates(app: tauri::AppHandle) -> Result<UpdateStatus, CommandError> {
     let current = app.package_info().version.to_string();
 
-    match app.updater().map_err(|e: tauri_plugin_updater::Error| CommandError::internal(e.to_string()))?.check().await {
+    match app
+        .updater()
+        .map_err(|e: tauri_plugin_updater::Error| CommandError::internal(e.to_string()))?
+        .check()
+        .await
+    {
         Ok(Some(update)) => Ok(UpdateStatus {
             update_available: true,
             current_version: current,
@@ -1145,7 +1226,10 @@ pub async fn check_overdue_invoices(
     app: tauri::AppHandle,
     state: State<'_, Arc<Mutex<AppState>>>,
 ) -> Result<u32, CommandError> {
-    let db = { let s = state.lock().await; s.db.clone() };
+    let db = {
+        let s = state.lock().await;
+        s.db.clone()
+    };
     let aging = aequi_storage::get_invoice_aging(&db)
         .await
         .map_err(|e| CommandError::internal(e.to_string()))?;
@@ -1201,11 +1285,16 @@ pub struct DashboardSummary {
 pub async fn get_dashboard_summary(
     state: State<'_, Arc<Mutex<AppState>>>,
 ) -> Result<DashboardSummary, CommandError> {
-    let db = { let s = state.lock().await; s.db.clone() };
+    let db = {
+        let s = state.lock().await;
+        s.db.clone()
+    };
     let db = &db;
 
     let now = chrono::Utc::now().date_naive();
-    let year_start = NaiveDate::from_ymd_opt(now.year(), 1, 1).unwrap().to_string();
+    let year_start = NaiveDate::from_ymd_opt(now.year(), 1, 1)
+        .unwrap()
+        .to_string();
     let today = now.to_string();
 
     // YTD P&L
@@ -1243,14 +1332,12 @@ pub async fn get_dashboard_summary(
     let pending_receipts = receipts.len() as u32;
 
     // Counts
-    let accounts: (i64,) =
-        sqlx::query_as("SELECT COUNT(*) FROM accounts WHERE is_archived = 0")
-            .fetch_one(db)
-            .await?;
-    let tx_count: (i64,) =
-        sqlx::query_as("SELECT COUNT(*) FROM transactions")
-            .fetch_one(db)
-            .await?;
+    let accounts: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM accounts WHERE is_archived = 0")
+        .fetch_one(db)
+        .await?;
+    let tx_count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM transactions")
+        .fetch_one(db)
+        .await?;
 
     // Recent transactions (last 5)
     let recent = sqlx::query_as::<_, (i64, String, String, Option<String>, i64, String)>(
@@ -1325,7 +1412,10 @@ pub async fn update_contact(
         }
     }
 
-    let db = { let s = state.lock().await; s.db.clone() };
+    let db = {
+        let s = state.lock().await;
+        s.db.clone()
+    };
     aequi_storage::update_contact(
         &db,
         input.id,

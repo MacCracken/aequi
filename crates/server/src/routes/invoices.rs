@@ -154,9 +154,7 @@ fn records_to_invoice(
     use chrono::NaiveDate;
 
     let discount = match (rec.discount_type.as_deref(), rec.discount_value) {
-        (Some("Percentage"), Some(bps)) => {
-            Some(Discount::Percentage(Decimal::new(bps, 2)))
-        }
+        (Some("Percentage"), Some(bps)) => Some(Discount::Percentage(Decimal::new(bps, 2))),
         (Some("Flat"), Some(cents)) => Some(Discount::Flat(Money::from_cents(cents))),
         _ => None,
     };
@@ -237,24 +235,16 @@ async fn send_invoice(
         .ok_or_else(|| ApiError::NotFound("Contact not found".to_string()))?;
     let contact = record_to_contact(&contact_rec);
 
-    let result = aequi_email::send_invoice(
-        email_config,
-        &invoice,
-        &contact,
-        input.subject.as_deref(),
-    )
-    .await
-    .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let result =
+        aequi_email::send_invoice(email_config, &invoice, &contact, input.subject.as_deref())
+            .await
+            .map_err(|e| ApiError::Internal(e.to_string()))?;
 
     // Update invoice status to Sent
     let sent_data = serde_json::json!({ "sent_at": chrono::Utc::now().to_rfc3339() });
-    let _ = aequi_storage::update_invoice_status(
-        &state.db,
-        id,
-        "Sent",
-        Some(&sent_data.to_string()),
-    )
-    .await;
+    let _ =
+        aequi_storage::update_invoice_status(&state.db, id, "Sent", Some(&sent_data.to_string()))
+            .await;
 
     Ok(Json(result))
 }

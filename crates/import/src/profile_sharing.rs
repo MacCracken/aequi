@@ -39,9 +39,11 @@ pub fn export_profile(profile: &SharedProfile) -> Result<String, ProfileSharingE
 /// Import a profile from a TOML string.
 pub fn import_profile(toml_str: &str) -> Result<SharedProfile, ProfileSharingError> {
     if toml_str.len() > MAX_PROFILE_SIZE {
-        return Err(ProfileSharingError::Validation(
-            format!("profile too large ({} bytes, max {})", toml_str.len(), MAX_PROFILE_SIZE),
-        ));
+        return Err(ProfileSharingError::Validation(format!(
+            "profile too large ({} bytes, max {})",
+            toml_str.len(),
+            MAX_PROFILE_SIZE
+        )));
     }
 
     let profile: SharedProfile =
@@ -113,10 +115,7 @@ mod tests {
         let restored = import_profile(&toml).unwrap();
         assert_eq!(restored.meta.name, "Chase Checking");
         assert_eq!(restored.meta.institution, "Chase");
-        assert_eq!(
-            restored.csv_profile.mapping.date_format,
-            "%m/%d/%Y"
-        );
+        assert_eq!(restored.csv_profile.mapping.date_format, "%m/%d/%Y");
     }
 
     #[test]

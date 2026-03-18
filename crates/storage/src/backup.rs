@@ -45,21 +45,21 @@ pub async fn create_backup(
 
     // VACUUM INTO creates an atomic, consistent copy.
     // Canonicalize and validate the path to prevent injection via crafted filenames.
-    let canonical = snapshot_path
-        .canonicalize()
-        .or_else(|_| {
-            // File doesn't exist yet; canonicalize parent and append filename
-            let parent = snapshot_path
-                .parent()
-                .unwrap_or(Path::new("."))
-                .canonicalize()
-                .map_err(|e| BackupError::Io(e.to_string()))?;
-            Ok::<PathBuf, BackupError>(parent.join(snapshot_path.file_name().unwrap_or_default()))
-        })?;
+    let canonical = snapshot_path.canonicalize().or_else(|_| {
+        // File doesn't exist yet; canonicalize parent and append filename
+        let parent = snapshot_path
+            .parent()
+            .unwrap_or(Path::new("."))
+            .canonicalize()
+            .map_err(|e| BackupError::Io(e.to_string()))?;
+        Ok::<PathBuf, BackupError>(parent.join(snapshot_path.file_name().unwrap_or_default()))
+    })?;
     let path_str = canonical.to_string_lossy();
     // Reject paths containing single quotes to prevent SQL injection
     if path_str.contains('\'') {
-        return Err(BackupError::Io("Backup path must not contain single quotes".into()));
+        return Err(BackupError::Io(
+            "Backup path must not contain single quotes".into(),
+        ));
     }
     sqlx::query(&format!("VACUUM INTO '{path_str}'"))
         .execute(pool)
@@ -163,9 +163,7 @@ pub fn restore_backup(
                 "Archive contains path traversal".to_string(),
             ));
         }
-        if entry.header().entry_type().is_symlink()
-            || entry.header().entry_type().is_hard_link()
-        {
+        if entry.header().entry_type().is_symlink() || entry.header().entry_type().is_hard_link() {
             return Err(BackupError::InvalidArchive(
                 "Archive contains symlinks (not allowed)".to_string(),
             ));

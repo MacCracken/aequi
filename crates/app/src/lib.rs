@@ -23,10 +23,7 @@ pub struct AppState {
 fn spawn_mcp_sidecar(app: &tauri::App, db_path: &std::path::Path) {
     use tauri_plugin_shell::ShellExt;
 
-    let sidecar = match app
-        .shell()
-        .sidecar("binaries/aequi-mcp")
-    {
+    let sidecar = match app.shell().sidecar("binaries/aequi-mcp") {
         Ok(cmd) => cmd.env("AEQUI_DB_PATH", db_path.to_string_lossy().to_string()),
         Err(e) => {
             tracing::warn!("failed to create aequi-mcp sidecar command: {e}");
@@ -147,7 +144,8 @@ pub fn build_app() -> tauri::Builder<tauri::Wry> {
             #[cfg(desktop)]
             let intake_watcher = {
                 let receipt_tx_for_watcher = receipt_tx.clone();
-                match aequi_ocr::pipeline::spawn_intake_watcher(&intake_dir, receipt_tx_for_watcher) {
+                match aequi_ocr::pipeline::spawn_intake_watcher(&intake_dir, receipt_tx_for_watcher)
+                {
                     Ok(watcher) => {
                         tracing::info!("Watching intake folder: {}", intake_dir.display());
                         Some(Box::new(watcher) as Box<dyn std::any::Any + Send>)

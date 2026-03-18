@@ -65,11 +65,15 @@ async fn create_transaction(
         return Err(ApiError::BadRequest("Description is required".to_string()));
     }
     if input.lines.is_empty() {
-        return Err(ApiError::BadRequest("At least one line is required".to_string()));
+        return Err(ApiError::BadRequest(
+            "At least one line is required".to_string(),
+        ));
     }
     for line in &input.lines {
         if line.debit_cents < 0 || line.credit_cents < 0 {
-            return Err(ApiError::BadRequest("Debit and credit must be non-negative".to_string()));
+            return Err(ApiError::BadRequest(
+                "Debit and credit must be non-negative".to_string(),
+            ));
         }
     }
 
@@ -85,7 +89,9 @@ async fn create_transaction(
             })?;
 
         lines.push(TransactionLine {
-            account_id: account.id.ok_or_else(|| ApiError::Internal("Account missing ID".to_string()))?,
+            account_id: account
+                .id
+                .ok_or_else(|| ApiError::Internal("Account missing ID".to_string()))?,
             debit: Money::from_cents(line.debit_cents),
             credit: Money::from_cents(line.credit_cents),
             memo: line.memo,

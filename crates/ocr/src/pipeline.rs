@@ -186,8 +186,7 @@ mod tests {
     #[tokio::test]
     async fn process_bytes_different_data_different_hash() {
         let dir = tempfile::tempdir().unwrap();
-        let pipeline =
-            ReceiptPipeline::new(MockRecognizer::new("text"), dir.path().to_path_buf());
+        let pipeline = ReceiptPipeline::new(MockRecognizer::new("text"), dir.path().to_path_buf());
 
         let img1 = tiny_png();
 
@@ -211,8 +210,7 @@ mod tests {
     #[tokio::test]
     async fn process_bytes_different_extension_different_path() {
         let dir = tempfile::tempdir().unwrap();
-        let pipeline =
-            ReceiptPipeline::new(MockRecognizer::new("text"), dir.path().to_path_buf());
+        let pipeline = ReceiptPipeline::new(MockRecognizer::new("text"), dir.path().to_path_buf());
         let data = tiny_png();
 
         let r1 = pipeline.process_bytes(&data, "png").await.unwrap();
@@ -228,8 +226,7 @@ mod tests {
     #[tokio::test]
     async fn process_bytes_creates_subdirectory() {
         let dir = tempfile::tempdir().unwrap();
-        let pipeline =
-            ReceiptPipeline::new(MockRecognizer::new("text"), dir.path().to_path_buf());
+        let pipeline = ReceiptPipeline::new(MockRecognizer::new("text"), dir.path().to_path_buf());
         let data = tiny_png();
 
         let result = pipeline.process_bytes(&data, "png").await.unwrap();
@@ -244,8 +241,7 @@ mod tests {
     #[tokio::test]
     async fn process_bytes_stores_file_content() {
         let dir = tempfile::tempdir().unwrap();
-        let pipeline =
-            ReceiptPipeline::new(MockRecognizer::new("text"), dir.path().to_path_buf());
+        let pipeline = ReceiptPipeline::new(MockRecognizer::new("text"), dir.path().to_path_buf());
         let data = tiny_png();
 
         let result = pipeline.process_bytes(&data, "png").await.unwrap();
@@ -274,8 +270,7 @@ mod tests {
     #[tokio::test]
     async fn process_file_nonexistent_returns_error() {
         let dir = tempfile::tempdir().unwrap();
-        let pipeline =
-            ReceiptPipeline::new(MockRecognizer::new("text"), dir.path().to_path_buf());
+        let pipeline = ReceiptPipeline::new(MockRecognizer::new("text"), dir.path().to_path_buf());
 
         let result = pipeline
             .process_file(Path::new("/nonexistent/file.png"))

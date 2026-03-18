@@ -179,16 +179,12 @@ pub async fn fetch_work_items(
 /// Convert work items into invoice line estimates at the given hourly rate.
 ///
 /// Items without an `hours` value default to 1 hour.
-pub fn estimate_line_items(
-    items: &[WorkItem],
-    hourly_rate_cents: i64,
-) -> Vec<InvoiceLineEstimate> {
+pub fn estimate_line_items(items: &[WorkItem], hourly_rate_cents: i64) -> Vec<InvoiceLineEstimate> {
     items
         .iter()
         .map(|item| {
             let hours_f = item.hours.unwrap_or(1.0);
-            let hours = Decimal::from_f64_retain(hours_f)
-                .unwrap_or_else(|| Decimal::new(1, 0));
+            let hours = Decimal::from_f64_retain(hours_f).unwrap_or_else(|| Decimal::new(1, 0));
             let rate = Decimal::new(hourly_rate_cents, 0);
             let total = hours * rate;
             let total_cents = total.trunc().to_i64().unwrap_or(0);
@@ -215,23 +211,32 @@ async fn fetch_github_issues(
 ) -> Result<Vec<WorkItem>, WorkItemError> {
     let client = reqwest::Client::new();
 
-    let mut url = format!(
-        "https://api.github.com/repos/{owner}/{repo}/issues?state=closed&per_page=100"
-    );
+    let mut url =
+        format!("https://api.github.com/repos/{owner}/{repo}/issues?state=closed&per_page=100");
 
     // URL-encode filter values to prevent query parameter injection
     if let Some(ref milestone) = filter.milestone {
-        let encoded: String = milestone.bytes().map(|b| match b {
-            b'0'..=b'9' | b'a'..=b'z' | b'A'..=b'Z' | b'-' | b'_' | b'.' => (b as char).to_string(),
-            _ => format!("%{b:02X}"),
-        }).collect();
+        let encoded: String = milestone
+            .bytes()
+            .map(|b| match b {
+                b'0'..=b'9' | b'a'..=b'z' | b'A'..=b'Z' | b'-' | b'_' | b'.' => {
+                    (b as char).to_string()
+                }
+                _ => format!("%{b:02X}"),
+            })
+            .collect();
         url.push_str(&format!("&milestone={encoded}"));
     }
     if let Some(ref label) = filter.label {
-        let encoded: String = label.bytes().map(|b| match b {
-            b'0'..=b'9' | b'a'..=b'z' | b'A'..=b'Z' | b'-' | b'_' | b'.' => (b as char).to_string(),
-            _ => format!("%{b:02X}"),
-        }).collect();
+        let encoded: String = label
+            .bytes()
+            .map(|b| match b {
+                b'0'..=b'9' | b'a'..=b'z' | b'A'..=b'Z' | b'-' | b'_' | b'.' => {
+                    (b as char).to_string()
+                }
+                _ => format!("%{b:02X}"),
+            })
+            .collect();
         url.push_str(&format!("&labels={encoded}"));
     }
     if let Some(since) = filter.since {
@@ -317,7 +322,10 @@ async fn fetch_linear_issues(
     ];
 
     if let Some(ref label) = filter.label {
-        conditions.push(format!("labels: {{ name: {{ eq: \"{}\" }} }}", gql_escape(label)));
+        conditions.push(format!(
+            "labels: {{ name: {{ eq: \"{}\" }} }}",
+            gql_escape(label)
+        ));
     }
     if let Some(ref assignee) = filter.assignee {
         conditions.push(format!(
@@ -326,9 +334,7 @@ async fn fetch_linear_issues(
         ));
     }
     if let Some(since) = filter.since {
-        conditions.push(format!(
-            "completedAt: {{ gte: \"{since}T00:00:00.000Z\" }}"
-        ));
+        conditions.push(format!("completedAt: {{ gte: \"{since}T00:00:00.000Z\" }}"));
     }
 
     let filter_str = conditions.join(", ");
@@ -395,14 +401,11 @@ async fn fetch_linear_issues(
         .nodes
         .into_iter()
         .map(|i| {
-            let completed_at = i
-                .completed_at
-                .as_deref()
-                .and_then(|s| {
-                    // Linear dates can be full ISO-8601; take first 10 chars.
-                    let date_part = if s.len() >= 10 { &s[..10] } else { s };
-                    NaiveDate::parse_from_str(date_part, "%Y-%m-%d").ok()
-                });
+            let completed_at = i.completed_at.as_deref().and_then(|s| {
+                // Linear dates can be full ISO-8601; take first 10 chars.
+                let date_part = if s.len() >= 10 { &s[..10] } else { s };
+                NaiveDate::parse_from_str(date_part, "%Y-%m-%d").ok()
+            });
 
             WorkItem {
                 id: i.identifier,
@@ -643,7 +646,10 @@ mod tests {
         let back: WorkItem = serde_json::from_str(&json).unwrap();
         assert_eq!(back.id, "42");
         assert_eq!(back.title, "Add tests");
-        assert_eq!(back.completed_at, Some(NaiveDate::from_ymd_opt(2026, 3, 10).unwrap()));
+        assert_eq!(
+            back.completed_at,
+            Some(NaiveDate::from_ymd_opt(2026, 3, 10).unwrap())
+        );
         assert_eq!(back.labels, vec!["bug", "priority"]);
         assert_eq!(back.milestone.as_deref(), Some("v1.0"));
         assert_eq!(back.assignee.as_deref(), Some("alice"));
@@ -683,7 +689,10 @@ mod tests {
         let back: WorkItemFilter = serde_json::from_str(&json).unwrap();
         assert_eq!(back.milestone.as_deref(), Some("v2.0"));
         assert_eq!(back.label.as_deref(), Some("enhancement"));
-        assert_eq!(back.since, Some(NaiveDate::from_ymd_opt(2026, 1, 1).unwrap()));
+        assert_eq!(
+            back.since,
+            Some(NaiveDate::from_ymd_opt(2026, 1, 1).unwrap())
+        );
         assert_eq!(back.assignee.as_deref(), Some("bob"));
     }
 
