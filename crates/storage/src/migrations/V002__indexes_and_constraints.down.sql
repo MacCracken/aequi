@@ -1,0 +1,13 @@
+DROP INDEX IF EXISTS idx_transaction_lines_transaction_id;
+DROP INDEX IF EXISTS idx_transaction_lines_account_id;
+DROP INDEX IF EXISTS idx_imported_tx_batch_status;
+DROP INDEX IF EXISTS idx_imported_tx_status;
+DROP INDEX IF EXISTS idx_invoices_status;
+DROP INDEX IF EXISTS idx_invoices_contact;
+DROP INDEX IF EXISTS idx_receipts_status;
+DROP INDEX IF EXISTS idx_payments_invoice;
+DROP INDEX IF EXISTS idx_payments_date;
+DROP INDEX IF EXISTS idx_audit_log_timestamp;
+DROP INDEX IF EXISTS idx_transactions_date;
+DROP INDEX IF EXISTS idx_contacts_type;
+DROP INDEX IF EXISTS idx_reconciliation_items_session;

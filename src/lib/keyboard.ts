@@ -1,12 +1,13 @@
 import { useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 
-/** Global keyboard shortcuts (Ctrl+1..7 for nav, Ctrl+/ for help). */
+/** Global keyboard shortcuts (Ctrl+0..7 for nav, Ctrl+/ for help). */
 export function useKeyboardShortcuts() {
   const navigate = useNavigate();
 
   useEffect(() => {
     const routes = [
+      "/",
       "/accounts",
       "/transactions",
       "/receipts",
@@ -23,10 +24,10 @@ export function useKeyboardShortcuts() {
 
       const ctrl = e.ctrlKey || e.metaKey;
 
-      // Ctrl+1..7 navigate to pages
-      if (ctrl && e.key >= "1" && e.key <= "7") {
+      // Ctrl+0..7 navigate to pages
+      if (ctrl && e.key >= "0" && e.key <= "7") {
         e.preventDefault();
-        const idx = parseInt(e.key) - 1;
+        const idx = parseInt(e.key);
         navigate(routes[idx]);
         return;
       }
@@ -46,6 +47,7 @@ export function useKeyboardShortcuts() {
 
 /** All registered shortcuts for display in the help overlay. */
 export const SHORTCUT_LIST: { keys: string; description: string }[] = [
+  { keys: "Ctrl+0", description: "Dashboard" },
   { keys: "Ctrl+1", description: "Accounts" },
   { keys: "Ctrl+2", description: "Transactions" },
   { keys: "Ctrl+3", description: "Receipts" },

@@ -20,11 +20,16 @@ pub struct AppState {
 fn spawn_mcp_sidecar(app: &tauri::App, db_path: &std::path::Path) {
     use tauri_plugin_shell::ShellExt;
 
-    let sidecar = app
+    let sidecar = match app
         .shell()
         .sidecar("binaries/aequi-mcp")
-        .expect("failed to create aequi-mcp sidecar command")
-        .env("AEQUI_DB_PATH", db_path.to_string_lossy().to_string());
+    {
+        Ok(cmd) => cmd.env("AEQUI_DB_PATH", db_path.to_string_lossy().to_string()),
+        Err(e) => {
+            tracing::warn!("failed to create aequi-mcp sidecar command: {e}");
+            return;
+        }
+    };
 
     match sidecar.spawn() {
         Ok((mut _rx, _child)) => {
@@ -70,23 +75,25 @@ pub fn build_app() -> tauri::Builder<tauri::Wry> {
         .plugin(tauri_plugin_notification::init())
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;
-            std::fs::create_dir_all(&data_dir).expect("Failed to create data directory");
+            std::fs::create_dir_all(&data_dir)
+                .map_err(|e| format!("Failed to create data directory: {e}"))?;
 
             let db_path = data_dir.join("ledger.db");
             let attachments_dir = data_dir.join("attachments");
             let intake_dir = data_dir.join("intake");
             std::fs::create_dir_all(&attachments_dir)
-                .expect("Failed to create attachments directory");
-            std::fs::create_dir_all(&intake_dir).expect("Failed to create intake directory");
+                .map_err(|e| format!("Failed to create attachments directory: {e}"))?;
+            std::fs::create_dir_all(&intake_dir)
+                .map_err(|e| format!("Failed to create intake directory: {e}"))?;
 
             let rt = tauri::async_runtime::handle();
 
             let db = rt
                 .block_on(aequi_storage::create_db(&db_path))
-                .expect("Failed to create database");
+                .map_err(|e| format!("Failed to create database: {e}"))?;
 
             rt.block_on(aequi_storage::seed_default_accounts(&db))
-                .expect("Failed to seed default accounts");
+                .map_err(|e| format!("Failed to seed default accounts: {e}"))?;
 
             // Receipt intake pipeline
             let (receipt_tx, mut receipt_rx) = mpsc::channel::<PathBuf>(64);
@@ -137,13 +144,17 @@ pub fn build_app() -> tauri::Builder<tauri::Wry> {
             #[cfg(desktop)]
             {
                 let receipt_tx_for_watcher = receipt_tx.clone();
-                let watcher =
-                    aequi_ocr::pipeline::spawn_intake_watcher(&intake_dir, receipt_tx_for_watcher)
-                        .expect("Failed to start intake folder watcher");
-                // Leak the watcher so it lives for the app's lifetime.
-                // Tauri doesn't provide a place to store arbitrary owned values.
-                std::mem::forget(watcher);
-                tracing::info!("Watching intake folder: {}", intake_dir.display());
+                match aequi_ocr::pipeline::spawn_intake_watcher(&intake_dir, receipt_tx_for_watcher) {
+                    Ok(watcher) => {
+                        // Leak the watcher so it lives for the app's lifetime.
+                        // Tauri doesn't provide a place to store arbitrary owned values.
+                        std::mem::forget(watcher);
+                        tracing::info!("Watching intake folder: {}", intake_dir.display());
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to start intake folder watcher: {e}");
+                    }
+                }
             }
 
             // Spawn MCP sidecar (desktop only)
@@ -189,6 +200,8 @@ pub fn build_app() -> tauri::Builder<tauri::Wry> {
             commands::restore_backup,
             commands::check_for_updates,
             commands::check_overdue_invoices,
+            commands::get_dashboard_summary,
+            commands::update_contact,
         ])
 }
 

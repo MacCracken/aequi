@@ -19,12 +19,44 @@ use crate::AppState;
 
 #[derive(Debug, Serialize)]
 pub struct CommandError {
+    pub code: String,
     pub message: String,
+}
+
+impl CommandError {
+    pub fn validation(msg: impl Into<String>) -> Self {
+        CommandError {
+            code: "VALIDATION".into(),
+            message: msg.into(),
+        }
+    }
+
+    pub fn not_found(msg: impl Into<String>) -> Self {
+        CommandError {
+            code: "NOT_FOUND".into(),
+            message: msg.into(),
+        }
+    }
+
+    pub fn internal(msg: impl Into<String>) -> Self {
+        CommandError {
+            code: "INTERNAL".into(),
+            message: msg.into(),
+        }
+    }
+
+    pub fn config(msg: impl Into<String>) -> Self {
+        CommandError {
+            code: "CONFIG".into(),
+            message: msg.into(),
+        }
+    }
 }
 
 impl From<sqlx::Error> for CommandError {
     fn from(e: sqlx::Error) -> Self {
         CommandError {
+            code: "DATABASE".into(),
             message: e.to_string(),
         }
     }
@@ -33,6 +65,7 @@ impl From<sqlx::Error> for CommandError {
 impl From<aequi_core::LedgerError> for CommandError {
     fn from(e: aequi_core::LedgerError) -> Self {
         CommandError {
+            code: "LEDGER".into(),
             message: e.to_string(),
         }
     }
@@ -41,6 +74,7 @@ impl From<aequi_core::LedgerError> for CommandError {
 impl From<aequi_ocr::PipelineError> for CommandError {
     fn from(e: aequi_ocr::PipelineError) -> Self {
         CommandError {
+            code: "OCR".into(),
             message: e.to_string(),
         }
     }
@@ -96,17 +130,26 @@ pub async fn create_transaction(
     let state = state.lock().await;
     let db = &state.db;
 
-    let date = NaiveDate::parse_from_str(&input.date, "%Y-%m-%d").map_err(|e| CommandError {
-        message: e.to_string(),
-    })?;
+    let description = input.description.trim().to_string();
+    if description.is_empty() {
+        return Err(CommandError::validation("Transaction description is required"));
+    }
+    if input.lines.is_empty() {
+        return Err(CommandError::validation("Transaction must have at least one line"));
+    }
+
+    let date = NaiveDate::parse_from_str(&input.date, "%Y-%m-%d")
+        .map_err(|_| CommandError::validation("Invalid date format (expected YYYY-MM-DD)"))?;
 
     let mut lines = Vec::new();
     for line in input.lines {
         let account = aequi_storage::get_account_by_code(db, &line.account_code)
             .await?
-            .ok_or_else(|| CommandError {
-                message: format!("Account not found: {}", line.account_code),
-            })?;
+            .ok_or_else(|| CommandError::not_found(format!("Account not found: {}", line.account_code)))?;
+
+        if line.debit_cents < 0 || line.credit_cents < 0 {
+            return Err(CommandError::validation("Debit and credit amounts must be non-negative"));
+        }
 
         let debit = Money::from_cents(line.debit_cents);
         let credit = Money::from_cents(line.credit_cents);
@@ -121,12 +164,15 @@ pub async fn create_transaction(
 
     let tx = UnvalidatedTransaction {
         date,
-        description: input.description,
+        description,
         lines,
         memo: input.memo,
     };
 
     let validated = ValidatedTransaction::validate(tx)?;
+
+    // Use a SQL transaction for atomicity
+    let mut sql_tx = db.begin().await?;
 
     let result = sqlx::query(
         "INSERT INTO transactions (date, description, memo, balanced_total_cents) VALUES (?, ?, ?, ?) RETURNING id, date, description, memo, balanced_total_cents, created_at"
@@ -135,13 +181,13 @@ pub async fn create_transaction(
     .bind(&validated.description)
     .bind(&validated.memo)
     .bind(validated.balanced_total.to_cents())
-    .fetch_one(db)
+    .fetch_one(&mut *sql_tx)
     .await?;
 
     let id: i64 = result.get("id");
     let balanced_cents: i64 = result.get("balanced_total_cents");
 
-    for line in validated.lines {
+    for line in &validated.lines {
         sqlx::query(
             "INSERT INTO transaction_lines (transaction_id, account_id, debit_cents, credit_cents, memo) VALUES (?, ?, ?, ?, ?)"
         )
@@ -150,9 +196,11 @@ pub async fn create_transaction(
         .bind(line.debit.to_cents())
         .bind(line.credit.to_cents())
         .bind(&line.memo)
-        .execute(db)
+        .execute(&mut *sql_tx)
         .await?;
     }
+
+    sql_tx.commit().await?;
 
     let created_at: String = result.get("created_at");
 
@@ -336,18 +384,12 @@ pub async fn ingest_receipt(
         e.confidence as f64,
     )
     .await
-    .map_err(|e| CommandError {
-        message: e.to_string(),
-    })?;
+    .map_err(|e| CommandError::internal(e.to_string()))?;
 
     let record = aequi_storage::get_receipt_by_id(&db, id)
         .await
-        .map_err(|e| CommandError {
-            message: e.to_string(),
-        })?
-        .ok_or(CommandError {
-            message: "Receipt not found after insert".into(),
-        })?;
+        .map_err(|e| CommandError::internal(e.to_string()))?
+        .ok_or(CommandError::internal("Receipt not found after insert"))?;
 
     Ok(record.into())
 }
@@ -360,9 +402,7 @@ pub async fn get_pending_receipts(
     let state = state.lock().await;
     let records = aequi_storage::get_receipts_pending_review(&state.db)
         .await
-        .map_err(|e| CommandError {
-            message: e.to_string(),
-        })?;
+        .map_err(|e| CommandError::internal(e.to_string()))?;
     Ok(records.into_iter().map(ReceiptOutput::from).collect())
 }
 
@@ -377,15 +417,11 @@ pub async fn approve_receipt(
     if let Some(tx_id) = transaction_id {
         aequi_storage::link_receipt_to_transaction(&state.db, receipt_id, tx_id)
             .await
-            .map_err(|e| CommandError {
-                message: e.to_string(),
-            })?;
+            .map_err(|e| CommandError::internal(e.to_string()))?;
     } else {
         aequi_storage::update_receipt_status(&state.db, receipt_id, "approved")
             .await
-            .map_err(|e| CommandError {
-                message: e.to_string(),
-            })?;
+            .map_err(|e| CommandError::internal(e.to_string()))?;
     }
     Ok(())
 }
@@ -399,9 +435,7 @@ pub async fn reject_receipt(
     let state = state.lock().await;
     aequi_storage::update_receipt_status(&state.db, receipt_id, "rejected")
         .await
-        .map_err(|e| CommandError {
-            message: e.to_string(),
-        })?;
+        .map_err(|e| CommandError::internal(e.to_string()))?;
     Ok(())
 }
 
@@ -453,16 +487,12 @@ pub async fn estimate_quarterly_tax(
 
     let prior_year_cents = aequi_storage::get_prior_year_total_tax(db, yr)
         .await
-        .map_err(|e| CommandError {
-            message: e.to_string(),
-        })?;
+        .map_err(|e| CommandError::internal(e.to_string()))?;
     let prior_year_tax = prior_year_cents.map(Money::from_cents);
 
     let snapshot = aequi_storage::build_ledger_snapshot(db, fy, prior_year_tax)
         .await
-        .map_err(|e| CommandError {
-            message: e.to_string(),
-        })?;
+        .map_err(|e| CommandError::internal(e.to_string()))?;
 
     let est = aequi_core::compute_quarterly_estimate(&rules, &snapshot, qtr);
 
@@ -479,9 +509,7 @@ pub async fn estimate_quarterly_tax(
         rules.year.value,
     )
     .await
-    .map_err(|e| CommandError {
-        message: e.to_string(),
-    })?;
+    .map_err(|e| CommandError::internal(e.to_string()))?;
 
     let schedule_c_lines: Vec<ScheduleCLineOutput> = est
         .schedule_c_lines
@@ -526,9 +554,7 @@ pub async fn get_schedule_c_preview(
 
     let snapshot = aequi_storage::build_ledger_snapshot(db, fy, None)
         .await
-        .map_err(|e| CommandError {
-            message: e.to_string(),
-        })?;
+        .map_err(|e| CommandError::internal(e.to_string()))?;
 
     let preview = aequi_core::tax::engine::schedule_c_preview(&rules, &snapshot);
 
@@ -567,17 +593,13 @@ fn load_tax_rules(year: u16) -> Result<aequi_core::TaxRules, CommandError> {
     // the app's resource directory; for now we embed the 2026 rules.
     let toml_str = include_str!("../../../rules/tax/us/2026.toml");
 
-    let rules = aequi_core::TaxRules::from_toml(toml_str).map_err(|e| CommandError {
-        message: e.to_string(),
-    })?;
+    let rules = aequi_core::TaxRules::from_toml(toml_str).map_err(|e| CommandError::internal(e.to_string()))?;
 
     if rules.year.value != year {
-        return Err(CommandError {
-            message: format!(
-                "Tax rules for year {year} not available (have {})",
-                rules.year.value
-            ),
-        });
+        return Err(CommandError::not_found(format!(
+            "Tax rules for year {year} not available (have {})",
+            rules.year.value
+        )));
     }
 
     Ok(rules)
@@ -613,9 +635,7 @@ pub async fn get_contacts(
     let state = state.lock().await;
     let contacts = aequi_storage::get_all_contacts(&state.db)
         .await
-        .map_err(|e| CommandError {
-            message: e.to_string(),
-        })?;
+        .map_err(|e| CommandError::internal(e.to_string()))?;
     Ok(contacts)
 }
 
@@ -624,10 +644,27 @@ pub async fn create_contact(
     state: State<'_, Arc<Mutex<AppState>>>,
     input: ContactInput,
 ) -> Result<aequi_storage::ContactRecord, CommandError> {
+    // Input validation
+    let name = input.name.trim().to_string();
+    if name.is_empty() {
+        return Err(CommandError::validation("Contact name is required"));
+    }
+    if let Some(ref email) = input.email {
+        let email = email.trim();
+        if !email.is_empty() && (!email.contains('@') || !email.contains('.')) {
+            return Err(CommandError::validation("Invalid email address format"));
+        }
+    }
+    if !["Client", "Vendor", "Contractor"].contains(&input.contact_type.as_str()) {
+        return Err(CommandError::validation(
+            "Contact type must be Client, Vendor, or Contractor",
+        ));
+    }
+
     let state = state.lock().await;
     let id = aequi_storage::insert_contact(
         &state.db,
-        &input.name,
+        &name,
         input.email.as_deref(),
         input.phone.as_deref(),
         input.address.as_deref(),
@@ -638,17 +675,17 @@ pub async fn create_contact(
     )
     .await
     .map_err(|e| CommandError {
+        code: "DATABASE".into(),
         message: e.to_string(),
     })?;
 
     aequi_storage::get_contact_by_id(&state.db, id)
         .await
         .map_err(|e| CommandError {
+            code: "DATABASE".into(),
             message: e.to_string(),
         })?
-        .ok_or(CommandError {
-            message: "Contact not found after insert".into(),
-        })
+        .ok_or(CommandError::not_found("Contact not found after insert"))
 }
 
 // ── Invoice commands ─────────────────────────────────────────────────────────
@@ -670,9 +707,7 @@ pub async fn get_invoices(
     let state = state.lock().await;
     aequi_storage::get_all_invoices(&state.db)
         .await
-        .map_err(|e| CommandError {
-            message: e.to_string(),
-        })
+        .map_err(|e| CommandError::internal(e.to_string()))
 }
 
 #[tauri::command]
@@ -680,10 +715,33 @@ pub async fn create_invoice(
     state: State<'_, Arc<Mutex<AppState>>>,
     input: InvoiceInput,
 ) -> Result<aequi_storage::InvoiceRecord, CommandError> {
+    // Input validation
+    let invoice_number = input.invoice_number.trim().to_string();
+    if invoice_number.is_empty() {
+        return Err(CommandError::validation("Invoice number is required"));
+    }
+    let issue_date = NaiveDate::parse_from_str(&input.issue_date, "%Y-%m-%d")
+        .map_err(|_| CommandError::validation("Invalid issue date format (expected YYYY-MM-DD)"))?;
+    let due_date = NaiveDate::parse_from_str(&input.due_date, "%Y-%m-%d")
+        .map_err(|_| CommandError::validation("Invalid due date format (expected YYYY-MM-DD)"))?;
+    if due_date < issue_date {
+        return Err(CommandError::validation("Due date must be on or after issue date"));
+    }
+
     let state = state.lock().await;
+
+    // Verify contact exists
+    aequi_storage::get_contact_by_id(&state.db, input.contact_id)
+        .await
+        .map_err(|e| CommandError {
+            code: "DATABASE".into(),
+            message: e.to_string(),
+        })?
+        .ok_or(CommandError::not_found("Contact not found"))?;
+
     let id = aequi_storage::insert_invoice(
         &state.db,
-        &input.invoice_number,
+        &invoice_number,
         input.contact_id,
         "Draft",
         None,
@@ -696,17 +754,17 @@ pub async fn create_invoice(
     )
     .await
     .map_err(|e| CommandError {
+        code: "DATABASE".into(),
         message: e.to_string(),
     })?;
 
     aequi_storage::get_invoice_by_id(&state.db, id)
         .await
         .map_err(|e| CommandError {
+            code: "DATABASE".into(),
             message: e.to_string(),
         })?
-        .ok_or(CommandError {
-            message: "Invoice not found after insert".into(),
-        })
+        .ok_or(CommandError::not_found("Invoice not found after insert"))
 }
 
 #[tauri::command]
@@ -716,9 +774,7 @@ pub async fn get_invoice_aging(
     let state = state.lock().await;
     aequi_storage::get_invoice_aging(&state.db)
         .await
-        .map_err(|e| CommandError {
-            message: e.to_string(),
-        })
+        .map_err(|e| CommandError::internal(e.to_string()))
 }
 
 #[derive(Debug, Deserialize)]
@@ -744,9 +800,7 @@ pub async fn record_invoice_payment(
         None,
     )
     .await
-    .map_err(|e| CommandError {
-        message: e.to_string(),
-    })
+    .map_err(|e| CommandError::internal(e.to_string()))
 }
 
 #[derive(Debug, Serialize)]
@@ -766,17 +820,13 @@ pub async fn get_1099_summary(
     let yr = year.unwrap_or(chrono::Utc::now().date_naive().year() as u16);
     let contractors = aequi_storage::get_contractors(&state.db)
         .await
-        .map_err(|e| CommandError {
-            message: e.to_string(),
-        })?;
+        .map_err(|e| CommandError::internal(e.to_string()))?;
 
     let mut entries = Vec::new();
     for c in contractors {
         let ytd = aequi_storage::get_ytd_payments_to_contact(&state.db, c.id, yr)
             .await
-            .map_err(|e| CommandError {
-                message: e.to_string(),
-            })?;
+            .map_err(|e| CommandError::internal(e.to_string()))?;
         entries.push(NecSummaryEntry {
             contact_id: c.id,
             contact_name: c.name,
@@ -868,54 +918,34 @@ pub async fn send_invoice(
     // Load email config from settings
     let config_json = aequi_storage::get_setting(&state.db, "email_config")
         .await
-        .map_err(|e| CommandError {
-            message: e.to_string(),
-        })?
-        .ok_or(CommandError {
-            message: "Email not configured — set email_config in Settings".into(),
-        })?;
+        .map_err(|e| CommandError::internal(e.to_string()))?
+        .ok_or(CommandError::internal("Email not configured — set email_config in Settings"))?;
 
     let config: aequi_email::EmailConfig =
-        serde_json::from_str(&config_json).map_err(|e| CommandError {
-            message: format!("Invalid email config: {e}"),
-        })?;
+        serde_json::from_str(&config_json).map_err(|e| CommandError::internal(format!("Invalid email config: {e}")))?;
 
     let rec = aequi_storage::get_invoice_by_id(&state.db, input.invoice_id)
         .await
-        .map_err(|e| CommandError {
-            message: e.to_string(),
-        })?
-        .ok_or(CommandError {
-            message: "Invoice not found".into(),
-        })?;
+        .map_err(|e| CommandError::internal(e.to_string()))?
+        .ok_or(CommandError::internal("Invoice not found"))?;
 
     let lines = aequi_storage::get_invoice_lines(&state.db, input.invoice_id)
         .await
-        .map_err(|e| CommandError {
-            message: e.to_string(),
-        })?;
+        .map_err(|e| CommandError::internal(e.to_string()))?;
     let tax_lines = aequi_storage::get_invoice_tax_lines(&state.db, input.invoice_id)
         .await
-        .map_err(|e| CommandError {
-            message: e.to_string(),
-        })?;
+        .map_err(|e| CommandError::internal(e.to_string()))?;
     let invoice = records_to_invoice(&rec, &lines, &tax_lines);
 
     let contact_rec = aequi_storage::get_contact_by_id(&state.db, rec.contact_id)
         .await
-        .map_err(|e| CommandError {
-            message: e.to_string(),
-        })?
-        .ok_or(CommandError {
-            message: "Contact not found".into(),
-        })?;
+        .map_err(|e| CommandError::internal(e.to_string()))?
+        .ok_or(CommandError::internal("Contact not found"))?;
     let contact = record_to_contact(&contact_rec);
 
     let result = aequi_email::send_invoice(&config, &invoice, &contact, input.subject.as_deref())
         .await
-        .map_err(|e| CommandError {
-            message: e.to_string(),
-        })?;
+        .map_err(|e| CommandError::internal(e.to_string()))?;
 
     // Update invoice status to Sent
     let sent_data =
@@ -936,9 +966,7 @@ pub async fn export_beancount(
     let state = state.lock().await;
     let accounts = aequi_storage::get_all_accounts(&state.db)
         .await
-        .map_err(|e| CommandError {
-            message: e.to_string(),
-        })?;
+        .map_err(|e| CommandError::internal(e.to_string()))?;
 
     // For now export with empty transactions — full transaction fetch to be added
     Ok(aequi_core::export::beancount::export_beancount(
@@ -965,9 +993,7 @@ pub async fn get_setting(
     let state = state.lock().await;
     aequi_storage::get_setting(&state.db, &key)
         .await
-        .map_err(|e| CommandError {
-            message: e.to_string(),
-        })
+        .map_err(|e| CommandError::internal(e.to_string()))
 }
 
 #[tauri::command]
@@ -979,9 +1005,7 @@ pub async fn set_setting(
     let state = state.lock().await;
     aequi_storage::set_setting(&state.db, &key, &value)
         .await
-        .map_err(|e| CommandError {
-            message: e.to_string(),
-        })
+        .map_err(|e| CommandError::internal(e.to_string()))
 }
 
 // ── Audit log command ───────────────────────────────────────────────────────
@@ -994,9 +1018,7 @@ pub async fn get_audit_log(
     let state = state.lock().await;
     aequi_storage::get_audit_log(&state.db, limit.unwrap_or(100))
         .await
-        .map_err(|e| CommandError {
-            message: e.to_string(),
-        })
+        .map_err(|e| CommandError::internal(e.to_string()))
 }
 
 #[tauri::command]
@@ -1014,9 +1036,7 @@ pub async fn create_backup(
         env!("CARGO_PKG_VERSION"),
     )
     .await
-    .map_err(|e| CommandError {
-        message: e.to_string(),
-    })
+    .map_err(|e| CommandError::internal(e.to_string()))
 }
 
 #[tauri::command]
@@ -1028,9 +1048,7 @@ pub async fn restore_backup(
         std::path::Path::new(&archive_path),
         std::path::Path::new(&target_dir),
     )
-    .map_err(|e| CommandError {
-        message: e.to_string(),
-    })?;
+    .map_err(|e| CommandError::internal(e.to_string()))?;
     Ok(result.db_path.to_string_lossy().to_string())
 }
 
@@ -1041,9 +1059,7 @@ pub async fn get_schema_versions(
     let state = state.lock().await;
     aequi_storage::migrate::get_schema_versions(&state.db)
         .await
-        .map_err(|e| CommandError {
-            message: e.to_string(),
-        })
+        .map_err(|e| CommandError::internal(e.to_string()))
 }
 
 // ── Update commands ─────────────────────────────────────────────────────────
@@ -1061,9 +1077,7 @@ pub async fn check_for_updates(
 ) -> Result<UpdateStatus, CommandError> {
     let current = app.package_info().version.to_string();
 
-    match app.updater().map_err(|e: tauri_plugin_updater::Error| CommandError {
-        message: e.to_string(),
-    })?.check().await {
+    match app.updater().map_err(|e: tauri_plugin_updater::Error| CommandError::internal(e.to_string()))?.check().await {
         Ok(Some(update)) => Ok(UpdateStatus {
             update_available: true,
             current_version: current,
@@ -1095,9 +1109,7 @@ pub async fn check_overdue_invoices(
     let state = state.lock().await;
     let aging = aequi_storage::get_invoice_aging(&state.db)
         .await
-        .map_err(|e| CommandError {
-            message: e.to_string(),
-        })?;
+        .map_err(|e| CommandError::internal(e.to_string()))?;
 
     let today = chrono::Utc::now().date_naive();
     let overdue: Vec<_> = aging
@@ -1127,4 +1139,177 @@ pub async fn check_overdue_invoices(
     }
 
     Ok(count)
+}
+
+// ── Dashboard commands ──────────────────────────────────────────────────────
+
+#[derive(Debug, Serialize)]
+pub struct DashboardSummary {
+    pub ytd_income_cents: i64,
+    pub ytd_expenses_cents: i64,
+    pub ytd_net_profit_cents: i64,
+    pub outstanding_invoices: u32,
+    pub overdue_invoices: u32,
+    pub pending_receipts: u32,
+    pub total_accounts: u32,
+    pub total_transactions: u32,
+    pub recent_transactions: Vec<TransactionOutput>,
+    pub quarterly_tax_due_cents: Option<i64>,
+    pub next_tax_due_date: Option<String>,
+}
+
+#[tauri::command]
+pub async fn get_dashboard_summary(
+    state: State<'_, Arc<Mutex<AppState>>>,
+) -> Result<DashboardSummary, CommandError> {
+    let state = state.lock().await;
+    let db = &state.db;
+
+    let now = chrono::Utc::now().date_naive();
+    let year_start = NaiveDate::from_ymd_opt(now.year(), 1, 1).unwrap().to_string();
+    let today = now.to_string();
+
+    // YTD P&L
+    let pl_row = sqlx::query_as::<_, (i64, i64)>(
+        r#"SELECT
+            COALESCE(SUM(CASE WHEN a.account_type = 'Income' THEN tl.credit_cents - tl.debit_cents ELSE 0 END), 0),
+            COALESCE(SUM(CASE WHEN a.account_type = 'Expense' THEN tl.debit_cents - tl.credit_cents ELSE 0 END), 0)
+        FROM transaction_lines tl
+        JOIN accounts a ON a.id = tl.account_id
+        JOIN transactions t ON t.id = tl.transaction_id
+        WHERE t.date >= ? AND t.date <= ?"#,
+    )
+    .bind(&year_start)
+    .bind(&today)
+    .fetch_one(db)
+    .await?;
+
+    let ytd_income = pl_row.0;
+    let ytd_expenses = pl_row.1;
+
+    // Outstanding + overdue invoices
+    let aging = aequi_storage::get_invoice_aging(db).await?;
+    let outstanding = aging.len() as u32;
+    let overdue = aging
+        .iter()
+        .filter(|inv| {
+            NaiveDate::parse_from_str(&inv.due_date, "%Y-%m-%d")
+                .map(|d| d < now)
+                .unwrap_or(false)
+        })
+        .count() as u32;
+
+    // Pending receipts
+    let receipts = aequi_storage::get_receipts_pending_review(db).await?;
+    let pending_receipts = receipts.len() as u32;
+
+    // Counts
+    let accounts: (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM accounts WHERE is_archived = 0")
+            .fetch_one(db)
+            .await?;
+    let tx_count: (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM transactions")
+            .fetch_one(db)
+            .await?;
+
+    // Recent transactions (last 5)
+    let recent = sqlx::query_as::<_, (i64, String, String, Option<String>, i64, String)>(
+        "SELECT id, date, description, memo, balanced_total_cents, created_at FROM transactions ORDER BY date DESC, id DESC LIMIT 5"
+    )
+    .fetch_all(db)
+    .await?;
+
+    let recent_transactions: Vec<TransactionOutput> = recent
+        .into_iter()
+        .map(|r| TransactionOutput {
+            id: r.0,
+            date: r.1,
+            description: r.2,
+            memo: r.3,
+            balanced_total: Money::from_cents(r.4).to_string(),
+            created_at: r.5,
+        })
+        .collect();
+
+    // Current quarter tax estimate
+    let current_quarter = ((now.month0() / 3) + 1) as u8;
+    let yr = now.year() as u16;
+    let tax_periods = aequi_storage::get_tax_periods(db, yr).await?;
+    let current_period = tax_periods
+        .iter()
+        .find(|p| p.quarter == current_quarter as i64);
+
+    Ok(DashboardSummary {
+        ytd_income_cents: ytd_income,
+        ytd_expenses_cents: ytd_expenses,
+        ytd_net_profit_cents: ytd_income - ytd_expenses,
+        outstanding_invoices: outstanding,
+        overdue_invoices: overdue,
+        pending_receipts,
+        total_accounts: accounts.0 as u32,
+        total_transactions: tx_count.0 as u32,
+        recent_transactions,
+        quarterly_tax_due_cents: current_period.map(|p| p.estimated_tax_cents),
+        next_tax_due_date: current_period.map(|p| p.due_date.clone()),
+    })
+}
+
+// ── Update contact command ──────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateContactInput {
+    pub id: i64,
+    pub name: String,
+    pub email: Option<String>,
+    pub phone: Option<String>,
+    pub address: Option<String>,
+    pub contact_type: String,
+    pub is_contractor: bool,
+    pub tax_id: Option<String>,
+    pub notes: Option<String>,
+}
+
+#[tauri::command]
+pub async fn update_contact(
+    state: State<'_, Arc<Mutex<AppState>>>,
+    input: UpdateContactInput,
+) -> Result<aequi_storage::ContactRecord, CommandError> {
+    let name = input.name.trim().to_string();
+    if name.is_empty() {
+        return Err(CommandError::validation("Contact name is required"));
+    }
+    if let Some(ref email) = input.email {
+        let email = email.trim();
+        if !email.is_empty() && (!email.contains('@') || !email.contains('.')) {
+            return Err(CommandError::validation("Invalid email address format"));
+        }
+    }
+
+    let state = state.lock().await;
+    aequi_storage::update_contact(
+        &state.db,
+        input.id,
+        &name,
+        input.email.as_deref(),
+        input.phone.as_deref(),
+        input.address.as_deref(),
+        &input.contact_type,
+        input.is_contractor,
+        input.tax_id.as_deref(),
+        input.notes.as_deref(),
+    )
+    .await
+    .map_err(|e| CommandError {
+        code: "DATABASE".into(),
+        message: e.to_string(),
+    })?;
+
+    aequi_storage::get_contact_by_id(&state.db, input.id)
+        .await
+        .map_err(|e| CommandError {
+            code: "DATABASE".into(),
+            message: e.to_string(),
+        })?
+        .ok_or(CommandError::not_found("Contact not found"))
 }

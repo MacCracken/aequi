@@ -258,7 +258,7 @@ mod tests {
 
         assert!(output.exists());
         assert_eq!(manifest.version, "2026.3.10");
-        assert_eq!(manifest.schema_version, 1);
+        assert!(manifest.schema_version >= 1);
         assert!(manifest.db_size_bytes > 0);
     }
 

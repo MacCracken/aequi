@@ -6,17 +6,27 @@ export interface Account {
   account_type: string;
 }
 
+export interface TransactionLineInput {
+  account_code: string;
+  debit_cents: number;
+  credit_cents: number;
+  memo?: string;
+}
+
 export interface TransactionInput {
   date: string;
   description: string;
-  entries: { account_code: string; amount_cents: number }[];
+  lines: TransactionLineInput[];
+  memo?: string;
 }
 
 export interface TransactionOutput {
   id: number;
   date: string;
   description: string;
-  entries: { account_code: string; amount_cents: number }[];
+  balanced_total: string;
+  memo: string | null;
+  created_at: string;
 }
 
 export interface ProfitLossEntry {
@@ -273,4 +283,42 @@ export interface UpdateStatus {
 
 export function checkForUpdates(): Promise<UpdateStatus> {
   return invoke("check_for_updates");
+}
+
+// ── Dashboard commands ──────────────────────────────────────────────────────
+
+export interface DashboardSummary {
+  ytd_income_cents: number;
+  ytd_expenses_cents: number;
+  ytd_net_profit_cents: number;
+  outstanding_invoices: number;
+  overdue_invoices: number;
+  pending_receipts: number;
+  total_accounts: number;
+  total_transactions: number;
+  recent_transactions: TransactionOutput[];
+  quarterly_tax_due_cents: number | null;
+  next_tax_due_date: string | null;
+}
+
+export function getDashboardSummary(): Promise<DashboardSummary> {
+  return invoke("get_dashboard_summary");
+}
+
+// ── Update contact command ──────────────────────────────────────────────────
+
+export interface UpdateContactInput {
+  id: number;
+  name: string;
+  email?: string;
+  phone?: string;
+  address?: string;
+  contact_type: string;
+  is_contractor: boolean;
+  tax_id?: string;
+  notes?: string;
+}
+
+export function updateContact(input: UpdateContactInput): Promise<ContactRecord> {
+  return invoke("update_contact", { input });
 }

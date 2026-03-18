@@ -26,12 +26,20 @@ pub struct SchemaVersion {
 
 /// All known migrations, ordered by version.
 fn all_migrations() -> Vec<Migration> {
-    vec![Migration {
-        version: 1,
-        name: "initial_schema",
-        up_sql: include_str!("migrations/V001__initial_schema.sql"),
-        down_sql: include_str!("migrations/V001__initial_schema.down.sql"),
-    }]
+    vec![
+        Migration {
+            version: 1,
+            name: "initial_schema",
+            up_sql: include_str!("migrations/V001__initial_schema.sql"),
+            down_sql: include_str!("migrations/V001__initial_schema.down.sql"),
+        },
+        Migration {
+            version: 2,
+            name: "indexes_and_constraints",
+            up_sql: include_str!("migrations/V002__indexes_and_constraints.sql"),
+            down_sql: include_str!("migrations/V002__indexes_and_constraints.down.sql"),
+        },
+    ]
 }
 
 /// Compute a simple checksum for migration content.
@@ -287,7 +295,8 @@ mod tests {
     async fn migrations_apply_on_fresh_db() {
         let pool = test_pool().await;
         let count = run_migrations(&pool).await.unwrap();
-        assert_eq!(count, 1, "Should apply 1 migration on fresh db");
+        let total = all_migrations().len();
+        assert_eq!(count, total, "Should apply all migrations on fresh db");
 
         // Verify tables exist
         let row: (i64,) = sqlx::query_as(
@@ -302,8 +311,9 @@ mod tests {
     #[tokio::test]
     async fn migrations_idempotent() {
         let pool = test_pool().await;
+        let total = all_migrations().len();
         let count1 = run_migrations(&pool).await.unwrap();
-        assert_eq!(count1, 1);
+        assert_eq!(count1, total);
 
         let count2 = run_migrations(&pool).await.unwrap();
         assert_eq!(count2, 0, "Should skip already-applied migrations");
@@ -314,34 +324,26 @@ mod tests {
         let pool = test_pool().await;
         run_migrations(&pool).await.unwrap();
 
+        let total = all_migrations().len() as i64;
         let ver = current_version(&pool).await.unwrap();
-        assert_eq!(ver, 1);
+        assert_eq!(ver, total);
 
         let versions = get_schema_versions(&pool).await.unwrap();
-        assert_eq!(versions.len(), 1);
+        assert_eq!(versions.len(), total as usize);
         assert_eq!(versions[0].name, "initial_schema");
     }
 
     #[tokio::test]
-    async fn rollback_removes_tables() {
+    async fn rollback_removes_last_migration() {
         let pool = test_pool().await;
         run_migrations(&pool).await.unwrap();
 
+        let total = all_migrations().len() as i64;
         let rolled = rollback_last(&pool).await.unwrap();
-        assert_eq!(rolled, Some(1));
+        assert_eq!(rolled, Some(total));
 
-        // accounts table should be gone
-        let row: (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='accounts'",
-        )
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        assert_eq!(row.0, 0);
-
-        // Version should be 0
         let ver = current_version(&pool).await.unwrap();
-        assert_eq!(ver, 0);
+        assert_eq!(ver, total - 1);
     }
 
     #[tokio::test]
@@ -353,8 +355,9 @@ mod tests {
         let count = run_migrations(&pool).await.unwrap();
         assert_eq!(count, 1, "Should re-apply after rollback");
 
+        let total = all_migrations().len() as i64;
         let ver = current_version(&pool).await.unwrap();
-        assert_eq!(ver, 1);
+        assert_eq!(ver, total);
     }
 
     #[tokio::test]
@@ -437,18 +440,23 @@ mod tests {
     async fn bootstrap_existing_database() {
         let pool = test_pool().await;
 
-        // Simulate a pre-migration database: create accounts table directly
-        sqlx::query("CREATE TABLE accounts (id INTEGER PRIMARY KEY, code TEXT NOT NULL UNIQUE, name TEXT NOT NULL, account_type TEXT NOT NULL, is_archetype INTEGER NOT NULL DEFAULT 0, is_archived INTEGER NOT NULL DEFAULT 0, schedule_c_line TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')))")
-            .execute(&pool)
-            .await
-            .unwrap();
+        // Simulate a pre-migration database: apply V001 SQL directly (no migration record)
+        let v001_sql = include_str!("migrations/V001__initial_schema.sql");
+        for stmt in super::split_statements(v001_sql) {
+            let trimmed = stmt.trim();
+            if !trimmed.is_empty() {
+                sqlx::query(trimmed).execute(&pool).await.unwrap();
+            }
+        }
 
-        // Run migrations — should detect existing tables and skip V001
+        // Run migrations — should detect existing tables, skip V001, and apply remaining
         let count = run_migrations(&pool).await.unwrap();
-        assert_eq!(count, 0, "Should not re-apply V001 on existing database");
+        let remaining = all_migrations().len() - 1; // V001 bootstrapped, rest applied
+        assert_eq!(count, remaining, "Should apply remaining migrations after bootstrap");
 
+        let total = all_migrations().len() as i64;
         let ver = current_version(&pool).await.unwrap();
-        assert_eq!(ver, 1, "Should mark V001 as applied via bootstrap");
+        assert_eq!(ver, total, "Should reach latest version via bootstrap");
     }
 
     #[test]

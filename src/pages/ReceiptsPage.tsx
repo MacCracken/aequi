@@ -226,13 +226,7 @@ function ReceiptDetail({
                 <span className="font-mono text-text-muted">{formatDate(linkedTx.date)}</span>
                 {" "}{linkedTx.description}
               </span>
-              <span className="font-mono">
-                {formatCents(
-                  linkedTx.entries
-                    .filter((e) => e.amount_cents > 0)
-                    .reduce((s, e) => s + e.amount_cents, 0)
-                )}
-              </span>
+              <span className="font-mono">{linkedTx.balanced_total}</span>
             </div>
           )}
 
@@ -249,11 +243,7 @@ function ReceiptDetail({
                 {filtered.length === 0 ? (
                   <div className="px-3 py-2 text-sm text-text-muted">No transactions found</div>
                 ) : (
-                  filtered.slice(0, 50).map((tx) => {
-                    const debitTotal = tx.entries
-                      .filter((e) => e.amount_cents > 0)
-                      .reduce((s, e) => s + e.amount_cents, 0);
-                    return (
+                  filtered.slice(0, 50).map((tx) => (
                       <button
                         key={tx.id}
                         onClick={() => { setLinkedTxId(tx.id); setShowPicker(false); setSearch(""); }}
@@ -263,10 +253,9 @@ function ReceiptDetail({
                           <span className="font-mono text-text-muted">{formatDate(tx.date)}</span>
                           {" "}{tx.description}
                         </span>
-                        <span className="font-mono shrink-0 ml-2">{formatCents(debitTotal)}</span>
+                        <span className="font-mono shrink-0 ml-2">{tx.balanced_total}</span>
                       </button>
-                    );
-                  })
+                    ))
                 )}
               </div>
             </div>
