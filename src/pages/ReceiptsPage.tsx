@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback, useMemo } from "react";
+import { useEffect, useState, useCallback, useRef, useMemo } from "react";
 import {
   getPendingReceipts,
   getTransactions,
@@ -18,15 +18,17 @@ export function ReceiptsPage() {
   const [transactions, setTransactions] = useState<TransactionOutput[]>([]);
   const [selected, setSelected] = useState<ReceiptOutput | null>(null);
   const { toast } = useToast();
+  const toastRef = useRef(toast);
+  toastRef.current = toast;
 
   const refresh = useCallback(() => {
     getPendingReceipts()
       .then(setReceipts)
-      .catch((e) => toast("error", String(e)));
+      .catch((e) => toastRef.current("error", String(e)));
     getTransactions()
       .then(setTransactions)
-      .catch((e) => toast("error", String(e)));
-  }, [toast]);
+      .catch((e) => toastRef.current("error", String(e)));
+  }, []);
 
   useEffect(() => {
     refresh();

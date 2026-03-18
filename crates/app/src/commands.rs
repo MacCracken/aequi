@@ -355,6 +355,19 @@ pub async fn ingest_receipt(
     file_path: String,
 ) -> Result<ReceiptOutput, CommandError> {
     let path = PathBuf::from(&file_path);
+
+    // Validate file size before processing (50 MB limit)
+    const MAX_RECEIPT_SIZE: u64 = 50 * 1024 * 1024;
+    let meta = tokio::fs::metadata(&path)
+        .await
+        .map_err(|e| CommandError::validation(format!("Cannot read file: {e}")))?;
+    if meta.len() > MAX_RECEIPT_SIZE {
+        return Err(CommandError::validation(format!(
+            "File too large ({:.1} MB, max 50 MB)",
+            meta.len() as f64 / 1_048_576.0
+        )));
+    }
+
     let (db, attachments_dir) = {
         let s = state.lock().await;
         (s.db.clone(), s.attachments_dir.clone())
@@ -414,7 +427,31 @@ pub async fn approve_receipt(
     transaction_id: Option<i64>,
 ) -> Result<(), CommandError> {
     let db = { let s = state.lock().await; s.db.clone() };
+
+    // Validate receipt exists and is still pending
+    let receipt = aequi_storage::get_receipt_by_id(&db, receipt_id)
+        .await
+        .map_err(|e| CommandError::internal(e.to_string()))?
+        .ok_or_else(|| CommandError::not_found("Receipt not found"))?;
+    if receipt.status != "pending_review" {
+        return Err(CommandError::validation(format!(
+            "Receipt is already {} — cannot approve",
+            receipt.status
+        )));
+    }
+
     if let Some(tx_id) = transaction_id {
+        // Validate transaction exists
+        let exists: Option<(i64,)> =
+            sqlx::query_as("SELECT id FROM transactions WHERE id = ?")
+                .bind(tx_id)
+                .fetch_optional(&db)
+                .await
+                .map_err(|e| CommandError::internal(e.to_string()))?;
+        if exists.is_none() {
+            return Err(CommandError::not_found("Transaction not found"));
+        }
+
         aequi_storage::link_receipt_to_transaction(&db, receipt_id, tx_id)
             .await
             .map_err(|e| CommandError::internal(e.to_string()))?;

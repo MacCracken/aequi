@@ -31,6 +31,7 @@ export function TransactionsPage() {
       .then(([txs, accts]) => {
         setTransactions(txs);
         setAccounts(accts);
+        setPage(0);
       })
       .catch((e) => toast("error", String(e)))
       .finally(() => setLoading(false));
@@ -304,7 +305,7 @@ function TransactionForm({
               placeholder="Debit"
               value={line.debit_cents ? (line.debit_cents / 100).toFixed(2) : ""}
               onChange={(e) =>
-                updateLine(idx, "debit_cents", Math.round(Number(e.target.value) * 100))
+                { const v = Number(e.target.value); if (!isNaN(v)) updateLine(idx, "debit_cents", Math.round(v * 100)); }
               }
               className="w-24 px-2 py-1.5 text-sm border border-border rounded-md bg-bg focus:outline-none focus:border-primary"
             />
@@ -317,7 +318,7 @@ function TransactionForm({
               placeholder="Credit"
               value={line.credit_cents ? (line.credit_cents / 100).toFixed(2) : ""}
               onChange={(e) =>
-                updateLine(idx, "credit_cents", Math.round(Number(e.target.value) * 100))
+                { const v = Number(e.target.value); if (!isNaN(v)) updateLine(idx, "credit_cents", Math.round(v * 100)); }
               }
               className="w-24 px-2 py-1.5 text-sm border border-border rounded-md bg-bg focus:outline-none focus:border-primary"
             />

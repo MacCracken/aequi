@@ -3,23 +3,36 @@ import { useNavigate } from "react-router-dom";
 import { getDashboardSummary, type DashboardSummary } from "../lib/api";
 import { formatCents, formatDate } from "../lib/format";
 import { DashboardSkeleton } from "../components/Skeleton";
-import { useToast } from "../components/Toast";
 
 export function DashboardPage() {
   const [data, setData] = useState<DashboardSummary | null>(null);
   const [loading, setLoading] = useState(true);
-  const { toast } = useToast();
+  const [error, setError] = useState<string | null>(null);
   const navigate = useNavigate();
 
   useEffect(() => {
+    let cancelled = false;
     getDashboardSummary()
-      .then(setData)
-      .catch((e) => toast("error", String(e)))
-      .finally(() => setLoading(false));
-  }, [toast]);
+      .then((d) => { if (!cancelled) setData(d); })
+      .catch((e) => { if (!cancelled) setError(String(e)); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, []);
 
   if (loading) return <DashboardSkeleton />;
-  if (!data) return null;
+  if (error || !data) {
+    return (
+      <div className="space-y-4 text-center py-12">
+        <p className="text-danger">{error || "Failed to load dashboard"}</p>
+        <button
+          onClick={() => window.location.reload()}
+          className="px-4 py-2 text-sm font-medium bg-primary text-white rounded-md hover:bg-primary-hover"
+        >
+          Retry
+        </button>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6">

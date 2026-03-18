@@ -5,7 +5,13 @@ import { appDataDir } from "@tauri-apps/api/path";
  * Write a captured camera File to the app's intake directory so the
  * backend receipt pipeline picks it up. Returns the absolute file path.
  */
+const MAX_FILE_SIZE = 50 * 1024 * 1024; // 50 MB
+
 export async function writeCapturedFile(file: File): Promise<string> {
+  if (file.size > MAX_FILE_SIZE) {
+    throw new Error(`File too large (${(file.size / 1048576).toFixed(1)} MB, max 50 MB)`);
+  }
+
   const dir = "intake";
   await mkdir(dir, { baseDir: BaseDirectory.AppData, recursive: true });
 

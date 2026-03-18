@@ -13,12 +13,12 @@ import { useToast } from "../components/Toast";
 
 function statusBadge(status: string) {
   const colors: Record<string, string> = {
-    Draft: "bg-gray-200 text-gray-700",
-    Sent: "bg-blue-100 text-blue-700",
-    Viewed: "bg-indigo-100 text-indigo-700",
-    PartiallyPaid: "bg-yellow-100 text-yellow-700",
-    Paid: "bg-green-100 text-green-700",
-    Void: "bg-red-100 text-red-700",
+    Draft: "bg-gray-200 text-gray-800",
+    Sent: "bg-blue-100 text-blue-800",
+    Viewed: "bg-indigo-100 text-indigo-800",
+    PartiallyPaid: "bg-yellow-100 text-yellow-900",
+    Paid: "bg-green-100 text-green-800",
+    Void: "bg-red-100 text-red-800",
   };
   return (
     <span

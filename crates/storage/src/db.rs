@@ -632,8 +632,8 @@ pub async fn build_ledger_snapshot(
                 _ => Money::zero(),
             };
             if !amount.is_zero() {
-                *line_totals.entry(line).or_insert(Money::zero()) =
-                    *line_totals.get(&line).unwrap_or(&Money::zero()) + amount;
+                let entry = line_totals.entry(line).or_insert(Money::zero());
+                *entry = *entry + amount;
             }
         }
     }

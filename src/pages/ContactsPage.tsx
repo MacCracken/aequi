@@ -73,6 +73,7 @@ export function ContactsPage() {
 
       {(showForm || editing) && (
         <ContactForm
+          key={editing ? `edit-${editing.id}` : "new"}
           initial={editing}
           onSaved={() => {
             setShowForm(false);
