@@ -86,9 +86,14 @@ impl CsvImporter {
         profile: &CsvImportProfile,
     ) -> Result<Vec<CsvTransaction>, CsvError> {
         let mut transactions = Vec::new();
+        const MAX_CSV_RECORDS: usize = 100_000;
         let mapping = &profile.mapping;
 
         for result in reader.records() {
+            if transactions.len() >= MAX_CSV_RECORDS {
+                break; // Safety limit
+            }
+
             let record = result?;
 
             if record.is_empty() {

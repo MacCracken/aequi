@@ -220,6 +220,16 @@ fn parse_ofx_amount(s: &str) -> Option<i64> {
 }
 
 pub fn parse(data: &[u8]) -> Result<OfxStatement, OfxError> {
+    // Guard against pathologically large input
+    const MAX_OFX_SIZE: usize = 50 * 1024 * 1024; // 50MB
+    if data.len() > MAX_OFX_SIZE {
+        return Err(OfxError::ParseError(format!(
+            "OFX file too large ({} bytes, max {})",
+            data.len(),
+            MAX_OFX_SIZE
+        )));
+    }
+
     let content = String::from_utf8_lossy(data);
     OfxParser::parse(&content)
 }

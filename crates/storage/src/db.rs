@@ -9,8 +9,10 @@ use std::path::Path;
 pub type DbPool = Pool<Sqlite>;
 
 pub async fn create_db(path: &Path) -> Result<DbPool, sqlx::Error> {
+    // WAL mode supports concurrent readers + one writer.
+    // 4 connections allows parallel reads without serializing everything.
     let pool = SqlitePoolOptions::new()
-        .max_connections(1)
+        .max_connections(4)
         .connect(&format!("sqlite:{}?mode=rwc", path.display()))
         .await?;
 
@@ -832,7 +834,7 @@ pub async fn update_contact(
 }
 
 pub async fn get_all_contacts(pool: &DbPool) -> Result<Vec<ContactRecord>, sqlx::Error> {
-    sqlx::query_as::<_, ContactRecord>("SELECT * FROM contacts ORDER BY name")
+    sqlx::query_as::<_, ContactRecord>("SELECT * FROM contacts ORDER BY name LIMIT 5000")
         .fetch_all(pool)
         .await
 }
@@ -946,9 +948,11 @@ pub async fn update_invoice_status(
 }
 
 pub async fn get_all_invoices(pool: &DbPool) -> Result<Vec<InvoiceRecord>, sqlx::Error> {
-    sqlx::query_as::<_, InvoiceRecord>("SELECT * FROM invoices ORDER BY created_at DESC")
-        .fetch_all(pool)
-        .await
+    sqlx::query_as::<_, InvoiceRecord>(
+        "SELECT * FROM invoices ORDER BY created_at DESC LIMIT 5000",
+    )
+    .fetch_all(pool)
+    .await
 }
 
 pub async fn get_invoice_by_id(
@@ -1101,6 +1105,28 @@ pub async fn get_ytd_payments_to_contact(
     .fetch_one(pool)
     .await?;
     Ok(row.0)
+}
+
+/// Get YTD payments for all contractors in a single query (avoids N+1).
+pub async fn get_contractor_ytd_payments(
+    pool: &DbPool,
+    year: u16,
+) -> Result<Vec<(i64, String, i64)>, sqlx::Error> {
+    let start = format!("{year}-01-01");
+    let end = format!("{year}-12-31");
+    sqlx::query_as::<_, (i64, String, i64)>(
+        r#"SELECT c.id, c.name, COALESCE(SUM(p.amount_cents), 0) as ytd
+           FROM contacts c
+           LEFT JOIN invoices i ON i.contact_id = c.id
+           LEFT JOIN payments p ON p.invoice_id = i.id AND p.date >= ? AND p.date <= ?
+           WHERE c.is_contractor = 1
+           GROUP BY c.id, c.name
+           ORDER BY c.name"#,
+    )
+    .bind(&start)
+    .bind(&end)
+    .fetch_all(pool)
+    .await
 }
 
 /// Invoice aging report: returns invoices bucketed by days overdue.

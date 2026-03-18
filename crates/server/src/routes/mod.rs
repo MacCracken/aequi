@@ -18,6 +18,7 @@ use axum::middleware::{self, Next};
 use axum::response::Response;
 use axum::Router;
 use tower_http::cors::{AllowOrigin, CorsLayer};
+use tower_http::limit::RequestBodyLimitLayer;
 
 use crate::error::ApiError;
 use crate::state::ServerState;
@@ -122,6 +123,7 @@ pub fn router(state: Arc<ServerState>) -> Router {
         .merge(health::routes())
         .nest("/api/v1", api)
         .nest("/api/v1", stripe_api)
+        .layer(RequestBodyLimitLayer::new(10 * 1024 * 1024)) // 10MB max body
         .layer(cors)
         .with_state(state)
 }

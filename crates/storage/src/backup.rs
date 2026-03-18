@@ -43,8 +43,25 @@ pub async fn create_backup(
     // Clean up any previous failed snapshot
     let _ = fs::remove_file(&snapshot_path);
 
-    // VACUUM INTO creates an atomic, consistent copy
-    sqlx::query(&format!("VACUUM INTO '{}'", snapshot_path.display()))
+    // VACUUM INTO creates an atomic, consistent copy.
+    // Canonicalize and validate the path to prevent injection via crafted filenames.
+    let canonical = snapshot_path
+        .canonicalize()
+        .or_else(|_| {
+            // File doesn't exist yet; canonicalize parent and append filename
+            let parent = snapshot_path
+                .parent()
+                .unwrap_or(Path::new("."))
+                .canonicalize()
+                .map_err(|e| BackupError::Io(e.to_string()))?;
+            Ok::<PathBuf, BackupError>(parent.join(snapshot_path.file_name().unwrap_or_default()))
+        })?;
+    let path_str = canonical.to_string_lossy();
+    // Reject paths containing single quotes to prevent SQL injection
+    if path_str.contains('\'') {
+        return Err(BackupError::Io("Backup path must not contain single quotes".into()));
+    }
+    sqlx::query(&format!("VACUUM INTO '{path_str}'"))
         .execute(pool)
         .await
         .map_err(|e| BackupError::Database(e.to_string()))?;

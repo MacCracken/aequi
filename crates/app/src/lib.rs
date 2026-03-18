@@ -10,6 +10,9 @@ pub struct AppState {
     pub db_path: PathBuf,
     pub attachments_dir: PathBuf,
     pub receipt_tx: mpsc::Sender<PathBuf>,
+    /// Kept alive for the app's lifetime; dropping it stops the watcher.
+    #[cfg(desktop)]
+    pub _intake_watcher: Option<Box<dyn std::any::Any + Send>>,
 }
 
 /// Spawn the MCP server as a sidecar process (desktop only).
@@ -142,20 +145,19 @@ pub fn build_app() -> tauri::Builder<tauri::Wry> {
 
             // Watch folder (desktop only — on mobile, files come via camera capture)
             #[cfg(desktop)]
-            {
+            let intake_watcher = {
                 let receipt_tx_for_watcher = receipt_tx.clone();
                 match aequi_ocr::pipeline::spawn_intake_watcher(&intake_dir, receipt_tx_for_watcher) {
                     Ok(watcher) => {
-                        // Leak the watcher so it lives for the app's lifetime.
-                        // Tauri doesn't provide a place to store arbitrary owned values.
-                        std::mem::forget(watcher);
                         tracing::info!("Watching intake folder: {}", intake_dir.display());
+                        Some(Box::new(watcher) as Box<dyn std::any::Any + Send>)
                     }
                     Err(e) => {
                         tracing::warn!("Failed to start intake folder watcher: {e}");
+                        None
                     }
                 }
-            }
+            };
 
             // Spawn MCP sidecar (desktop only)
             #[cfg(desktop)]
@@ -166,6 +168,8 @@ pub fn build_app() -> tauri::Builder<tauri::Wry> {
                 db_path,
                 attachments_dir,
                 receipt_tx,
+                #[cfg(desktop)]
+                _intake_watcher: intake_watcher,
             };
             app.manage(Arc::new(Mutex::new(state)));
 

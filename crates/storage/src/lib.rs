@@ -6,7 +6,7 @@ pub use db::{
     build_ledger_snapshot, check_receipt_duplicate, complete_reconciliation_session, create_db,
     create_reconciliation_session, delete_categorization_rule, delete_import_profile,
     get_account_by_code, get_all_accounts, get_all_contacts, get_all_invoices, get_audit_log,
-    get_categorization_rules, get_contact_by_id, get_contractors, get_import_profiles,
+    get_categorization_rules, get_contact_by_id, get_contractor_ytd_payments, get_contractors, get_import_profiles,
     get_imported_transactions_for_review, get_invoice_aging, get_invoice_by_id, get_invoice_lines,
     get_invoice_tax_lines, get_invoices_by_status, get_payments_for_invoice,
     get_pending_imported_transactions, get_prior_year_total_tax, get_receipt_by_id,

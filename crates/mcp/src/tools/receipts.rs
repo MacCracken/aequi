@@ -24,6 +24,26 @@ pub fn register(registry: &mut ToolRegistry) {
         true,
         |db, params| async move {
             let file_path = params.get("file_path").and_then(|v| v.as_str()).unwrap_or("");
+
+            // Security: validate file path
+            if file_path.is_empty() {
+                return ToolResult::error("file_path is required".to_string());
+            }
+            let path = std::path::Path::new(file_path);
+            if !path.is_absolute() {
+                return ToolResult::error("file_path must be an absolute path".to_string());
+            }
+            // Reject path traversal
+            if file_path.contains("..") {
+                return ToolResult::error("Path traversal not allowed".to_string());
+            }
+            // Validate file extension is an image type
+            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+            let allowed_exts = ["jpg", "jpeg", "png", "gif", "webp", "tiff", "tif", "bmp", "pdf"];
+            if !allowed_exts.contains(&ext.to_lowercase().as_str()) {
+                return ToolResult::error(format!("Unsupported file type: .{ext}"));
+            }
+
             let vendor = params.get("vendor").and_then(|v| v.as_str());
             let date = params.get("date").and_then(|v| v.as_str());
             let total_cents = params.get("total_cents").and_then(|v| v.as_i64());

@@ -144,7 +144,16 @@ impl PlaidTransaction {
     /// Plaid amounts are positive for debits and negative for credits
     /// (from the user's perspective).
     pub fn amount_cents(&self) -> i64 {
-        (self.amount * 100.0).round() as i64
+        // Use string conversion to avoid f64 precision loss for large amounts
+        let s = format!("{:.2}", self.amount);
+        if let Some((whole, frac)) = s.split_once('.') {
+            let sign = if self.amount < 0.0 { -1i64 } else { 1i64 };
+            let whole_abs: i64 = whole.trim_start_matches('-').parse().unwrap_or(0);
+            let frac_val: i64 = frac.parse().unwrap_or(0);
+            sign * (whole_abs * 100 + frac_val)
+        } else {
+            (self.amount * 100.0).round() as i64
+        }
     }
 }
 

@@ -1,4 +1,4 @@
-import { useState, useCallback, createContext, useContext } from "react";
+import { useState, useCallback, useEffect, useRef, createContext, useContext } from "react";
 
 interface ToastMessage {
   id: number;
@@ -20,17 +20,34 @@ let nextId = 0;
 
 export function ToastProvider({ children }: { children: React.ReactNode }) {
   const [messages, setMessages] = useState<ToastMessage[]>([]);
+  const timersRef = useRef<Map<number, ReturnType<typeof setTimeout>>>(new Map());
+
+  const dismiss = useCallback((id: number) => {
+    setMessages((prev) => prev.filter((m) => m.id !== id));
+    const timer = timersRef.current.get(id);
+    if (timer) {
+      clearTimeout(timer);
+      timersRef.current.delete(id);
+    }
+  }, []);
 
   const toast = useCallback((type: ToastMessage["type"], text: string) => {
     const id = ++nextId;
     setMessages((prev) => [...prev, { id, type, text }]);
-    setTimeout(() => {
+    const timer = setTimeout(() => {
       setMessages((prev) => prev.filter((m) => m.id !== id));
+      timersRef.current.delete(id);
     }, 4000);
+    timersRef.current.set(id, timer);
   }, []);
 
-  const dismiss = useCallback((id: number) => {
-    setMessages((prev) => prev.filter((m) => m.id !== id));
+  // Clean up all timers on unmount
+  useEffect(() => {
+    const timers = timersRef.current;
+    return () => {
+      timers.forEach((timer) => clearTimeout(timer));
+      timers.clear();
+    };
   }, []);
 
   return (

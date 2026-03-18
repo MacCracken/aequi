@@ -39,7 +39,7 @@ async fn list_transactions(
     State(state): State<Arc<ServerState>>,
 ) -> Result<Json<Vec<TransactionOut>>, ApiError> {
     let rows = sqlx::query_as::<_, (i64, String, String, Option<String>, i64)>(
-        "SELECT id, date, description, memo, balanced_total_cents FROM transactions ORDER BY date DESC, id DESC"
+        "SELECT id, date, description, memo, balanced_total_cents FROM transactions ORDER BY date DESC, id DESC LIMIT 1000"
     )
     .fetch_all(&state.db)
     .await?;
@@ -61,8 +61,20 @@ async fn create_transaction(
     State(state): State<Arc<ServerState>>,
     Json(input): Json<CreateTransaction>,
 ) -> Result<Json<TransactionOut>, ApiError> {
+    if input.description.trim().is_empty() {
+        return Err(ApiError::BadRequest("Description is required".to_string()));
+    }
+    if input.lines.is_empty() {
+        return Err(ApiError::BadRequest("At least one line is required".to_string()));
+    }
+    for line in &input.lines {
+        if line.debit_cents < 0 || line.credit_cents < 0 {
+            return Err(ApiError::BadRequest("Debit and credit must be non-negative".to_string()));
+        }
+    }
+
     let date = chrono::NaiveDate::parse_from_str(&input.date, "%Y-%m-%d")
-        .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+        .map_err(|e| ApiError::BadRequest(format!("Invalid date: {e}")))?;
 
     let mut lines = Vec::new();
     for line in input.lines {
@@ -73,7 +85,7 @@ async fn create_transaction(
             })?;
 
         lines.push(TransactionLine {
-            account_id: account.id.unwrap(),
+            account_id: account.id.ok_or_else(|| ApiError::Internal("Account missing ID".to_string()))?,
             debit: Money::from_cents(line.debit_cents),
             credit: Money::from_cents(line.credit_cents),
             memo: line.memo,
@@ -89,6 +101,8 @@ async fn create_transaction(
 
     let validated = ValidatedTransaction::validate(tx)?;
 
+    let mut db_tx = state.db.begin().await?;
+
     let row = sqlx::query_as::<_, (i64,)>(
         "INSERT INTO transactions (date, description, memo, balanced_total_cents) VALUES (?, ?, ?, ?) RETURNING id"
     )
@@ -96,7 +110,7 @@ async fn create_transaction(
     .bind(&validated.description)
     .bind(&validated.memo)
     .bind(validated.balanced_total.to_cents())
-    .fetch_one(&state.db)
+    .fetch_one(&mut *db_tx)
     .await?;
 
     let id = row.0;
@@ -110,9 +124,11 @@ async fn create_transaction(
         .bind(line.debit.to_cents())
         .bind(line.credit.to_cents())
         .bind(&line.memo)
-        .execute(&state.db)
+        .execute(&mut *db_tx)
         .await?;
     }
+
+    db_tx.commit().await?;
 
     Ok(Json(TransactionOut {
         id,

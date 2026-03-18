@@ -818,22 +818,21 @@ pub async fn get_1099_summary(
 ) -> Result<Vec<NecSummaryEntry>, CommandError> {
     let state = state.lock().await;
     let yr = year.unwrap_or(chrono::Utc::now().date_naive().year() as u16);
-    let contractors = aequi_storage::get_contractors(&state.db)
+
+    // Single JOIN query instead of N+1
+    let rows = aequi_storage::get_contractor_ytd_payments(&state.db, yr)
         .await
         .map_err(|e| CommandError::internal(e.to_string()))?;
 
-    let mut entries = Vec::new();
-    for c in contractors {
-        let ytd = aequi_storage::get_ytd_payments_to_contact(&state.db, c.id, yr)
-            .await
-            .map_err(|e| CommandError::internal(e.to_string()))?;
-        entries.push(NecSummaryEntry {
-            contact_id: c.id,
-            contact_name: c.name,
+    let entries = rows
+        .into_iter()
+        .map(|(id, name, ytd)| NecSummaryEntry {
+            contact_id: id,
+            contact_name: name,
             ytd_cents: ytd,
             over_threshold: aequi_core::check_1099_threshold(Money::from_cents(ytd)),
-        });
-    }
+        })
+        .collect();
     Ok(entries)
 }
 
