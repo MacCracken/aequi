@@ -259,7 +259,7 @@ mod tests {
     #[test]
     fn clone_and_copy() {
         let line = ScheduleCLine::Line18;
-        let cloned = line.clone();
+        let cloned = line;
         let copied = line;
         assert_eq!(line, cloned);
         assert_eq!(line, copied);
