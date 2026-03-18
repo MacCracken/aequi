@@ -254,4 +254,203 @@ mod tests {
         assert_eq!(filtered[0].account_code, "5020");
         assert_eq!(filtered[1].account_code, "5110");
     }
+
+    #[test]
+    fn filter_by_confidence_all_pass() {
+        let suggestions = vec![
+            AiSuggestion {
+                account_code: "5020".into(),
+                account_name: "Meals".into(),
+                confidence: 0.99,
+                reasoning: None,
+            },
+            AiSuggestion {
+                account_code: "5100".into(),
+                account_name: "Office".into(),
+                confidence: 0.85,
+                reasoning: None,
+            },
+        ];
+        let filtered = filter_by_confidence(suggestions, 0.5);
+        assert_eq!(filtered.len(), 2);
+    }
+
+    #[test]
+    fn filter_by_confidence_none_pass() {
+        let suggestions = vec![
+            AiSuggestion {
+                account_code: "5020".into(),
+                account_name: "Meals".into(),
+                confidence: 0.3,
+                reasoning: None,
+            },
+        ];
+        let filtered = filter_by_confidence(suggestions, 0.5);
+        assert!(filtered.is_empty());
+    }
+
+    #[test]
+    fn filter_by_confidence_empty_input() {
+        let filtered = filter_by_confidence(vec![], 0.5);
+        assert!(filtered.is_empty());
+    }
+
+    #[test]
+    fn filter_by_confidence_exact_threshold() {
+        let suggestions = vec![AiSuggestion {
+            account_code: "5020".into(),
+            account_name: "Meals".into(),
+            confidence: 0.7,
+            reasoning: None,
+        }];
+        // Exactly at threshold should pass (>= comparison)
+        let filtered = filter_by_confidence(suggestions, 0.7);
+        assert_eq!(filtered.len(), 1);
+    }
+
+    #[test]
+    fn filter_by_confidence_zero_threshold() {
+        let suggestions = vec![
+            AiSuggestion {
+                account_code: "5020".into(),
+                account_name: "Meals".into(),
+                confidence: 0.01,
+                reasoning: None,
+            },
+            AiSuggestion {
+                account_code: "5100".into(),
+                account_name: "Office".into(),
+                confidence: 0.0,
+                reasoning: None,
+            },
+        ];
+        let filtered = filter_by_confidence(suggestions, 0.0);
+        assert_eq!(filtered.len(), 2);
+    }
+
+    #[test]
+    fn config_validated_within_range() {
+        let config = AiCategorizationConfig {
+            endpoint: "http://localhost:8061".into(),
+            api_key: Some("key".into()),
+            min_confidence: 0.5,
+        }
+        .validated();
+        assert_eq!(config.min_confidence, 0.5);
+    }
+
+    #[test]
+    fn config_serde_roundtrip() {
+        let config = AiCategorizationConfig {
+            endpoint: "http://localhost:8061".into(),
+            api_key: Some("secret-key".into()),
+            min_confidence: 0.85,
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let back: AiCategorizationConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.endpoint, "http://localhost:8061");
+        assert_eq!(back.api_key.as_deref(), Some("secret-key"));
+        assert_eq!(back.min_confidence, 0.85);
+    }
+
+    #[test]
+    fn config_no_api_key() {
+        let json = r#"{"endpoint": "http://localhost:8061"}"#;
+        let config: AiCategorizationConfig = serde_json::from_str(json).unwrap();
+        assert!(config.api_key.is_none());
+        assert_eq!(config.min_confidence, 0.7); // default
+    }
+
+    #[test]
+    fn suggestion_serde_roundtrip() {
+        let s = AiSuggestion {
+            account_code: "6010".into(),
+            account_name: "Travel Expenses".into(),
+            confidence: 0.88,
+            reasoning: Some("Airline purchase detected".into()),
+        };
+        let json = serde_json::to_string(&s).unwrap();
+        let back: AiSuggestion = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.account_code, "6010");
+        assert_eq!(back.account_name, "Travel Expenses");
+        assert_eq!(back.confidence, 0.88);
+        assert_eq!(back.reasoning.as_deref(), Some("Airline purchase detected"));
+    }
+
+    #[test]
+    fn categorization_response_deserializes() {
+        let json = r#"{
+            "suggestions": [
+                {
+                    "account_code": "5020",
+                    "account_name": "Meals",
+                    "confidence": 0.92,
+                    "reasoning": "Restaurant purchase"
+                },
+                {
+                    "account_code": "5100",
+                    "account_name": "Office",
+                    "confidence": 0.45,
+                    "reasoning": null
+                }
+            ]
+        }"#;
+        let resp: CategorizationResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.suggestions.len(), 2);
+        assert_eq!(resp.suggestions[0].account_code, "5020");
+        assert_eq!(resp.suggestions[1].confidence, 0.45);
+    }
+
+    #[test]
+    fn categorization_response_empty_suggestions() {
+        let json = r#"{"suggestions": []}"#;
+        let resp: CategorizationResponse = serde_json::from_str(json).unwrap();
+        assert!(resp.suggestions.is_empty());
+    }
+
+    #[test]
+    fn categorization_request_serializes() {
+        let req = CategorizationRequest {
+            description: "STARBUCKS #1234".into(),
+            amount_cents: 525,
+            date: "2026-03-15".into(),
+            memo: Some("Coffee".into()),
+            available_accounts: vec![AccountOption {
+                code: "5020".into(),
+                name: "Meals".into(),
+                account_type: "Expense".into(),
+            }],
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains("STARBUCKS #1234"));
+        assert!(json.contains("525"));
+        assert!(json.contains("5020"));
+    }
+
+    #[test]
+    fn ai_categorize_error_display() {
+        let err = AiCategorizeError::RequestFailed("connection refused".into());
+        assert_eq!(
+            err.to_string(),
+            "AI categorization request failed: connection refused"
+        );
+        let err2 = AiCategorizeError::InvalidResponse("missing field".into());
+        assert_eq!(
+            err2.to_string(),
+            "AI categorization response invalid: missing field"
+        );
+    }
+
+    #[test]
+    fn account_option_serializes() {
+        let opt = AccountOption {
+            code: "4010".into(),
+            name: "Revenue".into(),
+            account_type: "Income".into(),
+        };
+        let json = serde_json::to_string(&opt).unwrap();
+        assert!(json.contains("4010"));
+        assert!(json.contains("Revenue"));
+        assert!(json.contains("Income"));
+    }
 }

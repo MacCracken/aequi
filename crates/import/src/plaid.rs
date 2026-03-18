@@ -507,4 +507,250 @@ mod tests {
         assert!(msg.contains("INVALID_REQUEST"));
         assert!(msg.contains("client_id is required"));
     }
+
+    #[test]
+    fn amount_cents_positive_integer() {
+        let tx = PlaidTransaction {
+            transaction_id: "t1".into(),
+            name: "Purchase".into(),
+            amount: 42.0,
+            date: "2026-03-15".into(),
+            category: None,
+            account_id: "a1".into(),
+            pending: false,
+            iso_currency_code: None,
+            merchant_name: None,
+        };
+        assert_eq!(tx.amount_cents(), 4200);
+    }
+
+    #[test]
+    fn amount_cents_zero() {
+        let tx = PlaidTransaction {
+            transaction_id: "t1".into(),
+            name: "Zero".into(),
+            amount: 0.0,
+            date: "2026-03-15".into(),
+            category: None,
+            account_id: "a1".into(),
+            pending: false,
+            iso_currency_code: None,
+            merchant_name: None,
+        };
+        assert_eq!(tx.amount_cents(), 0);
+    }
+
+    #[test]
+    fn amount_cents_small_fractional() {
+        let tx = PlaidTransaction {
+            transaction_id: "t1".into(),
+            name: "Penny".into(),
+            amount: 0.01,
+            date: "2026-03-15".into(),
+            category: None,
+            account_id: "a1".into(),
+            pending: false,
+            iso_currency_code: None,
+            merchant_name: None,
+        };
+        assert_eq!(tx.amount_cents(), 1);
+    }
+
+    #[test]
+    fn amount_cents_large_amount() {
+        let tx = PlaidTransaction {
+            transaction_id: "t1".into(),
+            name: "Big purchase".into(),
+            amount: 99999.99,
+            date: "2026-03-15".into(),
+            category: None,
+            account_id: "a1".into(),
+            pending: false,
+            iso_currency_code: None,
+            merchant_name: None,
+        };
+        assert_eq!(tx.amount_cents(), 9999999);
+    }
+
+    #[test]
+    fn amount_cents_negative_small() {
+        let tx = PlaidTransaction {
+            transaction_id: "t1".into(),
+            name: "Refund".into(),
+            amount: -3.50,
+            date: "2026-03-15".into(),
+            category: None,
+            account_id: "a1".into(),
+            pending: false,
+            iso_currency_code: None,
+            merchant_name: None,
+        };
+        assert_eq!(tx.amount_cents(), -350);
+    }
+
+    #[test]
+    fn amount_cents_precision_edge() {
+        // 19.99 can be tricky with f64
+        let tx = PlaidTransaction {
+            transaction_id: "t1".into(),
+            name: "Item".into(),
+            amount: 19.99,
+            date: "2026-03-15".into(),
+            category: None,
+            account_id: "a1".into(),
+            pending: false,
+            iso_currency_code: None,
+            merchant_name: None,
+        };
+        assert_eq!(tx.amount_cents(), 1999);
+    }
+
+    #[test]
+    fn environment_serde_roundtrip() {
+        for (env_str, expected_url) in [
+            ("\"sandbox\"", "https://sandbox.plaid.com"),
+            ("\"development\"", "https://development.plaid.com"),
+            ("\"production\"", "https://production.plaid.com"),
+        ] {
+            let env: PlaidEnvironment = serde_json::from_str(env_str).unwrap();
+            assert_eq!(env.base_url(), expected_url);
+        }
+    }
+
+    #[test]
+    fn config_all_environments() {
+        for env_name in ["sandbox", "development", "production"] {
+            let json = format!(
+                r#"{{"client_id":"id","secret":"s","environment":"{}"}}"#,
+                env_name
+            );
+            let config: PlaidConfig = serde_json::from_str(&json).unwrap();
+            assert_eq!(config.client_id, "id");
+        }
+    }
+
+    #[test]
+    fn plaid_client_base_url() {
+        let config = PlaidConfig {
+            client_id: "id".into(),
+            secret: "secret".into(),
+            environment: PlaidEnvironment::Sandbox,
+        };
+        let client = PlaidClient::new(config);
+        assert_eq!(client.base_url(), "https://sandbox.plaid.com");
+
+        let config_dev = PlaidConfig {
+            client_id: "id".into(),
+            secret: "secret".into(),
+            environment: PlaidEnvironment::Development,
+        };
+        let client_dev = PlaidClient::new(config_dev);
+        assert_eq!(client_dev.base_url(), "https://development.plaid.com");
+
+        let config_prod = PlaidConfig {
+            client_id: "id".into(),
+            secret: "secret".into(),
+            environment: PlaidEnvironment::Production,
+        };
+        let client_prod = PlaidClient::new(config_prod);
+        assert_eq!(client_prod.base_url(), "https://production.plaid.com");
+    }
+
+    #[test]
+    fn plaid_transaction_serde_roundtrip() {
+        let tx = PlaidTransaction {
+            transaction_id: "txn_abc".into(),
+            name: "Amazon Purchase".into(),
+            amount: 29.99,
+            date: "2026-03-15".into(),
+            category: Some(vec!["Shopping".into(), "Online".into()]),
+            account_id: "acc_1".into(),
+            pending: true,
+            iso_currency_code: Some("USD".into()),
+            merchant_name: Some("Amazon".into()),
+        };
+        let json = serde_json::to_string(&tx).unwrap();
+        let back: PlaidTransaction = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.transaction_id, "txn_abc");
+        assert_eq!(back.name, "Amazon Purchase");
+        assert_eq!(back.amount, 29.99);
+        assert!(back.pending);
+        assert_eq!(back.category.as_ref().unwrap().len(), 2);
+        assert_eq!(back.merchant_name.as_deref(), Some("Amazon"));
+    }
+
+    #[test]
+    fn plaid_account_serde_roundtrip() {
+        let account = PlaidAccount {
+            account_id: "acc_1".into(),
+            name: "Checking".into(),
+            account_type: "depository".into(),
+            subtype: Some("checking".into()),
+            balances: PlaidBalances {
+                available: Some(5000.0),
+                current: Some(5500.0),
+                limit: None,
+                iso_currency_code: Some("USD".into()),
+            },
+        };
+        let json = serde_json::to_string(&account).unwrap();
+        let back: PlaidAccount = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.account_id, "acc_1");
+        assert_eq!(back.account_type, "depository");
+        assert_eq!(back.balances.available, Some(5000.0));
+    }
+
+    #[test]
+    fn plaid_api_error_body_deserializes() {
+        let json = r#"{
+            "error_type": "INVALID_REQUEST",
+            "error_code": "MISSING_FIELDS",
+            "error_message": "client_id is required"
+        }"#;
+        let err: PlaidApiErrorBody = serde_json::from_str(json).unwrap();
+        assert_eq!(err.error_type, "INVALID_REQUEST");
+        assert_eq!(err.error_code, "MISSING_FIELDS");
+        assert_eq!(err.error_message, "client_id is required");
+    }
+
+    #[test]
+    fn plaid_error_deserialize_variant() {
+        let err = PlaidError::Deserialize("unexpected token".into());
+        assert_eq!(err.to_string(), "Deserialization error: unexpected token");
+    }
+
+    #[test]
+    fn plaid_transaction_no_optional_fields() {
+        let json = r#"{
+            "transaction_id": "txn_bare",
+            "name": "Unknown",
+            "amount": 10.00,
+            "date": "2026-03-15",
+            "category": null,
+            "account_id": "acc_1",
+            "pending": false,
+            "iso_currency_code": null,
+            "merchant_name": null
+        }"#;
+        let tx: PlaidTransaction = serde_json::from_str(json).unwrap();
+        assert!(tx.category.is_none());
+        assert!(tx.iso_currency_code.is_none());
+        assert!(tx.merchant_name.is_none());
+        assert_eq!(tx.amount_cents(), 1000);
+    }
+
+    #[test]
+    fn plaid_balances_all_none() {
+        let json = r#"{
+            "available": null,
+            "current": null,
+            "limit": null,
+            "iso_currency_code": null
+        }"#;
+        let balances: PlaidBalances = serde_json::from_str(json).unwrap();
+        assert!(balances.available.is_none());
+        assert!(balances.current.is_none());
+        assert!(balances.limit.is_none());
+        assert!(balances.iso_currency_code.is_none());
+    }
 }

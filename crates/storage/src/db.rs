@@ -1198,3 +1198,784 @@ pub async fn set_setting(pool: &DbPool, key: &str, value: &str) -> Result<(), sq
     .await?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sqlx::sqlite::SqlitePoolOptions;
+
+    async fn test_pool() -> DbPool {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::query("PRAGMA foreign_keys = ON")
+            .execute(&pool)
+            .await
+            .unwrap();
+        crate::migrate::run_migrations(&pool).await.unwrap();
+        seed_default_accounts(&pool).await.unwrap();
+        pool
+    }
+
+    // Helper: insert a contact and return its id.
+    async fn insert_test_contact(pool: &DbPool, name: &str, is_contractor: bool) -> i64 {
+        insert_contact(
+            pool,
+            name,
+            Some("test@example.com"),
+            Some("555-1234"),
+            Some("123 Main St"),
+            "vendor",
+            is_contractor,
+            Some("12-3456789"),
+            Some("test notes"),
+        )
+        .await
+        .unwrap()
+    }
+
+    // Helper: insert an invoice for a contact and return its id.
+    async fn insert_test_invoice(pool: &DbPool, contact_id: i64, number: &str) -> i64 {
+        insert_invoice(
+            pool,
+            number,
+            contact_id,
+            "Draft",
+            None,
+            "2026-01-15",
+            "2026-02-15",
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap()
+    }
+
+    // ── 1. Accounts ──────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_get_all_accounts_returns_default_accounts() {
+        let pool = test_pool().await;
+        let accounts = get_all_accounts(&pool).await.unwrap();
+        assert!(!accounts.is_empty(), "should have default accounts");
+        // All should be non-archived
+        for a in &accounts {
+            assert!(!a.is_archived);
+        }
+        // Should be sorted by code
+        let codes: Vec<&str> = accounts.iter().map(|a| a.code.as_str()).collect();
+        let mut sorted = codes.clone();
+        sorted.sort();
+        assert_eq!(codes, sorted);
+    }
+
+    #[tokio::test]
+    async fn test_get_account_by_code_found_and_not_found() {
+        let pool = test_pool().await;
+        // Pick first default account code
+        let accounts = get_all_accounts(&pool).await.unwrap();
+        let first = &accounts[0];
+        let found = get_account_by_code(&pool, &first.code).await.unwrap();
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().code, first.code);
+
+        let missing = get_account_by_code(&pool, "NONEXISTENT-999")
+            .await
+            .unwrap();
+        assert!(missing.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_get_all_accounts_excludes_archived() {
+        let pool = test_pool().await;
+        // Archive one account directly
+        let accounts = get_all_accounts(&pool).await.unwrap();
+        let first_id = accounts[0].id.unwrap().0;
+        sqlx::query("UPDATE accounts SET is_archived = 1 WHERE id = ?")
+            .bind(first_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let after = get_all_accounts(&pool).await.unwrap();
+        assert_eq!(after.len(), accounts.len() - 1);
+        assert!(after.iter().all(|a| a.id.unwrap().0 != first_id));
+    }
+
+    // ── 2. Contacts CRUD ─────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_contact_crud() {
+        let pool = test_pool().await;
+
+        // Insert
+        let id = insert_test_contact(&pool, "Alice Corp", false).await;
+        assert!(id > 0);
+
+        // Get by id
+        let c = get_contact_by_id(&pool, id).await.unwrap().unwrap();
+        assert_eq!(c.name, "Alice Corp");
+        assert_eq!(c.email.as_deref(), Some("test@example.com"));
+        assert!(!c.is_contractor);
+
+        // Update
+        update_contact(
+            &pool,
+            id,
+            "Alice Corp Updated",
+            Some("new@example.com"),
+            None,
+            None,
+            "customer",
+            true,
+            None,
+            Some("updated notes"),
+        )
+        .await
+        .unwrap();
+        let updated = get_contact_by_id(&pool, id).await.unwrap().unwrap();
+        assert_eq!(updated.name, "Alice Corp Updated");
+        assert_eq!(updated.email.as_deref(), Some("new@example.com"));
+        assert!(updated.is_contractor);
+
+        // Get all
+        let all = get_all_contacts(&pool).await.unwrap();
+        assert_eq!(all.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_get_contractors() {
+        let pool = test_pool().await;
+        insert_test_contact(&pool, "Contractor A", true).await;
+        insert_test_contact(&pool, "Non-contractor B", false).await;
+        insert_test_contact(&pool, "Contractor C", true).await;
+
+        let contractors = get_contractors(&pool).await.unwrap();
+        assert_eq!(contractors.len(), 2);
+        // Should be sorted by name
+        assert_eq!(contractors[0].name, "Contractor A");
+        assert_eq!(contractors[1].name, "Contractor C");
+    }
+
+    // ── 3. Invoice lifecycle ─────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_invoice_lifecycle() {
+        let pool = test_pool().await;
+        let contact_id = insert_test_contact(&pool, "Client X", false).await;
+
+        // Insert invoice
+        let inv_id = insert_test_invoice(&pool, contact_id, "INV-001").await;
+        assert!(inv_id > 0);
+
+        // Get by id
+        let inv = get_invoice_by_id(&pool, inv_id).await.unwrap().unwrap();
+        assert_eq!(inv.invoice_number, "INV-001");
+        assert_eq!(inv.status_type, "Draft");
+
+        // Update status
+        update_invoice_status(&pool, inv_id, "Sent", Some("2026-01-16"))
+            .await
+            .unwrap();
+        let updated = get_invoice_by_id(&pool, inv_id).await.unwrap().unwrap();
+        assert_eq!(updated.status_type, "Sent");
+        assert_eq!(updated.status_data.as_deref(), Some("2026-01-16"));
+
+        // Get all invoices
+        let all = get_all_invoices(&pool).await.unwrap();
+        assert_eq!(all.len(), 1);
+
+        // Get by status
+        let sent = get_invoices_by_status(&pool, "Sent").await.unwrap();
+        assert_eq!(sent.len(), 1);
+        let drafts = get_invoices_by_status(&pool, "Draft").await.unwrap();
+        assert_eq!(drafts.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_invoice_aging() {
+        let pool = test_pool().await;
+        let contact_id = insert_test_contact(&pool, "Client", false).await;
+
+        // Draft invoice should not appear in aging
+        insert_test_invoice(&pool, contact_id, "INV-D").await;
+
+        // Sent invoice should appear
+        let sent_id = insert_invoice(
+            &pool,
+            "INV-S",
+            contact_id,
+            "Sent",
+            None,
+            "2026-01-01",
+            "2026-01-15",
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let aging = get_invoice_aging(&pool).await.unwrap();
+        assert_eq!(aging.len(), 1);
+        assert_eq!(aging[0].id, sent_id);
+    }
+
+    // ── 4. Invoice lines ─────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_invoice_lines() {
+        let pool = test_pool().await;
+        let contact_id = insert_test_contact(&pool, "Client", false).await;
+        let inv_id = insert_test_invoice(&pool, contact_id, "INV-001").await;
+
+        // Insert lines
+        let l1 = insert_invoice_line(&pool, inv_id, "Web dev", 10000, 15000, true, 1)
+            .await
+            .unwrap();
+        let l2 = insert_invoice_line(&pool, inv_id, "Hosting", 100, 5000, false, 2)
+            .await
+            .unwrap();
+        assert!(l1 > 0);
+        assert!(l2 > l1);
+
+        // Get lines
+        let lines = get_invoice_lines(&pool, inv_id).await.unwrap();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].description, "Web dev");
+        assert_eq!(lines[0].quantity_hundredths, 10000);
+        assert_eq!(lines[0].unit_rate_cents, 15000);
+        assert!(lines[0].taxable);
+        assert_eq!(lines[1].description, "Hosting");
+        assert!(!lines[1].taxable);
+    }
+
+    // ── 5. Payments ──────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_payments_and_ytd() {
+        let pool = test_pool().await;
+        let contact_id = insert_test_contact(&pool, "Client", false).await;
+        let inv_id = insert_test_invoice(&pool, contact_id, "INV-001").await;
+
+        // Insert payments
+        let p1 = insert_payment(&pool, inv_id, 50000, "2026-03-01", Some("check"), None)
+            .await
+            .unwrap();
+        let p2 = insert_payment(&pool, inv_id, 25000, "2026-04-01", Some("wire"), None)
+            .await
+            .unwrap();
+        assert!(p1 > 0);
+        assert!(p2 > p1);
+
+        // Get payments for invoice
+        let payments = get_payments_for_invoice(&pool, inv_id).await.unwrap();
+        assert_eq!(payments.len(), 2);
+        assert_eq!(payments[0].amount_cents, 50000);
+        assert_eq!(payments[1].amount_cents, 25000);
+
+        // YTD payments to contact
+        let ytd = get_ytd_payments_to_contact(&pool, contact_id, 2026)
+            .await
+            .unwrap();
+        assert_eq!(ytd, 75000);
+
+        // Different year returns 0
+        let ytd_other = get_ytd_payments_to_contact(&pool, contact_id, 2025)
+            .await
+            .unwrap();
+        assert_eq!(ytd_other, 0);
+    }
+
+    #[tokio::test]
+    async fn test_contractor_ytd_payments() {
+        let pool = test_pool().await;
+        let c1 = insert_test_contact(&pool, "Contractor A", true).await;
+        let c2 = insert_test_contact(&pool, "Contractor B", true).await;
+        let _non = insert_test_contact(&pool, "Regular Vendor", false).await;
+
+        let inv1 = insert_test_invoice(&pool, c1, "INV-C1").await;
+        let inv2 = insert_test_invoice(&pool, c2, "INV-C2").await;
+
+        insert_payment(&pool, inv1, 100000, "2026-06-01", None, None)
+            .await
+            .unwrap();
+        insert_payment(&pool, inv2, 200000, "2026-07-01", None, None)
+            .await
+            .unwrap();
+
+        let results = get_contractor_ytd_payments(&pool, 2026).await.unwrap();
+        assert_eq!(results.len(), 2);
+        // Sorted by name
+        assert_eq!(results[0].1, "Contractor A");
+        assert_eq!(results[0].2, 100000);
+        assert_eq!(results[1].1, "Contractor B");
+        assert_eq!(results[1].2, 200000);
+    }
+
+    // ── 6. Receipts ──────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_receipt_lifecycle() {
+        let pool = test_pool().await;
+
+        // Insert receipt
+        let id = insert_receipt(
+            &pool,
+            "abc123hash",
+            "jpg",
+            "/receipts/abc123.jpg",
+            Some("ACME Store $42.50"),
+            Some("ACME Store"),
+            Some("2026-03-01"),
+            Some(4250),
+            Some(3900),
+            Some(350),
+            Some("credit_card"),
+            0.85,
+        )
+        .await
+        .unwrap();
+        assert!(id > 0);
+
+        // Get by id
+        let r = get_receipt_by_id(&pool, id).await.unwrap().unwrap();
+        assert_eq!(r.file_hash, "abc123hash");
+        assert_eq!(r.vendor.as_deref(), Some("ACME Store"));
+        assert_eq!(r.total_cents, Some(4250));
+        assert_eq!(r.status, "pending_review");
+
+        // Pending review
+        let pending = get_receipts_pending_review(&pool).await.unwrap();
+        assert_eq!(pending.len(), 1);
+
+        // Update status
+        update_receipt_status(&pool, id, "approved").await.unwrap();
+        let updated = get_receipt_by_id(&pool, id).await.unwrap().unwrap();
+        assert_eq!(updated.status, "approved");
+        assert!(updated.reviewed_at.is_some());
+
+        // No longer pending
+        let pending2 = get_receipts_pending_review(&pool).await.unwrap();
+        assert_eq!(pending2.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_receipt_duplicate_detection() {
+        let pool = test_pool().await;
+        let id1 = insert_receipt(
+            &pool,
+            "dup_hash",
+            "png",
+            "/receipts/dup.png",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            0.0,
+        )
+        .await
+        .unwrap();
+
+        // Insert same hash again - should return existing id
+        let id2 = insert_receipt(
+            &pool,
+            "dup_hash",
+            "png",
+            "/receipts/dup2.png",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            0.0,
+        )
+        .await
+        .unwrap();
+        assert_eq!(id1, id2);
+
+        // check_receipt_duplicate
+        let dup = check_receipt_duplicate(&pool, "dup_hash").await.unwrap();
+        assert_eq!(dup, Some(id1));
+
+        let no_dup = check_receipt_duplicate(&pool, "other_hash").await.unwrap();
+        assert!(no_dup.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_link_receipt_to_transaction() {
+        let pool = test_pool().await;
+        let receipt_id = insert_receipt(
+            &pool, "link_hash", "jpg", "/r/link.jpg", None, None, None, None, None, None, None, 0.5,
+        )
+        .await
+        .unwrap();
+
+        // We need a real transaction_id. Insert one directly.
+        sqlx::query("INSERT INTO transactions (date, description, balanced_total_cents) VALUES ('2026-03-01', 'Test tx', 1000)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let tx_id: (i64,) =
+            sqlx::query_as("SELECT last_insert_rowid()").fetch_one(&pool).await.unwrap();
+
+        link_receipt_to_transaction(&pool, receipt_id, tx_id.0)
+            .await
+            .unwrap();
+
+        let r = get_receipt_by_id(&pool, receipt_id).await.unwrap().unwrap();
+        assert_eq!(r.transaction_id, Some(tx_id.0));
+        assert_eq!(r.status, "approved");
+        assert!(r.reviewed_at.is_some());
+    }
+
+    // ── 7. Audit log ─────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_audit_log() {
+        let pool = test_pool().await;
+
+        let id1 = insert_audit_log(&pool, "create_invoice", Some("hash1"), "success", Some("Created INV-001"))
+            .await
+            .unwrap();
+        let id2 = insert_audit_log(&pool, "delete_contact", None, "error", Some("Not found"))
+            .await
+            .unwrap();
+        assert!(id1 > 0);
+        assert!(id2 > id1);
+
+        let logs = get_audit_log(&pool, 10).await.unwrap();
+        assert_eq!(logs.len(), 2);
+        // Both entries should be present (order may vary if timestamps match)
+        let tool_names: Vec<&str> = logs.iter().map(|l| l.tool_name.as_str()).collect();
+        assert!(tool_names.contains(&"create_invoice"));
+        assert!(tool_names.contains(&"delete_contact"));
+        let create_log = logs.iter().find(|l| l.tool_name == "create_invoice").unwrap();
+        assert_eq!(create_log.input_hash.as_deref(), Some("hash1"));
+        assert_eq!(create_log.outcome, "success");
+        let delete_log = logs.iter().find(|l| l.tool_name == "delete_contact").unwrap();
+        assert_eq!(delete_log.outcome, "error");
+
+        // Limit works
+        let logs_limited = get_audit_log(&pool, 1).await.unwrap();
+        assert_eq!(logs_limited.len(), 1);
+    }
+
+    // ── 8. Settings ──────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_settings_crud() {
+        let pool = test_pool().await;
+
+        // Initially missing
+        let val = get_setting(&pool, "theme").await.unwrap();
+        assert!(val.is_none());
+
+        // Set
+        set_setting(&pool, "theme", "dark").await.unwrap();
+        let val = get_setting(&pool, "theme").await.unwrap();
+        assert_eq!(val.as_deref(), Some("dark"));
+
+        // Upsert
+        set_setting(&pool, "theme", "light").await.unwrap();
+        let val = get_setting(&pool, "theme").await.unwrap();
+        assert_eq!(val.as_deref(), Some("light"));
+    }
+
+    // ── 9. Tax periods ───────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_tax_periods_and_payments() {
+        let pool = test_pool().await;
+
+        // Upsert Q1
+        let id = upsert_tax_period(&pool, 2026, 1, 500000, 200000, 300000, 1000000, "2026-04-15", 2026)
+            .await
+            .unwrap();
+        assert!(id > 0);
+
+        // Get periods
+        let periods = get_tax_periods(&pool, 2026).await.unwrap();
+        assert_eq!(periods.len(), 1);
+        assert_eq!(periods[0].quarter, 1);
+        assert_eq!(periods[0].estimated_tax_cents, 500000);
+        assert_eq!(periods[0].se_tax_cents, 200000);
+        assert_eq!(periods[0].net_profit_cents, 1000000);
+        assert_eq!(periods[0].payment_recorded_cents, 0);
+
+        // Upsert same quarter updates
+        upsert_tax_period(&pool, 2026, 1, 550000, 210000, 340000, 1100000, "2026-04-15", 2026)
+            .await
+            .unwrap();
+        let periods = get_tax_periods(&pool, 2026).await.unwrap();
+        assert_eq!(periods.len(), 1);
+        assert_eq!(periods[0].estimated_tax_cents, 550000);
+
+        // Record payment
+        record_tax_payment(&pool, 2026, 1, 550000, "2026-04-10")
+            .await
+            .unwrap();
+        let periods = get_tax_periods(&pool, 2026).await.unwrap();
+        assert_eq!(periods[0].payment_recorded_cents, 550000);
+        assert_eq!(periods[0].payment_date.as_deref(), Some("2026-04-10"));
+    }
+
+    #[tokio::test]
+    async fn test_prior_year_total_tax() {
+        let pool = test_pool().await;
+
+        // No prior year data
+        let none = get_prior_year_total_tax(&pool, 2026).await.unwrap();
+        assert!(none.is_none());
+
+        // Add 2025 tax periods
+        upsert_tax_period(&pool, 2025, 1, 100000, 50000, 50000, 400000, "2025-04-15", 2025)
+            .await
+            .unwrap();
+        upsert_tax_period(&pool, 2025, 2, 120000, 60000, 60000, 500000, "2025-06-15", 2025)
+            .await
+            .unwrap();
+
+        let total = get_prior_year_total_tax(&pool, 2026).await.unwrap();
+        assert_eq!(total, Some(220000)); // 100000 + 120000
+    }
+
+    // ── 10. Build ledger snapshot ────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_build_ledger_snapshot_empty() {
+        let pool = test_pool().await;
+        let year = FiscalYear::new(2026);
+        let snap = build_ledger_snapshot(&pool, year, None).await.unwrap();
+        assert!(snap.line_totals.is_empty());
+        assert_eq!(snap.year, year);
+        assert!(snap.prior_year_tax.is_none());
+    }
+
+    // ── 11. Import profiles ──────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_import_profile_crud() {
+        let pool = test_pool().await;
+
+        let profile = ImportProfile {
+            id: 0,
+            name: "Bank CSV".to_string(),
+            has_header: true,
+            delimiter: ",".to_string(),
+            date_column: Some(0),
+            description_column: Some(1),
+            amount_column: Some(2),
+            debit_column: None,
+            credit_column: None,
+            memo_column: None,
+            date_format: "%m/%d/%Y".to_string(),
+            created_at: String::new(),
+        };
+
+        let id = save_import_profile(&pool, &profile).await.unwrap();
+        assert!(id > 0);
+
+        let profiles = get_import_profiles(&pool).await.unwrap();
+        assert_eq!(profiles.len(), 1);
+        assert_eq!(profiles[0].name, "Bank CSV");
+        assert!(profiles[0].has_header);
+        assert_eq!(profiles[0].date_column, Some(0));
+
+        delete_import_profile(&pool, id).await.unwrap();
+        let profiles = get_import_profiles(&pool).await.unwrap();
+        assert_eq!(profiles.len(), 0);
+    }
+
+    // ── 12. Categorization rules ─────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_categorization_rule_crud() {
+        let pool = test_pool().await;
+        let accounts = get_all_accounts(&pool).await.unwrap();
+        let acc_id = accounts[0].id.unwrap().0;
+
+        let rule = CategorizationRule {
+            id: 0,
+            name: "Coffee shops".to_string(),
+            priority: 10,
+            match_pattern: "(?i)starbucks|coffee".to_string(),
+            match_type: "regex".to_string(),
+            account_id: acc_id,
+            created_at: String::new(),
+        };
+
+        let id = save_categorization_rule(&pool, &rule).await.unwrap();
+        assert!(id > 0);
+
+        let rules = get_categorization_rules(&pool).await.unwrap();
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].name, "Coffee shops");
+        assert_eq!(rules[0].priority, 10);
+
+        delete_categorization_rule(&pool, id).await.unwrap();
+        let rules = get_categorization_rules(&pool).await.unwrap();
+        assert_eq!(rules.len(), 0);
+    }
+
+    // ── 13. Reconciliation ───────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_reconciliation_workflow() {
+        let pool = test_pool().await;
+        let accounts = get_all_accounts(&pool).await.unwrap();
+        let acc_id = accounts[0].id.unwrap().0;
+
+        // Create session
+        let session_id =
+            create_reconciliation_session(&pool, acc_id, "2026-01-01", "2026-01-31", 500000)
+                .await
+                .unwrap();
+        assert!(session_id > 0);
+
+        let sessions = get_reconciliation_sessions(&pool, acc_id).await.unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert!(!sessions[0].is_completed);
+
+        // Add items
+        let item_id =
+            add_reconciliation_item(&pool, session_id, None, None, "unmatched", 1500)
+                .await
+                .unwrap();
+        assert!(item_id > 0);
+
+        let items = get_reconciliation_items(&pool, session_id).await.unwrap();
+        assert_eq!(items.len(), 1);
+        assert!(!items[0].is_resolved);
+
+        let unresolved = get_unresolved_reconciliation_items(&pool, session_id)
+            .await
+            .unwrap();
+        assert_eq!(unresolved.len(), 1);
+
+        // Resolve item
+        resolve_reconciliation_item(&pool, item_id, "Adjusted manually")
+            .await
+            .unwrap();
+        let unresolved = get_unresolved_reconciliation_items(&pool, session_id)
+            .await
+            .unwrap();
+        assert_eq!(unresolved.len(), 0);
+
+        let resolved_items = get_reconciliation_items(&pool, session_id).await.unwrap();
+        assert!(resolved_items[0].is_resolved);
+        assert_eq!(
+            resolved_items[0].resolution_notes.as_deref(),
+            Some("Adjusted manually")
+        );
+
+        // Complete session
+        complete_reconciliation_session(&pool, session_id)
+            .await
+            .unwrap();
+        let sessions = get_reconciliation_sessions(&pool, acc_id).await.unwrap();
+        assert!(sessions[0].is_completed);
+    }
+
+    // ── 14. Imported transactions ────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_imported_transaction_workflow() {
+        let pool = test_pool().await;
+
+        let tx = ImportedTransaction {
+            id: 0,
+            source_type: "csv".to_string(),
+            source_id: Some("row-1".to_string()),
+            import_batch_id: "batch-abc".to_string(),
+            date: "2026-03-01".to_string(),
+            description: "ACME Payment".to_string(),
+            amount_cents: -5000,
+            debit_cents: Some(5000),
+            credit_cents: None,
+            memo: Some("monthly".to_string()),
+            matched_transaction_id: None,
+            category_rule_id: None,
+            status: "pending".to_string(),
+            created_at: String::new(),
+        };
+
+        let id = insert_imported_transaction(&pool, &tx).await.unwrap();
+        assert!(id > 0);
+
+        // Pending for batch
+        let pending = get_pending_imported_transactions(&pool, "batch-abc")
+            .await
+            .unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].description, "ACME Payment");
+
+        // For review
+        let review = get_imported_transactions_for_review(&pool, "batch-abc")
+            .await
+            .unwrap();
+        assert_eq!(review.len(), 1);
+
+        // Create a real categorization rule for the FK reference
+        let accounts = get_all_accounts(&pool).await.unwrap();
+        let rule = CategorizationRule {
+            id: 0,
+            name: "Test rule".to_string(),
+            priority: 1,
+            match_pattern: "ACME".to_string(),
+            match_type: "contains".to_string(),
+            account_id: accounts[0].id.unwrap().0,
+            created_at: String::new(),
+        };
+        let rule_id = save_categorization_rule(&pool, &rule).await.unwrap();
+
+        // Mark categorized
+        mark_imported_transaction_categorized(&pool, id, rule_id)
+            .await
+            .unwrap();
+        let pending_after = get_pending_imported_transactions(&pool, "batch-abc")
+            .await
+            .unwrap();
+        assert_eq!(pending_after.len(), 0);
+
+        // Categorized still shows in for_review
+        let review_after = get_imported_transactions_for_review(&pool, "batch-abc")
+            .await
+            .unwrap();
+        assert_eq!(review_after.len(), 1);
+        assert_eq!(review_after[0].status, "categorized");
+    }
+
+    // ── 15. Invoice tax lines ────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_invoice_tax_lines() {
+        let pool = test_pool().await;
+        let contact_id = insert_test_contact(&pool, "Client", false).await;
+        let inv_id = insert_test_invoice(&pool, contact_id, "INV-TAX").await;
+
+        let tl1 = insert_invoice_tax_line(&pool, inv_id, "State Sales Tax", 825)
+            .await
+            .unwrap();
+        let tl2 = insert_invoice_tax_line(&pool, inv_id, "City Tax", 100)
+            .await
+            .unwrap();
+        assert!(tl1 > 0);
+        assert!(tl2 > tl1);
+
+        let lines = get_invoice_tax_lines(&pool, inv_id).await.unwrap();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].label, "State Sales Tax");
+        assert_eq!(lines[0].rate_bps, 825);
+    }
+}

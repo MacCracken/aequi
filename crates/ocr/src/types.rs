@@ -123,22 +123,67 @@ mod tests {
     }
 
     #[test]
-    fn payment_method_display() {
+    fn payment_method_display_all_variants() {
         assert_eq!(PaymentMethod::Visa.to_string(), "Visa");
+        assert_eq!(PaymentMethod::Mastercard.to_string(), "Mastercard");
+        assert_eq!(PaymentMethod::Amex.to_string(), "Amex");
+        assert_eq!(PaymentMethod::Discover.to_string(), "Discover");
+        assert_eq!(PaymentMethod::Cash.to_string(), "Cash");
+        assert_eq!(PaymentMethod::Debit.to_string(), "Debit");
+        assert_eq!(PaymentMethod::Check.to_string(), "Check");
         assert_eq!(PaymentMethod::Other("Zelle".into()).to_string(), "Zelle");
     }
 
     #[test]
-    fn receipt_status_roundtrip() {
+    fn receipt_status_roundtrip_all_variants() {
         use std::str::FromStr;
-        assert_eq!(
-            ReceiptStatus::from_str(&ReceiptStatus::PendingReview.to_string()).unwrap(),
-            ReceiptStatus::PendingReview
-        );
-        assert_eq!(
-            ReceiptStatus::from_str(&ReceiptStatus::Approved.to_string()).unwrap(),
-            ReceiptStatus::Approved
-        );
+        for status in [
+            ReceiptStatus::PendingReview,
+            ReceiptStatus::Approved,
+            ReceiptStatus::Rejected,
+            ReceiptStatus::Duplicate,
+        ] {
+            let s = status.to_string();
+            assert_eq!(ReceiptStatus::from_str(&s).unwrap(), status);
+        }
+    }
+
+    #[test]
+    fn receipt_status_from_str_invalid() {
+        use std::str::FromStr;
+        let err = ReceiptStatus::from_str("unknown").unwrap_err();
+        assert!(err.contains("Unknown receipt status"));
+    }
+
+    #[test]
+    fn line_item_serde() {
+        let item = LineItem {
+            description: "Coffee".into(),
+            amount_cents: Some(450),
+            quantity: Some(2.0),
+        };
+        let json = serde_json::to_string(&item).unwrap();
+        let back: LineItem = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.description, "Coffee");
+        assert_eq!(back.amount_cents, Some(450));
+        assert_eq!(back.quantity, Some(2.0));
+    }
+
+    #[test]
+    fn extracted_receipt_serde() {
+        let receipt = ExtractedReceipt {
+            vendor: Some(ExtractedField::new("ACME".into(), 0.9)),
+            date: None,
+            subtotal_cents: Some(ExtractedField::new(1000, 0.8)),
+            tax_cents: Some(ExtractedField::new(100, 0.8)),
+            total_cents: Some(ExtractedField::new(1100, 0.85)),
+            payment_method: Some(ExtractedField::new(PaymentMethod::Visa, 0.7)),
+            line_items: vec![LineItem { description: "Widget".into(), amount_cents: Some(1000), quantity: Some(1.0) }],
+            confidence: 0.85,
+        };
+        let json = serde_json::to_string(&receipt).unwrap();
+        assert!(json.contains("ACME"));
+        assert!(json.contains("1100"));
     }
 
     #[test]

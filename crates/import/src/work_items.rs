@@ -570,4 +570,292 @@ mod tests {
         assert_eq!(estimates[0].total_cents, 40000);
         assert_eq!(estimates[1].total_cents, 10000);
     }
+
+    #[test]
+    fn estimate_empty_items() {
+        let estimates = estimate_line_items(&[], 10000);
+        assert!(estimates.is_empty());
+    }
+
+    #[test]
+    fn estimate_fractional_hours() {
+        let items = vec![WorkItem {
+            id: "1".into(),
+            title: "Quick task".into(),
+            url: "https://example.com/1".into(),
+            completed_at: None,
+            labels: vec![],
+            milestone: None,
+            assignee: None,
+            hours: Some(0.25),
+        }];
+        let estimates = estimate_line_items(&items, 10000);
+        assert_eq!(estimates.len(), 1);
+        assert_eq!(estimates[0].total_cents, 2500);
+    }
+
+    #[test]
+    fn estimate_zero_rate() {
+        let items = vec![WorkItem {
+            id: "1".into(),
+            title: "Pro bono".into(),
+            url: "https://example.com/1".into(),
+            completed_at: None,
+            labels: vec![],
+            milestone: None,
+            assignee: None,
+            hours: Some(5.0),
+        }];
+        let estimates = estimate_line_items(&items, 0);
+        assert_eq!(estimates[0].total_cents, 0);
+        assert_eq!(estimates[0].rate_cents, 0);
+    }
+
+    #[test]
+    fn estimate_preserves_description() {
+        let items = vec![WorkItem {
+            id: "99".into(),
+            title: "Implement OAuth2 PKCE flow".into(),
+            url: "https://example.com/99".into(),
+            completed_at: None,
+            labels: vec![],
+            milestone: None,
+            assignee: None,
+            hours: Some(8.0),
+        }];
+        let estimates = estimate_line_items(&items, 12500);
+        assert_eq!(estimates[0].description, "Implement OAuth2 PKCE flow");
+    }
+
+    #[test]
+    fn work_item_serde_roundtrip() {
+        let item = WorkItem {
+            id: "42".into(),
+            title: "Add tests".into(),
+            url: "https://github.com/acme/app/issues/42".into(),
+            completed_at: Some(NaiveDate::from_ymd_opt(2026, 3, 10).unwrap()),
+            labels: vec!["bug".into(), "priority".into()],
+            milestone: Some("v1.0".into()),
+            assignee: Some("alice".into()),
+            hours: Some(3.5),
+        };
+        let json = serde_json::to_string(&item).unwrap();
+        let back: WorkItem = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.id, "42");
+        assert_eq!(back.title, "Add tests");
+        assert_eq!(back.completed_at, Some(NaiveDate::from_ymd_opt(2026, 3, 10).unwrap()));
+        assert_eq!(back.labels, vec!["bug", "priority"]);
+        assert_eq!(back.milestone.as_deref(), Some("v1.0"));
+        assert_eq!(back.assignee.as_deref(), Some("alice"));
+        assert_eq!(back.hours, Some(3.5));
+    }
+
+    #[test]
+    fn work_item_no_optional_fields() {
+        let item = WorkItem {
+            id: "1".into(),
+            title: "Bare".into(),
+            url: "https://example.com".into(),
+            completed_at: None,
+            labels: vec![],
+            milestone: None,
+            assignee: None,
+            hours: None,
+        };
+        let json = serde_json::to_string(&item).unwrap();
+        let back: WorkItem = serde_json::from_str(&json).unwrap();
+        assert!(back.completed_at.is_none());
+        assert!(back.labels.is_empty());
+        assert!(back.milestone.is_none());
+        assert!(back.assignee.is_none());
+        assert!(back.hours.is_none());
+    }
+
+    #[test]
+    fn filter_serde_roundtrip() {
+        let filter = WorkItemFilter {
+            milestone: Some("v2.0".into()),
+            label: Some("enhancement".into()),
+            since: Some(NaiveDate::from_ymd_opt(2026, 1, 1).unwrap()),
+            assignee: Some("bob".into()),
+        };
+        let json = serde_json::to_string(&filter).unwrap();
+        let back: WorkItemFilter = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.milestone.as_deref(), Some("v2.0"));
+        assert_eq!(back.label.as_deref(), Some("enhancement"));
+        assert_eq!(back.since, Some(NaiveDate::from_ymd_opt(2026, 1, 1).unwrap()));
+        assert_eq!(back.assignee.as_deref(), Some("bob"));
+    }
+
+    #[test]
+    fn filter_partial_fields() {
+        let json = r#"{"milestone": "sprint-5"}"#;
+        let filter: WorkItemFilter = serde_json::from_str(json).unwrap();
+        assert_eq!(filter.milestone.as_deref(), Some("sprint-5"));
+        assert!(filter.label.is_none());
+        assert!(filter.since.is_none());
+        assert!(filter.assignee.is_none());
+    }
+
+    #[test]
+    fn invoice_line_estimate_serde() {
+        let est = InvoiceLineEstimate {
+            description: "Feature work".into(),
+            hours: Decimal::new(5, 0),
+            rate_cents: 15000,
+            total_cents: 75000,
+        };
+        let json = serde_json::to_string(&est).unwrap();
+        assert!(json.contains("Feature work"));
+        assert!(json.contains("15000"));
+        let back: InvoiceLineEstimate = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.description, "Feature work");
+        assert_eq!(back.hours, Decimal::new(5, 0));
+        assert_eq!(back.rate_cents, 15000);
+        assert_eq!(back.total_cents, 75000);
+    }
+
+    #[test]
+    fn work_item_error_display() {
+        let err = WorkItemError::RequestFailed("timeout".into());
+        assert_eq!(err.to_string(), "HTTP request failed: timeout");
+        let err2 = WorkItemError::ParseError("bad json".into());
+        assert_eq!(err2.to_string(), "failed to parse response: bad json");
+    }
+
+    #[test]
+    fn github_issue_deserializes() {
+        let json = r#"{
+            "number": 123,
+            "title": "Fix crash on startup",
+            "html_url": "https://github.com/acme/app/issues/123",
+            "closed_at": "2026-03-10T15:30:00Z",
+            "labels": [{"name": "bug"}, {"name": "P1"}],
+            "milestone": {"title": "v1.0"},
+            "assignee": {"login": "alice"}
+        }"#;
+        let issue: GitHubIssue = serde_json::from_str(json).unwrap();
+        assert_eq!(issue.number, 123);
+        assert_eq!(issue.title, "Fix crash on startup");
+        assert_eq!(issue.labels.len(), 2);
+        assert_eq!(issue.labels[0].name, "bug");
+        assert_eq!(issue.milestone.as_ref().unwrap().title, "v1.0");
+        assert_eq!(issue.assignee.as_ref().unwrap().login, "alice");
+    }
+
+    #[test]
+    fn github_issue_minimal() {
+        let json = r#"{
+            "number": 1,
+            "title": "Test",
+            "html_url": "https://github.com/a/b/issues/1",
+            "closed_at": null,
+            "labels": [],
+            "milestone": null,
+            "assignee": null
+        }"#;
+        let issue: GitHubIssue = serde_json::from_str(json).unwrap();
+        assert_eq!(issue.number, 1);
+        assert!(issue.closed_at.is_none());
+        assert!(issue.labels.is_empty());
+        assert!(issue.milestone.is_none());
+        assert!(issue.assignee.is_none());
+    }
+
+    #[test]
+    fn linear_response_deserializes_success() {
+        let json = r#"{
+            "data": {
+                "issues": {
+                    "nodes": [{
+                        "identifier": "ENG-42",
+                        "title": "Add dark mode",
+                        "url": "https://linear.app/team/ENG-42",
+                        "completedAt": "2026-03-05T10:00:00.000Z",
+                        "labels": {"nodes": [{"name": "feature"}, {"name": "frontend"}]},
+                        "assignee": {"name": "Bob Smith"},
+                        "projectMilestone": {"name": "Q1 Release"},
+                        "estimate": 3.0
+                    }]
+                }
+            }
+        }"#;
+        let resp: LinearResponse = serde_json::from_str(json).unwrap();
+        let data = resp.data.unwrap();
+        assert_eq!(data.issues.nodes.len(), 1);
+        let issue = &data.issues.nodes[0];
+        assert_eq!(issue.identifier, "ENG-42");
+        assert_eq!(issue.title, "Add dark mode");
+        assert_eq!(issue.labels.nodes.len(), 2);
+        assert_eq!(issue.assignee.as_ref().unwrap().name, "Bob Smith");
+        assert_eq!(issue.project_milestone.as_ref().unwrap().name, "Q1 Release");
+        assert_eq!(issue.estimate, Some(3.0));
+    }
+
+    #[test]
+    fn linear_response_deserializes_error() {
+        let json = r#"{
+            "data": null,
+            "errors": [{"message": "Authentication required"}]
+        }"#;
+        let resp: LinearResponse = serde_json::from_str(json).unwrap();
+        assert!(resp.data.is_none());
+        assert_eq!(resp.errors.as_ref().unwrap().len(), 1);
+        assert_eq!(resp.errors.unwrap()[0].message, "Authentication required");
+    }
+
+    #[test]
+    fn linear_issue_minimal() {
+        let json = r#"{
+            "identifier": "ENG-1",
+            "title": "Minimal",
+            "url": "https://linear.app/t/ENG-1",
+            "completedAt": null,
+            "labels": {"nodes": []},
+            "assignee": null,
+            "projectMilestone": null,
+            "estimate": null
+        }"#;
+        let issue: LinearIssue = serde_json::from_str(json).unwrap();
+        assert_eq!(issue.identifier, "ENG-1");
+        assert!(issue.completed_at.is_none());
+        assert!(issue.labels.nodes.is_empty());
+        assert!(issue.assignee.is_none());
+        assert!(issue.project_milestone.is_none());
+        assert!(issue.estimate.is_none());
+    }
+
+    #[test]
+    fn github_closed_at_date_parsing() {
+        // Verify the date parsing logic used in the GitHub fetcher
+        let closed_at = "2026-03-10T15:30:00Z";
+        let date_part = &closed_at[..10];
+        let parsed = NaiveDate::parse_from_str(date_part, "%Y-%m-%d").unwrap();
+        assert_eq!(parsed, NaiveDate::from_ymd_opt(2026, 3, 10).unwrap());
+    }
+
+    #[test]
+    fn linear_completed_at_date_parsing() {
+        // Full ISO-8601 from Linear
+        let completed_at = "2026-03-05T10:00:00.000Z";
+        let date_part = &completed_at[..10];
+        let parsed = NaiveDate::parse_from_str(date_part, "%Y-%m-%d").unwrap();
+        assert_eq!(parsed, NaiveDate::from_ymd_opt(2026, 3, 5).unwrap());
+    }
+
+    #[test]
+    fn estimate_large_hourly_rate() {
+        let items = vec![WorkItem {
+            id: "1".into(),
+            title: "Premium consulting".into(),
+            url: "https://example.com/1".into(),
+            completed_at: None,
+            labels: vec![],
+            milestone: None,
+            assignee: None,
+            hours: Some(100.0),
+        }];
+        let estimates = estimate_line_items(&items, 50000); // $500/hr
+        assert_eq!(estimates[0].total_cents, 5_000_000);
+    }
 }

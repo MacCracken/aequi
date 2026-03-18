@@ -366,4 +366,214 @@ mod tests {
         let json = serde_json::to_string(&r).unwrap();
         assert!(json.contains("INV-001"));
     }
+
+    #[test]
+    fn render_text_contains_invoice_number() {
+        let invoice = sample_invoice();
+        let contact = Contact::new("Acme Corp", ContactType::Client);
+        let text = render_invoice_text(&invoice, &contact);
+        assert!(text.contains("INVOICE INV-042"));
+    }
+
+    #[test]
+    fn render_text_contains_contact_name() {
+        let invoice = sample_invoice();
+        let contact = Contact::new("Acme Corp", ContactType::Client);
+        let text = render_invoice_text(&invoice, &contact);
+        assert!(text.contains("Bill To: Acme Corp"));
+    }
+
+    #[test]
+    fn render_text_contains_dates() {
+        let invoice = sample_invoice();
+        let contact = Contact::new("Acme Corp", ContactType::Client);
+        let text = render_invoice_text(&invoice, &contact);
+        assert!(text.contains("2026-03-01"));
+        assert!(text.contains("2026-03-31"));
+    }
+
+    #[test]
+    fn render_text_contains_line_items() {
+        let invoice = sample_invoice();
+        let contact = Contact::new("Acme Corp", ContactType::Client);
+        let text = render_invoice_text(&invoice, &contact);
+        assert!(text.contains("Consulting"));
+    }
+
+    #[test]
+    fn render_text_contains_terms() {
+        let invoice = sample_invoice();
+        let contact = Contact::new("Acme Corp", ContactType::Client);
+        let text = render_invoice_text(&invoice, &contact);
+        assert!(text.contains("Net 30"));
+    }
+
+    #[test]
+    fn render_text_includes_email_when_present() {
+        let invoice = sample_invoice();
+        let mut contact = Contact::new("Acme Corp", ContactType::Client);
+        contact.email = Some("billing@acme.com".into());
+        let text = render_invoice_text(&invoice, &contact);
+        assert!(text.contains("billing@acme.com"));
+    }
+
+    #[test]
+    fn render_text_includes_address_when_present() {
+        let invoice = sample_invoice();
+        let mut contact = Contact::new("Acme Corp", ContactType::Client);
+        contact.address = Some("123 Main St, Springfield".into());
+        let text = render_invoice_text(&invoice, &contact);
+        assert!(text.contains("123 Main St, Springfield"));
+    }
+
+    #[test]
+    fn render_pdf_produces_bytes() {
+        let invoice = sample_invoice();
+        let contact = Contact::new("Acme Corp", ContactType::Client);
+        let pdf = render_invoice_pdf(&invoice, &contact);
+        assert!(pdf.is_ok());
+        let bytes = pdf.unwrap();
+        assert!(!bytes.is_empty());
+    }
+
+    #[test]
+    fn crlf_in_subject_rejected() {
+        let invoice = sample_invoice();
+        let mut contact = Contact::new("Acme Corp", ContactType::Client);
+        contact.email = Some("test@example.com".into());
+        let config = EmailConfig::Resend {
+            from_name: "Test".into(),
+            from_email: "test@example.com".into(),
+            api_key: "re_fake".into(),
+        };
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let result = rt.block_on(send_invoice(
+            &config,
+            &invoice,
+            &contact,
+            Some("Bad\r\nSubject"),
+        ));
+        assert!(matches!(result, Err(DeliveryError::MessageBuild(_))));
+        if let Err(DeliveryError::MessageBuild(msg)) = result {
+            assert!(msg.contains("subject"));
+            assert!(msg.contains("line breaks"));
+        }
+    }
+
+    #[test]
+    fn crlf_in_contact_name_rejected() {
+        let invoice = sample_invoice();
+        let mut contact = Contact::new("Evil\nName", ContactType::Client);
+        contact.email = Some("test@example.com".into());
+        let config = EmailConfig::Resend {
+            from_name: "Test".into(),
+            from_email: "test@example.com".into(),
+            api_key: "re_fake".into(),
+        };
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let result = rt.block_on(send_invoice(&config, &invoice, &contact, None));
+        assert!(matches!(result, Err(DeliveryError::MessageBuild(_))));
+        if let Err(DeliveryError::MessageBuild(msg)) = result {
+            assert!(msg.contains("contact name"));
+        }
+    }
+
+    #[test]
+    fn crlf_cr_in_invoice_number_rejected() {
+        let mut invoice = sample_invoice();
+        invoice.invoice_number = "INV\r-042".to_string();
+        let mut contact = Contact::new("Acme Corp", ContactType::Client);
+        contact.email = Some("test@example.com".into());
+        let config = EmailConfig::Resend {
+            from_name: "Test".into(),
+            from_email: "test@example.com".into(),
+            api_key: "re_fake".into(),
+        };
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        // When no explicit subject is given, default subject is "Invoice {number}",
+        // which also contains \r, so subject check may fire first.
+        let result = rt.block_on(send_invoice(&config, &invoice, &contact, None));
+        assert!(matches!(result, Err(DeliveryError::MessageBuild(_))));
+        if let Err(DeliveryError::MessageBuild(msg)) = result {
+            assert!(msg.contains("line breaks"));
+        }
+    }
+
+    #[test]
+    fn crlf_in_invoice_number_with_explicit_subject() {
+        let mut invoice = sample_invoice();
+        invoice.invoice_number = "INV\n-042".to_string();
+        let mut contact = Contact::new("Acme Corp", ContactType::Client);
+        contact.email = Some("test@example.com".into());
+        let config = EmailConfig::Resend {
+            from_name: "Test".into(),
+            from_email: "test@example.com".into(),
+            api_key: "re_fake".into(),
+        };
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        // With clean explicit subject, the invoice number check fires
+        let result = rt.block_on(send_invoice(
+            &config,
+            &invoice,
+            &contact,
+            Some("Clean Subject"),
+        ));
+        assert!(matches!(result, Err(DeliveryError::MessageBuild(_))));
+        if let Err(DeliveryError::MessageBuild(msg)) = result {
+            assert!(msg.contains("invoice number"));
+        }
+    }
+
+    #[test]
+    fn base64_longer_input() {
+        // "Man" is the classic base64 test vector
+        assert_eq!(base64_encode(b"Man"), "TWFu");
+        assert_eq!(base64_encode(b"Ma"), "TWE=");
+        assert_eq!(base64_encode(b"M"), "TQ==");
+    }
+
+    #[test]
+    fn base64_binary_data() {
+        let data: Vec<u8> = (0..=255).collect();
+        let encoded = base64_encode(&data);
+        // Should be valid base64 (length multiple of 4, only valid chars)
+        assert_eq!(encoded.len() % 4, 0);
+        assert!(encoded
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '='));
+    }
+
+    #[test]
+    fn delivery_error_display() {
+        let e1 = DeliveryError::NoRecipientEmail;
+        assert_eq!(e1.to_string(), "recipient has no email address");
+
+        let e2 = DeliveryError::PdfError("typst failed".into());
+        assert_eq!(e2.to_string(), "PDF generation failed: typst failed");
+
+        let e3 = DeliveryError::MessageBuild("bad header".into());
+        assert_eq!(
+            e3.to_string(),
+            "failed to build email message: bad header"
+        );
+
+        let e4 = DeliveryError::Smtp("timeout".into());
+        assert_eq!(e4.to_string(), "SMTP delivery failed: timeout");
+
+        let e5 = DeliveryError::Resend("429 rate limited".into());
+        assert_eq!(e5.to_string(), "Resend API error: 429 rate limited");
+    }
+
+    #[test]
+    fn delivery_result_all_fields() {
+        let r = DeliveryResult {
+            recipient: "alice@example.com".into(),
+            invoice_number: "INV-099".into(),
+            backend: "resend".into(),
+        };
+        let json: serde_json::Value = serde_json::to_value(&r).unwrap();
+        assert_eq!(json["recipient"], "alice@example.com");
+        assert_eq!(json["invoice_number"], "INV-099");
+        assert_eq!(json["backend"], "resend");
+    }
 }
