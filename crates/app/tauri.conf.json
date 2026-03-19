@@ -51,6 +51,11 @@
     },
     "android": {
       "minSdkVersion": 24
+    },
+    "windows": {
+      "wix": {
+        "version": "26.3.18"
+      }
     }
   }
 }

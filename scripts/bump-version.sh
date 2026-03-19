@@ -41,8 +41,16 @@ echo "Setting version to: $VERSION"
 # Cargo workspace version
 sed -i "s/^version = \".*\"/version = \"$VERSION\"/" Cargo.toml
 
-# tauri.conf.json
-sed -i "s/\"version\": \".*\"/\"version\": \"$VERSION\"/" crates/app/tauri.conf.json
+# tauri.conf.json — app version + Windows MSI version (MSI requires each component ≤ 255)
+MSI_VERSION=$(echo "$VERSION" | sed 's/^20//' | sed 's/-[0-9]*//')
+python3 -c "
+import json, sys
+conf = json.load(open('crates/app/tauri.conf.json'))
+conf['version'] = '$VERSION'
+conf.setdefault('bundle', {}).setdefault('windows', {}).setdefault('wix', {})['version'] = '$MSI_VERSION'
+json.dump(conf, open('crates/app/tauri.conf.json', 'w'), indent=2)
+print('', file=open('crates/app/tauri.conf.json', 'a'))  # trailing newline
+"
 
 # package.json (top-level version field only)
 sed -i "s/\"version\": \".*\"/\"version\": \"$VERSION\"/" package.json
@@ -51,7 +59,7 @@ echo ""
 echo "Updated:"
 echo "  VERSION              → $VERSION"
 echo "  Cargo.toml           → $VERSION"
-echo "  tauri.conf.json      → $VERSION"
+echo "  tauri.conf.json      → $VERSION (MSI: $MSI_VERSION)"
 echo "  package.json         → $VERSION"
 echo ""
 
