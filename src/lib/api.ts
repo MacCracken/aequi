@@ -35,6 +35,8 @@ export interface TransactionInput {
   description: string;
   lines: TransactionLineInput[];
   memo?: string;
+  /** Payee or payer. Contractor payments linked here count toward 1099-NEC. */
+  contact_id?: number;
 }
 
 export interface TransactionOutput {
@@ -44,6 +46,8 @@ export interface TransactionOutput {
   balanced_total: string;
   memo: string | null;
   created_at: string;
+  contact_id: number | null;
+  contact_name: string | null;
 }
 
 export interface ProfitLossEntry {
@@ -66,6 +70,8 @@ export interface ReceiptOutput {
   transaction_id: number | null;
   attachment_path: string;
   needs_review: boolean;
+  /** Fields were filled in by an AI agent (not OCR); they still need approval. */
+  filled_by_agent: boolean;
   created_at: string;
 }
 
@@ -130,6 +136,9 @@ export interface QuarterlyEstimateOutput {
   /** Year-to-date net profit projected to a full year. */
   annualized_net_profit_cents: number;
   standard_deduction_cents: number;
+  /** Qualified business income deduction, taken after the standard deduction. */
+  qbi_deduction_cents: number;
+  /** Income taxed by the brackets (after the standard and QBI deductions). */
   taxable_income_cents: number;
   se_tax_cents: number;
   se_tax_deduction_cents: number;
@@ -137,7 +146,18 @@ export interface QuarterlyEstimateOutput {
   additional_medicare_tax_cents: number;
   /** Projected full-year tax. */
   total_tax_cents: number;
+  /** The smaller of 90% of the projected tax and the prior-year requirement. */
   safe_harbor_cents: number;
+  /**
+   * Share of last year's tax the prior-year safe harbor requires, as a decimal
+   * string: "1.00", or "1.10" when last year's AGI was over the threshold.
+   */
+  safe_harbor_prior_year_percentage: string;
+  /**
+   * Last year's tax the safe harbor is based on (the filed return's figure,
+   * else the app's own projection); null when neither is known.
+   */
+  prior_year_tax_cents: number | null;
   /** One quarter of the projected full-year tax. */
   quarterly_payment_cents: number;
   payment_due_date: string;
@@ -163,6 +183,29 @@ export function getScheduleCPreview(
   year?: number,
 ): Promise<ScheduleCPreviewOutput> {
   return invoke("get_schedule_c_preview", { year });
+}
+
+/** Figures from a filed return, in cents; null = unknown. */
+export interface TaxReturnFigures {
+  /** Form 1040 line 24, "total tax". */
+  total_tax_cents: number | null;
+  /** Form 1040 line 11, adjusted gross income. */
+  agi_cents: number | null;
+}
+
+export function getTaxReturn({ year }: { year: number }): Promise<TaxReturnFigures> {
+  return invoke("get_tax_return", { year });
+}
+
+/** Store the figures from the `year` return; returns what is now stored. */
+export function setTaxReturn({
+  year,
+  figures,
+}: {
+  year: number;
+  figures: TaxReturnFigures;
+}): Promise<TaxReturnFigures> {
+  return invoke("set_tax_return", { year, figures });
 }
 
 // ── Contact commands ─────────────────────────────────────────────────────────
@@ -201,14 +244,19 @@ export function createContact(input: ContactInput): Promise<ContactRecord> {
 
 // ── Invoice commands ─────────────────────────────────────────────────────────
 
+/** Stored invoice status (`status_type`). */
+export type InvoiceStatus = "Draft" | "Sent" | "Viewed" | "PartiallyPaid" | "Paid" | "Void";
+
 export interface InvoiceRecord {
   id: number;
   invoice_number: string;
   contact_id: number;
   status_type: string;
+  /** JSON with status details, e.g. `{"voided_at": …, "reason": …}`. */
   status_data: string | null;
   issue_date: string;
   due_date: string;
+  /** "Percentage" (value in basis points) or "Flat" (value in cents). */
   discount_type: string | null;
   discount_value: number | null;
   notes: string | null;
@@ -217,11 +265,79 @@ export interface InvoiceRecord {
   updated_at: string;
 }
 
-export interface InvoiceInput {
+/** Computed money totals of an invoice, in cents (backend is authoritative). */
+export interface InvoiceTotals {
+  subtotal_cents: number;
+  discount_cents: number;
+  tax_cents: number;
+  total_cents: number;
+  paid_cents: number;
+  balance_cents: number;
+}
+
+export interface InvoiceSummary extends InvoiceRecord, InvoiceTotals {}
+
+export interface InvoiceLineRecord {
+  id: number;
+  invoice_id: number;
+  description: string;
+  /** 150 = 1.5 */
+  quantity_hundredths: number;
+  unit_rate_cents: number;
+  taxable: boolean;
+  sort_order: number;
+}
+
+export interface InvoiceTaxLineRecord {
+  id: number;
+  invoice_id: number;
+  label: string;
+  /** 825 = 8.25% */
+  rate_bps: number;
+}
+
+export interface InvoicePaymentRecord {
+  id: number;
+  invoice_id: number;
+  amount_cents: number;
+  date: string;
+  method: string | null;
+  transaction_id: number | null;
+  created_at: string;
+}
+
+export interface InvoiceDetail extends InvoiceRecord, InvoiceTotals {
+  lines: InvoiceLineRecord[];
+  tax_lines: InvoiceTaxLineRecord[];
+  payments: InvoicePaymentRecord[];
+}
+
+export interface NewInvoiceLine {
+  description: string;
+  /** 150 = 1.5 */
+  quantity_hundredths: number;
+  unit_rate_cents: number;
+  taxable: boolean;
+}
+
+export interface NewInvoiceTaxLine {
+  label: string;
+  /** 825 = 8.25% */
+  rate_bps: number;
+}
+
+export type NewDiscount =
+  | { type: "percentage"; bps: number }
+  | { type: "flat"; cents: number };
+
+export interface NewInvoice {
   invoice_number: string;
   contact_id: number;
   issue_date: string;
   due_date: string;
+  lines: NewInvoiceLine[];
+  tax_lines: NewInvoiceTaxLine[];
+  discount: NewDiscount | null;
   notes?: string;
   terms?: string;
 }
@@ -231,6 +347,8 @@ export interface PaymentInput {
   amount_cents: number;
   date: string;
   method?: string;
+  /** Asset account the money went into; the backend defaults to "1000" (Checking). */
+  deposit_account_code?: string;
 }
 
 export interface NecSummaryEntry {
@@ -238,24 +356,36 @@ export interface NecSummaryEntry {
   contact_name: string;
   ytd_cents: number;
   over_threshold: boolean;
+  threshold_cents: number;
 }
 
-export function getInvoices(): Promise<InvoiceRecord[]> {
+export function getInvoices(): Promise<InvoiceSummary[]> {
   return invoke("get_invoices");
 }
 
-export function createInvoice(input: InvoiceInput): Promise<InvoiceRecord> {
+export function getInvoice(id: number): Promise<InvoiceDetail> {
+  return invoke("get_invoice", { id });
+}
+
+export function createInvoice(input: NewInvoice): Promise<InvoiceDetail> {
   return invoke("create_invoice", { input });
 }
 
-export function getInvoiceAging(): Promise<InvoiceRecord[]> {
-  return invoke("get_invoice_aging");
+/** Replace the contents of a Draft invoice. */
+export function updateInvoice(id: number, input: NewInvoice): Promise<InvoiceDetail> {
+  return invoke("update_invoice", { id, input });
 }
 
+export function voidInvoice(id: number, reason: string): Promise<void> {
+  return invoke("void_invoice", { id, reason });
+}
+
+/** Record a payment (posts the cash-basis ledger entry); returns the payment id. */
 export function recordInvoicePayment(input: PaymentInput): Promise<number> {
   return invoke("record_invoice_payment", { input });
 }
 
+/** Payments made to contractors from bank/cash accounts in `year`. */
 export function get1099Summary(year?: number): Promise<NecSummaryEntry[]> {
   return invoke("get_1099_summary", { year });
 }
@@ -328,8 +458,11 @@ export interface DashboardSummary {
   ytd_income_cents: number;
   ytd_expenses_cents: number;
   ytd_net_profit_cents: number;
+  /** Sent/viewed/partially paid invoices (paid and void excluded). */
   outstanding_invoices: number;
   overdue_invoices: number;
+  /** Balance still owed on outstanding invoices. */
+  outstanding_receivables_cents: number;
   pending_receipts: number;
   total_accounts: number;
   total_transactions: number;

@@ -72,6 +72,7 @@ export function DashboardPage() {
         <StatusCard
           label="Outstanding Invoices"
           count={data.outstanding_invoices}
+          detail={`${formatCents(data.outstanding_receivables_cents)} receivable`}
           alert={data.overdue_invoices}
           alertLabel="overdue"
           onClick={() => navigate("/invoices")}
@@ -115,7 +116,12 @@ export function DashboardPage() {
                 {data.recent_transactions.map((tx) => (
                   <tr key={tx.id} className="border-b border-border last:border-b-0">
                     <td className="px-4 py-2 font-mono">{formatDate(tx.date)}</td>
-                    <td className="px-4 py-2">{tx.description}</td>
+                    <td className="px-4 py-2">
+                      {tx.description}
+                      {tx.contact_name && (
+                        <span className="block text-xs text-text-muted">{tx.contact_name}</span>
+                      )}
+                    </td>
                     <td className="px-4 py-2 text-right font-mono">{tx.balanced_total}</td>
                   </tr>
                 ))}
@@ -151,12 +157,14 @@ function MetricCard({
 function StatusCard({
   label,
   count,
+  detail,
   alert,
   alertLabel,
   onClick,
 }: {
   label: string;
   count: number;
+  detail?: string;
   alert?: number;
   alertLabel?: string;
   onClick: () => void;
@@ -168,6 +176,7 @@ function StatusCard({
     >
       <p className="text-xs text-text-muted">{label}</p>
       <p className="text-2xl font-bold mt-1">{count}</p>
+      {detail && <p className="text-sm font-medium mt-0.5">{detail}</p>}
       {alert != null && alert > 0 && (
         <p className="text-xs text-danger mt-0.5 font-medium">
           {alert} {alertLabel}

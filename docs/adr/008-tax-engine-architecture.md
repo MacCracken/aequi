@@ -58,11 +58,11 @@ Social Security tax is capped at the wage base ($184,500 for 2026). Medicare has
 
 ### Income tax
 
-Brackets apply to taxable income: annualized net profit, minus the deductible half of SE tax, minus the standard deduction from the rules file. The qualified business income (QBI) deduction is not modeled yet, so estimates err high for most filers.
+Brackets apply to taxable income: annualized net profit, minus the deductible half of SE tax, minus the standard deduction, minus the qualified business income (QBI) deduction. QBI is net profit less the deductible half of SE tax; the deduction is 20% of it, capped at 20% of taxable income, with a $400 minimum once QBI reaches $1,000. Above the threshold ($201,750 single for 2026) it is phased out over the $75,000 range as for a specified service business with no W-2 wages (rate × QBI × (1 − f)²), which is the common freelancer case and the conservative assumption. Thresholds live in the `[qbi]` table of the rules file.
 
 ### Safe harbor calculation
 
-Safe harbor amount = min(100% prior year tax, 90% current year estimate). Prior year tax is the most recent full-year projection stored in the `tax_periods` table for that year. If no prior year data exists, 90% of the current estimate is used. The 110% prior-year rule for prior-year AGI over $150,000 is not applied because prior-year AGI is not tracked.
+Safe harbor amount = min(100% of prior year tax, 90% current year estimate), using 110% of prior year tax when prior-year AGI exceeded $150,000 (`[safe_harbor]` in the rules file). Prior year tax and AGI come from the figures the user enters from last year's filed return; without them, prior year tax falls back to the most recent full-year projection stored in `tax_periods` and 100% is assumed. If no prior year data exists, 90% of the current estimate is used.
 
 ## Consequences
 

@@ -2,10 +2,12 @@ import { useEffect, useState, useMemo, useRef, useCallback } from "react";
 import {
   getTransactions,
   getAccounts,
+  getContacts,
   createTransaction,
   errorMessage,
   type TransactionOutput,
   type Account,
+  type ContactRecord,
 } from "../lib/api";
 import { formatCents, formatDate, parseDollarsToCents, todayLocal } from "../lib/format";
 import { TableSkeleton } from "../components/Skeleton";
@@ -16,6 +18,7 @@ const PAGE_SIZE = 50;
 export function TransactionsPage() {
   const [transactions, setTransactions] = useState<TransactionOutput[]>([]);
   const [accounts, setAccounts] = useState<Account[]>([]);
+  const [contacts, setContacts] = useState<ContactRecord[]>([]);
   const [loading, setLoading] = useState(true);
   const [showForm, setShowForm] = useState(false);
   const [search, setSearch] = useState("");
@@ -33,11 +36,12 @@ export function TransactionsPage() {
     // Each bound is optional on its own; never send "" for an empty field.
     const start = dateFrom || undefined;
     const end = dateTo || undefined;
-    Promise.all([getTransactions(start, end), getAccounts()])
-      .then(([txs, accts]) => {
+    Promise.all([getTransactions(start, end), getAccounts(), getContacts()])
+      .then(([txs, accts, cont]) => {
         if (id !== requestIdRef.current) return;
         setTransactions(txs);
         setAccounts(accts);
+        setContacts(cont);
         setPage(0);
       })
       .catch((e) => {
@@ -60,6 +64,7 @@ export function TransactionsPage() {
     return transactions.filter(
       (tx) =>
         tx.description.toLowerCase().includes(q) ||
+        (tx.contact_name?.toLowerCase().includes(q) ?? false) ||
         tx.date.includes(q) ||
         String(tx.id).includes(q)
     );
@@ -92,6 +97,7 @@ export function TransactionsPage() {
       {showForm && (
         <TransactionForm
           accounts={accounts}
+          contacts={contacts}
           onCreated={() => {
             setShowForm(false);
             refresh();
@@ -149,7 +155,12 @@ export function TransactionsPage() {
                 {paginated.map((tx) => (
                   <tr key={tx.id} className="border-b border-border last:border-b-0">
                     <td className="px-4 py-2 font-mono">{formatDate(tx.date)}</td>
-                    <td className="px-4 py-2">{tx.description}</td>
+                    <td className="px-4 py-2">
+                      {tx.description}
+                      {tx.contact_name && (
+                        <span className="block text-xs text-text-muted">{tx.contact_name}</span>
+                      )}
+                    </td>
                     <td className="px-4 py-2 text-right font-mono whitespace-nowrap">{tx.balanced_total}</td>
                   </tr>
                 ))}
@@ -202,15 +213,18 @@ function emptyLine(): LineDraft {
 
 function TransactionForm({
   accounts,
+  contacts,
   onCreated,
   onError,
 }: {
   accounts: Account[];
+  contacts: ContactRecord[];
   onCreated: () => void;
   onError: (msg: string) => void;
 }) {
   const [date, setDate] = useState(todayLocal);
   const [description, setDescription] = useState("");
+  const [contactId, setContactId] = useState<number | "">("");
   const [lines, setLines] = useState<LineDraft[]>(() => [emptyLine(), emptyLine()]);
   const [submitting, setSubmitting] = useState(false);
   const submittingRef = useRef(false);
@@ -293,6 +307,7 @@ function TransactionForm({
         date,
         description: description.trim(),
         lines: built.lines,
+        contact_id: contactId === "" ? undefined : contactId,
       });
       onCreated();
     } catch (err) {
@@ -332,6 +347,26 @@ function TransactionForm({
             className="w-full px-3 py-1.5 text-sm border border-border rounded-md bg-bg focus:outline-none focus:border-primary"
           />
         </div>
+        <div>
+          <label htmlFor="tx-contact" className="block text-xs text-text-muted mb-1">Payee / payer</label>
+          <select
+            id="tx-contact"
+            value={contactId}
+            onChange={(e) => setContactId(e.target.value ? Number(e.target.value) : "")}
+            aria-describedby="tx-contact-help"
+            className="w-full px-3 py-1.5 text-sm border border-border rounded-md bg-bg focus:outline-none focus:border-primary"
+          >
+            <option value="">None</option>
+            {contacts.map((c) => (
+              <option key={c.id} value={c.id}>
+                {c.is_contractor ? `${c.name} (1099 contractor)` : c.name}
+              </option>
+            ))}
+          </select>
+          <p id="tx-contact-help" className="text-xs text-text-muted mt-1">
+            Link contractor payments to their contact for 1099-NEC tracking.
+          </p>
+        </div>
       </div>
 
       <div className="space-y-2">
@@ -349,13 +384,13 @@ function TransactionForm({
           const debitInvalid = parsed[idx].debit === null;
           const creditInvalid = parsed[idx].credit === null;
           return (
-            <div key={line.key} className="flex gap-2 items-center">
+            <div key={line.key} className="flex flex-wrap sm:flex-nowrap gap-2 items-center">
               <label htmlFor={`line-${line.key}-account`} className="sr-only">Line {idx + 1} account</label>
               <select
                 id={`line-${line.key}-account`}
                 value={line.account_code}
                 onChange={(e) => updateLine(idx, { account_code: e.target.value })}
-                className="flex-1 px-2 py-1.5 text-sm border border-border rounded-md bg-bg focus:outline-none focus:border-primary"
+                className="w-full sm:w-auto sm:flex-1 min-w-0 px-2 py-1.5 text-sm border border-border rounded-md bg-bg focus:outline-none focus:border-primary"
               >
                 <option value="">Select account</option>
                 {accounts.map((a) => (

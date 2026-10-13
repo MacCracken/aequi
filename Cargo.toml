@@ -18,7 +18,7 @@ edition = "2024"
 rust-version = "1.94"
 authors = ["Robert MacCracken <robert.maccracken@gmail.com>"]
 license = "MIT OR AGPL-3.0"
-repository = "https://github.com/anomalyco/aequi"
+repository = "https://github.com/MacCracken/aequi"
 
 [workspace.dependencies]
 rust_decimal = { version = "1.43", features = ["serde"] }
@@ -30,7 +30,9 @@ tokio = { version = "1.53", features = ["full"] }
 sqlx = { version = "0.9", features = ["sqlite", "runtime-tokio", "macros", "chrono", "rust_decimal"] }
 sha2 = "0.11"
 hex = "0.4.3"
-image = "0.25.10"
+# Receipt formats only; the default set adds decoders (EXR, HDR, DDS, …) that
+# receipts never need and that widen the attack surface for untrusted uploads.
+image = { version = "0.25.10", default-features = false, features = ["rayon", "jpeg", "png", "gif", "webp", "tiff", "bmp"] }
 notify = "8.2"
 regex = "1.13"
 toml = "1.1"

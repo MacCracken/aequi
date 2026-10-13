@@ -1,5 +1,6 @@
 mod accounts;
 mod health;
+mod imports;
 mod invoices;
 mod plaid;
 mod receipts;
@@ -126,6 +127,7 @@ pub fn router(state: Arc<ServerState>, cors: CorsLayer) -> Router {
         .merge(reconciliation::routes())
         .merge(reports::routes())
         .merge(plaid::routes())
+        .merge(imports::routes())
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             auth_middleware,
@@ -161,9 +163,32 @@ pub(crate) mod tests {
             email_config: None,
             oidc: None,
             stripe_webhook_secret: None,
-            plaid_config: None,
+            stripe_api: None,
+            plaid: None,
             plaid_sync_lock: Default::default(),
         })
+    }
+
+    /// Create a contact directly in storage; returns its id.
+    pub(crate) async fn contact(state: &ServerState, name: &str, is_contractor: bool) -> i64 {
+        let contact_type = if is_contractor {
+            "Contractor"
+        } else {
+            "Client"
+        };
+        aequi_storage::insert_contact(
+            &state.db,
+            name,
+            Some("billing@example.com"),
+            None,
+            None,
+            contact_type,
+            is_contractor,
+            None,
+            None,
+        )
+        .await
+        .unwrap()
     }
 
     async fn get_status(app: Router, auth: Option<&str>) -> StatusCode {
@@ -256,8 +281,17 @@ pub(crate) mod tests {
         );
     }
 
+    /// Serve `app` on an ephemeral loopback port (a stand-in for an external
+    /// API); returns its base URL.
+    pub(crate) async fn mock_server(app: Router) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        format!("http://{addr}")
+    }
+
     /// Send a request to a fresh unauthenticated router; returns status and JSON body.
-    async fn call(
+    pub(crate) async fn call(
         state: &Arc<ServerState>,
         method: Method,
         uri: &str,
@@ -372,6 +406,7 @@ pub(crate) mod tests {
                 "contact_id": contact_id,
                 "issue_date": issue,
                 "due_date": due,
+                "lines": [{"description": "Consulting", "quantity_hundredths": 100, "unit_rate_cents": 10_000}],
             })
         };
         let (status, _) = call(
@@ -397,7 +432,7 @@ pub(crate) mod tests {
             Some(invoice("2026-03-01", "2026-03-31")),
         )
         .await;
-        assert_eq!(status, StatusCode::OK);
+        assert_eq!(status, StatusCode::CREATED);
     }
 
     #[tokio::test]
@@ -416,7 +451,9 @@ pub(crate) mod tests {
             "annualized_net_profit_cents",
             "additional_medicare_tax_cents",
             "standard_deduction_cents",
+            "qbi_deduction_cents",
             "taxable_income_cents",
+            "safe_harbor_prior_year_percentage",
             "through",
         ] {
             assert!(body.get(field).is_some(), "missing {field} in {body}");

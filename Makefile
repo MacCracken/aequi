@@ -86,7 +86,7 @@ test-unit:
 
 test-coverage:
 	$(CARGO) install cargo-tarpaulin --locked 2>/dev/null || true
-	$(CARGO) tarpaulin --workspace --exclude aequi --fail-under 65 --timeout 300 --out html --skip-clean
+	$(CARGO) tarpaulin --workspace --engine llvm --exclude aequi --fail-under 65 --timeout 300 --out html --skip-clean
 	@echo "Coverage report: tarpaulin-report.html"
 
 # --- Quality ---

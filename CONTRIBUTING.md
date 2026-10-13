@@ -13,7 +13,7 @@
 
 ```bash
 # Clone the repository
-git clone https://github.com/anomalyco/aequi.git
+git clone https://github.com/MacCracken/aequi.git
 cd aequi
 
 # Install frontend dependencies
@@ -24,6 +24,35 @@ cargo build --workspace
 
 # Run desktop app in development mode (hot-reload)
 cd crates/app && cargo tauri dev
+```
+
+## Releases and update signing
+
+Pushing a `YYYY.M.D` tag (or running the *Release Automation* workflow) builds
+signed installers for macOS, Windows and Linux, attaches them with a signed
+`latest.json` to a GitHub release, and publishes it as the latest release.
+Installed apps update from
+`https://github.com/MacCracken/aequi/releases/latest/download/latest.json`.
+
+One-time setup (the release workflow refuses to run without it):
+
+```bash
+# Generates a key pair; keep the private key and its password out of the repo.
+cargo tauri signer generate -w ~/.tauri/aequi.key
+```
+
+1. Put the printed **public** key in `plugins.updater.pubkey` in
+   `crates/app/tauri.conf.json` and commit it.
+2. Add repository secrets `TAURI_SIGNING_PRIVATE_KEY` (contents of
+   `~/.tauri/aequi.key`) and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`.
+
+Losing the private key means existing installs can no longer verify updates.
+
+Local `cargo tauri build` also signs updater bundles. Without the key, build
+unsigned bundles with:
+
+```bash
+cargo tauri build --config '{"bundle":{"createUpdaterArtifacts":false}}'
 ```
 
 ## Mobile Development (Phase 3+)

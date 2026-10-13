@@ -47,6 +47,12 @@ fn all_migrations() -> Vec<Migration> {
                 "migrations/V003__tax_installments_and_schedule_c_lines.down.sql"
             ),
         },
+        Migration {
+            version: 4,
+            name: "transaction_payees",
+            up_sql: include_str!("migrations/V004__transaction_payees.sql"),
+            down_sql: include_str!("migrations/V004__transaction_payees.down.sql"),
+        },
     ]
 }
 

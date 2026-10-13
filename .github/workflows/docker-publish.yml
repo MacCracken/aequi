@@ -23,7 +23,7 @@ jobs:
     name: Build and Push Container
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set image name
         run: echo "IMAGE_NAME=$(echo '${{ github.repository_owner }}/aequi-server' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_ENV"
@@ -35,10 +35,10 @@ jobs:
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Log in to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -46,7 +46,7 @@ jobs:
 
       - name: Extract metadata
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
@@ -55,7 +55,7 @@ jobs:
             type=raw,value=${{ github.event.inputs.tag || '' }},enable=${{ github.event_name == 'workflow_dispatch' }}
 
       - name: Build and push
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           push: true
@@ -68,7 +68,8 @@ jobs:
       - name: Verify image
         run: |
           docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}
-          docker run -d --name aequi-verify -p 8060:8060 ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}
+          # The server refuses to start on 0.0.0.0 without auth, so give it a throwaway key.
+          docker run -d --name aequi-verify -p 8060:8060 -e AEQUI_API_KEY=verify-only ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}
           sleep 3
           curl -sf http://localhost:8060/health || echo "health endpoint not available"
           docker logs aequi-verify

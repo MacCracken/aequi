@@ -86,6 +86,11 @@ export function ReceiptsPage() {
         <h2 className="text-xl font-semibold">Receipt Review Queue</h2>
         <CameraCapture onCapture={handleCapture} busy={capturing} />
       </div>
+      <p className="text-sm text-text-muted">
+        Vendor, date and amounts are filled in by OCR or by an AI agent connected over MCP.
+        Receipts stay here until you check them and approve or reject them — only you can
+        approve a receipt.
+      </p>
 
       {receipts.length === 0 ? (
         <p className="text-text-muted">No pending receipts.</p>
@@ -115,6 +120,11 @@ export function ReceiptsPage() {
                   <span>{r.receipt_date ? formatDate(r.receipt_date) : "No date"}</span>
                   <span>{r.total_cents != null ? formatCents(r.total_cents) : "—"}</span>
                 </div>
+                {r.filled_by_agent && (
+                  <span className="inline-block mt-1 px-2 py-0.5 rounded-full text-xs font-medium bg-primary/10 text-primary">
+                    Filled by agent — needs your review
+                  </span>
+                )}
               </button>
             ))}
           </div>
@@ -206,20 +216,35 @@ function ReceiptDetail({
 
       {/* Extracted fields */}
       <div className="p-4 space-y-3">
-        <div className="grid grid-cols-2 gap-3 text-sm">
-          <Field label="Vendor" value={receipt.vendor} />
-          <Field label="Date" value={receipt.receipt_date ? formatDate(receipt.receipt_date) : null} />
-          <Field label="Total" value={receipt.total_cents != null ? formatCents(receipt.total_cents) : null} />
+        <div>
+          <h3 className="font-medium">Review the extracted details</h3>
+          <p className="text-xs text-text-muted mt-0.5">
+            {receipt.filled_by_agent
+              ? "An AI agent read these fields from the receipt image. Check them against the image, then approve or reject the receipt."
+              : "Check these fields against the receipt image, then approve or reject the receipt."}
+          </p>
+        </div>
+
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 bg-bg border border-border rounded-md p-3">
+          <Field label="Vendor" value={receipt.vendor} prominent />
+          <Field label="Date" value={receipt.receipt_date ? formatDate(receipt.receipt_date) : null} prominent />
+          <Field label="Total" value={receipt.total_cents != null ? formatCents(receipt.total_cents) : null} prominent />
+        </div>
+
+        <div className="grid grid-cols-3 gap-3 text-sm">
           <Field label="Subtotal" value={receipt.subtotal_cents != null ? formatCents(receipt.subtotal_cents) : null} />
           <Field label="Tax" value={receipt.tax_cents != null ? formatCents(receipt.tax_cents) : null} />
           <Field label="Payment" value={receipt.payment_method} />
         </div>
 
-        <div className="flex items-center gap-2 text-sm">
+        <div className="flex items-center gap-2 text-sm flex-wrap">
           <span className="text-text-muted">Confidence:</span>
           <span className={`font-medium ${confidenceColor(receipt.confidence)}`}>
             {(receipt.confidence * 100).toFixed(0)}% — {confidenceLabel(receipt.confidence)}
           </span>
+          {receipt.filled_by_agent && (
+            <span className="text-xs text-text-muted">(reported by the agent)</span>
+          )}
         </div>
 
         {/* Transaction linking */}
@@ -307,11 +332,21 @@ function ReceiptDetail({
   );
 }
 
-function Field({ label, value }: { label: string; value: string | null }) {
+function Field({
+  label,
+  value,
+  prominent = false,
+}: {
+  label: string;
+  value: string | null;
+  prominent?: boolean;
+}) {
   return (
-    <div>
+    <div className="min-w-0">
       <span className="text-text-muted text-xs">{label}</span>
-      <p className="font-medium">{value ?? "—"}</p>
+      <p className={`break-words ${prominent ? "text-lg font-semibold" : "font-medium"}`}>
+        {value ?? "—"}
+      </p>
     </div>
   );
 }

@@ -375,7 +375,8 @@ mod tests {
             email_config: None,
             oidc: None,
             stripe_webhook_secret: None,
-            plaid_config: None,
+            stripe_api: None,
+            plaid: None,
             plaid_sync_lock: Default::default(),
         });
 

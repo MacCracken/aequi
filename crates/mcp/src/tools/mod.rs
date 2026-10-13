@@ -1,5 +1,6 @@
 mod accounts;
 pub mod args;
+mod contacts;
 mod import;
 mod invoices;
 mod receipts;
@@ -13,7 +14,7 @@ use serde_json::Value;
 use crate::permissions::{McpSettings, Permissions};
 use crate::protocol::{ToolDefinition, ToolResult};
 use args::ToolOutcome;
-pub use receipts::MAX_RECEIPT_BYTES;
+pub use receipts::{MAX_RECEIPT_BYTES, MAX_RECEIPT_IMAGE_BYTES};
 
 /// Whether a tool only reads the ledger or changes it. Every tool that
 /// inserts, updates or deletes anything must be registered as `Write` so the
@@ -54,6 +55,7 @@ impl ToolRegistry {
         let mut registry = ToolRegistry { tools: Vec::new() };
 
         accounts::register(&mut registry);
+        contacts::register(&mut registry);
         transactions::register(&mut registry);
         receipts::register(&mut registry);
         tax::register(&mut registry);

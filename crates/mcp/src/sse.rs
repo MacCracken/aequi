@@ -520,7 +520,10 @@ pub mod transport {
             assert_eq!(response.status(), StatusCode::ACCEPTED);
             let resp = body_json(response).await;
             let tools = resp.result.unwrap();
-            assert_eq!(tools["tools"].as_array().unwrap().len(), 24);
+            assert_eq!(
+                tools["tools"].as_array().unwrap().len(),
+                crate::tools::ToolRegistry::new().list_definitions().len()
+            );
         }
 
         #[tokio::test]

@@ -36,7 +36,6 @@ fn registry_has_all_expected_tools() {
         "aequi_get_profit_loss",
         "aequi_ingest_receipt",
         "aequi_get_pending_receipts",
-        "aequi_approve_receipt",
         "aequi_reject_receipt",
         "aequi_estimate_quarterly_tax",
         "aequi_get_schedule_c_preview",
@@ -53,6 +52,15 @@ fn registry_has_all_expected_tools() {
         "aequi_create_reconciliation_session",
         "aequi_get_reconciliation_items",
         "aequi_resolve_item",
+        "aequi_get_receipt_image",
+        "aequi_update_receipt_fields",
+        "aequi_get_invoice",
+        "aequi_list_contacts",
+        "aequi_post_import",
+        "aequi_ignore_import",
+        "aequi_get_1099_summary",
+        "aequi_get_tax_return",
+        "aequi_set_tax_return",
     ];
 
     for name in expected {
@@ -63,7 +71,7 @@ fn registry_has_all_expected_tools() {
 #[test]
 fn registry_tool_count() {
     let registry = ToolRegistry::new();
-    assert_eq!(registry.list_definitions().len(), 24);
+    assert_eq!(registry.list_definitions().len(), 32);
 }
 
 #[test]
@@ -127,7 +135,7 @@ async fn read_only_blocks_write_tool() {
         .call("aequi_create_transaction", json!({}), &db, &perms)
         .await;
     assert!(result.is_error.unwrap_or(false));
-    assert!(result.content[0].text.contains("not allowed"));
+    assert!(result.content[0].as_text().unwrap().contains("not allowed"));
 }
 
 #[tokio::test]
@@ -159,7 +167,7 @@ async fn list_accounts_returns_default_accounts() {
         .call("aequi_list_accounts", json!({}), &db, &perms)
         .await;
     assert!(result.is_error.is_none());
-    let text = &result.content[0].text;
+    let text = &result.content[0].as_text().unwrap();
     assert!(text.contains("Checking"));
     assert!(text.contains("1000"));
 }
@@ -173,7 +181,7 @@ async fn get_account_by_code() {
         .call("aequi_get_account", json!({ "code": "1000" }), &db, &perms)
         .await;
     assert!(result.is_error.is_none());
-    assert!(result.content[0].text.contains("Checking"));
+    assert!(result.content[0].as_text().unwrap().contains("Checking"));
 }
 
 #[tokio::test]
@@ -185,7 +193,7 @@ async fn get_account_not_found() {
         .call("aequi_get_account", json!({ "code": "9999" }), &db, &perms)
         .await;
     assert!(result.is_error.unwrap_or(false));
-    assert!(result.content[0].text.contains("not found"));
+    assert!(result.content[0].as_text().unwrap().contains("not found"));
 }
 
 // -----------------------------------------------------------------------
@@ -214,7 +222,7 @@ async fn create_and_get_transaction() {
         )
         .await;
     assert!(result.is_error.is_none());
-    assert!(result.content[0].text.contains("created"));
+    assert!(result.content[0].as_text().unwrap().contains("created"));
 
     let list = registry
         .call(
@@ -225,7 +233,12 @@ async fn create_and_get_transaction() {
         )
         .await;
     assert!(list.is_error.is_none());
-    assert!(list.content[0].text.contains("Client payment"));
+    assert!(
+        list.content[0]
+            .as_text()
+            .unwrap()
+            .contains("Client payment")
+    );
 }
 
 #[tokio::test]
@@ -274,7 +287,7 @@ async fn create_transaction_invalid_date_fails() {
         )
         .await;
     assert!(result.is_error.unwrap_or(false));
-    assert!(result.content[0].text.contains("YYYY-MM-DD"));
+    assert!(result.content[0].as_text().unwrap().contains("YYYY-MM-DD"));
 }
 
 #[tokio::test]
@@ -292,7 +305,7 @@ async fn profit_loss_empty_ledger() {
         )
         .await;
     assert!(result.is_error.is_none());
-    let text = &result.content[0].text;
+    let text = &result.content[0].as_text().unwrap();
     assert!(text.contains("net_profit_cents"));
 }
 
@@ -310,7 +323,7 @@ async fn pending_receipts_empty() {
         .call("aequi_get_pending_receipts", json!({}), &db, &perms)
         .await;
     assert!(result.is_error.is_none());
-    assert!(result.content[0].text.contains("[]"));
+    assert!(result.content[0].as_text().unwrap().contains("[]"));
 }
 
 #[tokio::test]
@@ -328,7 +341,12 @@ async fn ingest_receipt_file_not_found() {
         )
         .await;
     assert!(result.is_error.unwrap_or(false));
-    assert!(result.content[0].text.contains("Cannot read file"));
+    assert!(
+        result.content[0]
+            .as_text()
+            .unwrap()
+            .contains("Cannot read file")
+    );
 }
 
 // -----------------------------------------------------------------------
@@ -349,8 +367,12 @@ async fn estimate_quarterly_tax_empty_ledger() {
             &perms,
         )
         .await;
-    assert!(result.is_error.is_none(), "{}", result.content[0].text);
-    let text = &result.content[0].text;
+    assert!(
+        result.is_error.is_none(),
+        "{}",
+        result.content[0].as_text().unwrap()
+    );
+    let text = &result.content[0].as_text().unwrap();
     for field in [
         "quarterly_payment",
         "annualized_net_profit",
@@ -361,6 +383,16 @@ async fn estimate_quarterly_tax_empty_ledger() {
     ] {
         assert!(text.contains(field), "missing {field}");
     }
+    let v = parse(&result);
+    assert_eq!(v["qbi_deduction_cents"], 0);
+    assert_eq!(v["safe_harbor_prior_year_percentage"], "1.00");
+    let note = v["safe_harbor_note"].as_str().unwrap();
+    assert!(
+        note.contains("110% if 2025's AGI exceeded $150,000"),
+        "{note}"
+    );
+    assert!(note.contains("aequi_set_tax_return"), "{note}");
+    assert!(note.contains("no 2025 tax is on file"), "{note}");
 }
 
 #[tokio::test]
@@ -378,7 +410,7 @@ async fn schedule_c_preview_empty_ledger() {
         )
         .await;
     assert!(result.is_error.is_none());
-    assert!(result.content[0].text.contains("net_profit"));
+    assert!(result.content[0].as_text().unwrap().contains("net_profit"));
 }
 
 // -----------------------------------------------------------------------
@@ -434,12 +466,12 @@ async fn save_and_list_categorization_rule() {
         )
         .await;
     assert!(result.is_error.is_none());
-    assert!(result.content[0].text.contains("rule_id"));
+    assert!(result.content[0].as_text().unwrap().contains("rule_id"));
 
     let list = registry
         .call("aequi_get_categorization_rules", json!({}), &db, &perms)
         .await;
-    assert!(list.content[0].text.contains("GITHUB"));
+    assert!(list.content[0].as_text().unwrap().contains("GITHUB"));
 }
 
 // -----------------------------------------------------------------------
@@ -480,12 +512,17 @@ async fn save_and_list_import_profile() {
         )
         .await;
     assert!(result.is_error.is_none());
-    assert!(result.content[0].text.contains("profile_id"));
+    assert!(result.content[0].as_text().unwrap().contains("profile_id"));
 
     let list = registry
         .call("aequi_get_import_profiles", json!({}), &db, &perms)
         .await;
-    assert!(list.content[0].text.contains("Chase Checking"));
+    assert!(
+        list.content[0]
+            .as_text()
+            .unwrap()
+            .contains("Chase Checking")
+    );
 }
 
 // -----------------------------------------------------------------------
@@ -512,7 +549,7 @@ async fn create_reconciliation_session() {
         )
         .await;
     assert!(result.is_error.is_none());
-    assert!(result.content[0].text.contains("session_id"));
+    assert!(result.content[0].as_text().unwrap().contains("session_id"));
 }
 
 // -----------------------------------------------------------------------
@@ -541,14 +578,14 @@ fn json_rpc_error_response() {
 fn tool_result_text() {
     let r = ToolResult::text("hello".to_string());
     assert!(r.is_error.is_none());
-    assert_eq!(r.content[0].text, "hello");
+    assert_eq!(r.content[0].as_text().unwrap(), "hello");
 }
 
 #[test]
 fn tool_result_error() {
     let r = ToolResult::error("fail".to_string());
     assert!(r.is_error.unwrap());
-    assert_eq!(r.content[0].text, "fail");
+    assert_eq!(r.content[0].as_text().unwrap(), "fail");
 }
 
 // -----------------------------------------------------------------------
@@ -569,77 +606,95 @@ async fn audit_log_records_tool_call() {
 // Invoice tool tests (additional coverage)
 // -----------------------------------------------------------------------
 
-#[tokio::test]
-async fn draft_invoice_and_list_unpaid() {
-    let db = test_db().await;
-    let registry = ToolRegistry::new();
-    let perms = Permissions::default();
-
-    // Insert a contact first so we have a valid contact_id
+async fn add_contact(db: &aequi_storage::DbPool, name: &str, is_contractor: bool) -> i64 {
     aequi_storage::insert_contact(
-        &db,
-        "Test Client",
-        Some("test@example.com"),
+        db,
+        name,
+        Some("billing@example.com"),
         None,
         None,
-        "customer",
-        false,
-        None,
+        if is_contractor { "vendor" } else { "customer" },
+        is_contractor,
+        is_contractor.then_some("12-3456789"),
         None,
     )
     .await
-    .unwrap();
+    .unwrap()
+}
 
-    let result = registry
-        .call(
-            "aequi_draft_invoice",
-            json!({
-                "invoice_number": "INV-001",
-                "contact_id": 1,
-                "issue_date": "2026-03-01",
-                "due_date": "2026-03-31"
-            }),
-            &db,
-            &perms,
-        )
-        .await;
-    assert!(
-        result.is_error.is_none(),
-        "Expected success, got: {:?}",
-        result
-    );
-    assert!(result.content[0].text.contains("invoice_id"));
-    assert!(result.content[0].text.contains("Draft"));
+/// 1.5 h at $100 (taxable) + 1 setup at $50; 10% sales tax on the taxable
+/// line: subtotal $200, tax $15, total $215.
+fn invoice_args(number: &str, contact_id: i64) -> serde_json::Value {
+    json!({
+        "invoice_number": number,
+        "contact_id": contact_id,
+        "issue_date": "2026-03-01",
+        "due_date": "2026-03-31",
+        "lines": [
+            { "description": "Consulting", "quantity": 1.5, "unit_rate_cents": 10000, "taxable": true },
+            { "description": "Setup", "quantity": 1, "unit_rate_cents": 5000 }
+        ],
+        "tax_lines": [ { "label": "Sales tax", "rate_bps": 1000 } ]
+    })
+}
+
+fn parse(result: &ToolResult) -> serde_json::Value {
+    let text = result.content[0].as_text().unwrap();
+    assert!(!result.is_error(), "{text}");
+    serde_json::from_str(text).unwrap()
+}
+
+async fn draft_invoice(db: &aequi_storage::DbPool, number: &str, contact_id: i64) -> i64 {
+    let v = parse(&call(db, "aequi_draft_invoice", invoice_args(number, contact_id)).await);
+    v["id"].as_i64().unwrap()
 }
 
 #[tokio::test]
-async fn draft_invoice_with_notes() {
+async fn draft_invoice_with_line_items_computes_totals() {
     let db = test_db().await;
-    let registry = ToolRegistry::new();
-    let perms = Permissions::default();
+    let contact = add_contact(&db, "Test Client", false).await;
 
-    aequi_storage::insert_contact(
-        &db, "Client B", None, None, None, "customer", false, None, None,
-    )
-    .await
-    .unwrap();
+    let v = parse(&call(&db, "aequi_draft_invoice", invoice_args("INV-001", contact)).await);
+    assert_eq!(v["status_type"], "Draft");
+    assert_eq!(v["invoice_number"], "INV-001");
+    assert_eq!(v["subtotal_cents"], 20000);
+    assert_eq!(v["discount_cents"], 0);
+    assert_eq!(v["tax_cents"], 1500);
+    assert_eq!(v["total_cents"], 21500);
+    assert_eq!(v["balance_cents"], 21500);
+    let lines = v["lines"].as_array().unwrap();
+    assert_eq!(lines.len(), 2);
+    assert_eq!(lines[0]["quantity_hundredths"], 150);
+    assert_eq!(lines[0]["taxable"], true);
+    assert_eq!(lines[1]["taxable"], false);
+    assert_eq!(v["tax_lines"][0]["rate_bps"], 1000);
 
-    let result = registry
-        .call(
-            "aequi_draft_invoice",
-            json!({
-                "invoice_number": "INV-002",
-                "contact_id": 1,
-                "issue_date": "2026-04-01",
-                "due_date": "2026-04-30",
-                "notes": "Net 30 terms"
-            }),
-            &db,
-            &perms,
-        )
-        .await;
-    assert!(result.is_error.is_none());
-    assert!(result.content[0].text.contains("invoice_id"));
+    // A draft is not yet owed.
+    let unpaid = parse(&call(&db, "aequi_list_unpaid_invoices", json!({})).await);
+    assert_eq!(unpaid, json!([]));
+}
+
+#[tokio::test]
+async fn draft_invoice_with_discount_notes_and_terms() {
+    let db = test_db().await;
+    let contact = add_contact(&db, "Client B", false).await;
+
+    let mut args = invoice_args("INV-002", contact);
+    args["discount"] = json!({ "type": "percentage", "bps": 1000 });
+    args["notes"] = json!("Thanks!");
+    args["terms"] = json!("Net 30");
+    let v = parse(&call(&db, "aequi_draft_invoice", args).await);
+    assert_eq!(v["discount_cents"], 2000);
+    assert_eq!(v["notes"], "Thanks!");
+    assert_eq!(v["terms"], "Net 30");
+    let total = v["subtotal_cents"].as_i64().unwrap() - v["discount_cents"].as_i64().unwrap()
+        + v["tax_cents"].as_i64().unwrap();
+    assert_eq!(v["total_cents"].as_i64().unwrap(), total);
+
+    let mut args = invoice_args("INV-003", contact);
+    args["discount"] = json!({ "type": "flat", "cents": 5000 });
+    let v = parse(&call(&db, "aequi_draft_invoice", args).await);
+    assert_eq!(v["discount_cents"], 5000);
 }
 
 #[tokio::test]
@@ -652,7 +707,12 @@ async fn draft_invoice_missing_params_rejected() {
         .call("aequi_draft_invoice", json!({}), &db, &perms)
         .await;
     assert!(result.is_error.unwrap_or(false));
-    assert!(result.content[0].text.contains("Missing required argument"));
+    assert!(
+        result.content[0]
+            .as_text()
+            .unwrap()
+            .contains("Missing required argument")
+    );
     let (count,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM invoices")
         .fetch_one(&db)
         .await
@@ -661,140 +721,208 @@ async fn draft_invoice_missing_params_rejected() {
 }
 
 #[tokio::test]
-async fn record_payment_against_invoice() {
+async fn draft_invoice_validates_line_items() {
     let db = test_db().await;
-    let registry = ToolRegistry::new();
-    let perms = Permissions::default();
+    let contact = add_contact(&db, "Client V", false).await;
 
-    aequi_storage::insert_contact(
-        &db,
-        "Pay Client",
-        None,
-        None,
-        None,
-        "customer",
-        false,
-        None,
-        None,
-    )
-    .await
-    .unwrap();
+    let mut no_lines = invoice_args("INV-V", contact);
+    no_lines.as_object_mut().unwrap().remove("lines");
+    let mut empty_lines = invoice_args("INV-V", contact);
+    empty_lines["lines"] = json!([]);
+    let mut three_decimals = invoice_args("INV-V", contact);
+    three_decimals["lines"][0]["quantity"] = json!(1.005);
+    let mut string_qty = invoice_args("INV-V", contact);
+    string_qty["lines"][0]["quantity"] = json!("2");
+    let mut zero_qty = invoice_args("INV-V", contact);
+    zero_qty["lines"][0]["quantity"] = json!(0);
+    let mut fractional_rate = invoice_args("INV-V", contact);
+    fractional_rate["lines"][0]["unit_rate_cents"] = json!(99.5);
+    let mut misspelled = invoice_args("INV-V", contact);
+    misspelled["lines"][1]["is_taxable"] = json!(true);
+    let mut bad_tax = invoice_args("INV-V", contact);
+    bad_tax["tax_lines"][0]["rate_bps"] = json!(20000);
+    let mut bad_discount = invoice_args("INV-V", contact);
+    bad_discount["discount"] = json!({ "type": "bogus" });
+    let mut mixed_discount = invoice_args("INV-V", contact);
+    mixed_discount["discount"] = json!({ "type": "flat", "bps": 100 });
+    let mut bad_dates = invoice_args("INV-V", contact);
+    bad_dates["due_date"] = json!("2026-02-01");
 
-    // Create a draft invoice first
-    let draft = registry
-        .call(
-            "aequi_draft_invoice",
-            json!({
-                "invoice_number": "INV-PAY-001",
-                "contact_id": 1,
-                "issue_date": "2026-03-01",
-                "due_date": "2026-03-31"
-            }),
-            &db,
-            &perms,
-        )
-        .await;
-    assert!(draft.is_error.is_none());
-    let draft_val: serde_json::Value = serde_json::from_str(&draft.content[0].text).unwrap();
-    let invoice_id = draft_val["invoice_id"].as_i64().unwrap();
+    for (args, expected) in [
+        (no_lines, "Missing required argument: lines"),
+        (empty_lines, "at least one line item"),
+        (three_decimals, "lines[0].quantity"),
+        (string_qty, "lines[0].quantity"),
+        (zero_qty, "quantity must be positive"),
+        (fractional_rate, "lines[0].unit_rate_cents"),
+        (misspelled, "lines[1].is_taxable"),
+        (bad_tax, "tax rate"),
+        (bad_discount, "discount.type"),
+        (mixed_discount, "discount.bps"),
+        (bad_dates, "due_date"),
+    ] {
+        let result = call(&db, "aequi_draft_invoice", args).await;
+        let text = result.content[0].as_text().unwrap();
+        assert!(result.is_error(), "{expected}: {text}");
+        assert!(text.contains(expected), "{expected}: {text}");
+    }
+    assert_eq!(count(&db, "invoices").await, 0);
 
-    // Record a payment
-    let result = registry
-        .call(
-            "aequi_record_payment",
-            json!({
-                "invoice_id": invoice_id,
-                "amount_cents": 50000,
-                "date": "2026-03-15",
-                "method": "bank_transfer"
-            }),
-            &db,
-            &perms,
-        )
-        .await;
-    assert!(result.is_error.is_none());
-    assert!(result.content[0].text.contains("payment_id"));
+    draft_invoice(&db, "INV-V", contact).await;
+    let dup = call(&db, "aequi_draft_invoice", invoice_args("INV-V", contact)).await;
+    assert!(dup.is_error());
+    assert!(dup.content[0].as_text().unwrap().contains("already in use"));
+    assert_eq!(count(&db, "invoices").await, 1);
 }
 
 #[tokio::test]
-async fn record_payment_without_method() {
+async fn get_invoice_returns_detail() {
     let db = test_db().await;
-    let registry = ToolRegistry::new();
-    let perms = Permissions::default();
+    let contact = add_contact(&db, "Client G", false).await;
+    let id = draft_invoice(&db, "INV-G", contact).await;
 
-    aequi_storage::insert_contact(
-        &db, "Client C", None, None, None, "customer", false, None, None,
+    let v = parse(&call(&db, "aequi_get_invoice", json!({ "invoice_id": id })).await);
+    assert_eq!(v["id"], id);
+    assert_eq!(v["total_cents"], 21500);
+    assert_eq!(v["lines"].as_array().unwrap().len(), 2);
+    assert_eq!(v["payments"], json!([]));
+
+    let missing = call(&db, "aequi_get_invoice", json!({ "invoice_id": 99 })).await;
+    assert!(missing.is_error());
+    assert!(
+        missing.content[0]
+            .as_text()
+            .unwrap()
+            .contains("Invoice 99 not found")
+    );
+}
+
+/// Net (debit - credit) cents posted to an account by one transaction.
+async fn posted(db: &aequi_storage::DbPool, transaction_id: i64, code: &str) -> i64 {
+    let (net,): (i64,) = sqlx::query_as(
+        "SELECT COALESCE(SUM(tl.debit_cents - tl.credit_cents), 0) FROM transaction_lines tl \
+         JOIN accounts a ON a.id = tl.account_id WHERE tl.transaction_id = ? AND a.code = ?",
     )
+    .bind(transaction_id)
+    .bind(code)
+    .fetch_one(db)
     .await
     .unwrap();
+    net
+}
 
-    let draft = registry
-        .call(
-            "aequi_draft_invoice",
-            json!({
-                "invoice_number": "INV-PAY-002",
-                "contact_id": 1,
-                "issue_date": "2026-03-01",
-                "due_date": "2026-03-31"
-            }),
+#[tokio::test]
+async fn record_payment_posts_cash_basis_entry() {
+    let db = test_db().await;
+    let contact = add_contact(&db, "Pay Client", false).await;
+    let invoice_id = draft_invoice(&db, "INV-PAY-001", contact).await;
+    aequi_storage::mark_invoice_sent(&db, invoice_id, "2026-03-02")
+        .await
+        .unwrap();
+
+    let v = parse(
+        &call(
             &db,
-            &perms,
-        )
-        .await;
-    let draft_val: serde_json::Value = serde_json::from_str(&draft.content[0].text).unwrap();
-    let invoice_id = draft_val["invoice_id"].as_i64().unwrap();
-
-    // Payment without method field
-    let result = registry
-        .call(
             "aequi_record_payment",
             json!({
                 "invoice_id": invoice_id,
-                "amount_cents": 25000,
-                "date": "2026-03-20"
+                "amount_cents": 10000,
+                "date": "2026-03-15",
+                "method": "bank_transfer"
             }),
-            &db,
-            &perms,
         )
-        .await;
-    assert!(result.is_error.is_none());
-    assert!(result.content[0].text.contains("payment_id"));
+        .await,
+    );
+    assert!(v["payment_id"].as_i64().is_some());
+    assert_eq!(v["invoice_status"], "PartiallyPaid");
+    assert_eq!(v["paid_cents"], 10000);
+    assert_eq!(v["balance_cents"], 11500);
+    let tx = v["transaction_id"].as_i64().unwrap();
+    // Tax share: 10000 * 1500 / 21500 = 697.67, rounded to 698.
+    assert_eq!(posted(&db, tx, "1000").await, 10000);
+    assert_eq!(posted(&db, tx, "4000").await, -9302);
+    assert_eq!(posted(&db, tx, "2010").await, -698);
+
+    // Still owed: listed with its balance.
+    let unpaid = parse(&call(&db, "aequi_list_unpaid_invoices", json!({})).await);
+    assert_eq!(unpaid.as_array().unwrap().len(), 1);
+    assert_eq!(unpaid[0]["invoice_number"], "INV-PAY-001");
+    assert_eq!(unpaid[0]["balance_cents"], 11500);
+
+    // The rest, into savings.
+    let v = parse(
+        &call(
+            &db,
+            "aequi_record_payment",
+            json!({
+                "invoice_id": invoice_id,
+                "amount_cents": 11500,
+                "date": "2026-03-20",
+                "deposit_account_code": "1010"
+            }),
+        )
+        .await,
+    );
+    assert_eq!(v["invoice_status"], "Paid");
+    assert_eq!(v["balance_cents"], 0);
+    let tx = v["transaction_id"].as_i64().unwrap();
+    assert_eq!(posted(&db, tx, "1010").await, 11500);
+    assert_eq!(posted(&db, tx, "1000").await, 0);
+
+    let unpaid = parse(&call(&db, "aequi_list_unpaid_invoices", json!({})).await);
+    assert_eq!(unpaid, json!([]));
+}
+
+#[tokio::test]
+async fn record_payment_rejects_bad_deposit_account_and_overpayment() {
+    let db = test_db().await;
+    let contact = add_contact(&db, "Client C", false).await;
+    let invoice_id = draft_invoice(&db, "INV-PAY-002", contact).await;
+
+    for (args, expected) in [
+        (
+            json!({ "invoice_id": invoice_id, "amount_cents": 1000, "date": "2026-03-20", "deposit_account_code": "4000" }),
+            "asset account",
+        ),
+        (
+            json!({ "invoice_id": invoice_id, "amount_cents": 1000, "date": "2026-03-20", "deposit_account_code": "9999" }),
+            "9999",
+        ),
+        (
+            json!({ "invoice_id": invoice_id, "amount_cents": 21501, "date": "2026-03-20" }),
+            "exceeds",
+        ),
+    ] {
+        let result = call(&db, "aequi_record_payment", args).await;
+        let text = result.content[0].as_text().unwrap();
+        assert!(result.is_error(), "{text}");
+        assert!(text.contains(expected), "{expected}: {text}");
+    }
+    assert_eq!(count(&db, "payments").await, 0);
+    assert_eq!(count(&db, "transactions").await, 0);
 }
 
 #[tokio::test]
 async fn list_unpaid_invoices_with_sent_status() {
     let db = test_db().await;
-    let registry = ToolRegistry::new();
-    let perms = Permissions::default();
+    let contact = add_contact(&db, "Client D", false).await;
+    let sent = draft_invoice(&db, "INV-SENT-001", contact).await;
+    draft_invoice(&db, "INV-DRAFT-001", contact).await;
+    aequi_storage::mark_invoice_sent(&db, sent, "2026-03-02")
+        .await
+        .unwrap();
 
-    aequi_storage::insert_contact(
-        &db, "Client D", None, None, None, "customer", false, None, None,
-    )
-    .await
-    .unwrap();
-
-    // Insert an invoice with "Sent" status directly
-    aequi_storage::insert_invoice(
-        &db,
-        "INV-SENT-001",
-        1,
-        "Sent",
-        None,
-        "2026-03-01",
-        "2026-03-31",
-        None,
-        None,
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-
-    let result = registry
-        .call("aequi_list_unpaid_invoices", json!({}), &db, &perms)
-        .await;
-    assert!(result.is_error.is_none());
-    assert!(result.content[0].text.contains("INV-SENT-001"));
+    let result = call(&db, "aequi_list_unpaid_invoices", json!({})).await;
+    let v = parse(&result);
+    let numbers: Vec<_> = v
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["invoice_number"].as_str().unwrap())
+        .collect();
+    assert_eq!(numbers, ["INV-SENT-001"]);
+    assert_eq!(v[0]["total_cents"], 21500);
+    assert_eq!(v[0]["balance_cents"], 21500);
 }
 
 // -----------------------------------------------------------------------
@@ -822,7 +950,7 @@ async fn save_rule_with_exact_match_type() {
         )
         .await;
     assert!(result.is_error.is_none());
-    assert!(result.content[0].text.contains("rule_id"));
+    assert!(result.content[0].as_text().unwrap().contains("rule_id"));
 }
 
 #[tokio::test]
@@ -846,7 +974,7 @@ async fn save_rule_with_regex_match_type() {
         )
         .await;
     assert!(result.is_error.is_none());
-    assert!(result.content[0].text.contains("rule_id"));
+    assert!(result.content[0].as_text().unwrap().contains("rule_id"));
 }
 
 #[tokio::test]
@@ -865,7 +993,8 @@ async fn apply_rules_empty_batch() {
         )
         .await;
     assert!(result.is_error.is_none());
-    let val: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let val: serde_json::Value =
+        serde_json::from_str(result.content[0].as_text().unwrap()).unwrap();
     assert_eq!(val["total_pending"], 0);
     assert_eq!(val["matched"], 0);
     assert_eq!(val["unmatched"], 0);
@@ -887,7 +1016,8 @@ async fn apply_rules_with_no_rules_defined() {
         )
         .await;
     assert!(result.is_error.is_none());
-    let val: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let val: serde_json::Value =
+        serde_json::from_str(result.content[0].as_text().unwrap()).unwrap();
     assert_eq!(val["matched"], 0);
 }
 
@@ -923,7 +1053,7 @@ async fn save_multiple_rules_and_list() {
         .call("aequi_get_categorization_rules", json!({}), &db, &perms)
         .await;
     assert!(list.is_error.is_none());
-    let text = &list.content[0].text;
+    let text = &list.content[0].as_text().unwrap();
     assert!(text.contains("PATTERN_A"));
     assert!(text.contains("PATTERN_B"));
     assert!(text.contains("PATTERN_C"));
@@ -948,7 +1078,12 @@ async fn ingest_receipt_empty_path() {
         )
         .await;
     assert!(result.is_error.unwrap_or(false));
-    assert!(result.content[0].text.contains("file_path is required"));
+    assert!(
+        result.content[0]
+            .as_text()
+            .unwrap()
+            .contains("file_path is required")
+    );
 }
 
 #[tokio::test]
@@ -966,7 +1101,12 @@ async fn ingest_receipt_relative_path_rejected() {
         )
         .await;
     assert!(result.is_error.unwrap_or(false));
-    assert!(result.content[0].text.contains("absolute path"));
+    assert!(
+        result.content[0]
+            .as_text()
+            .unwrap()
+            .contains("absolute path")
+    );
 }
 
 #[tokio::test]
@@ -984,7 +1124,12 @@ async fn ingest_receipt_path_traversal_rejected() {
         )
         .await;
     assert!(result.is_error.unwrap_or(false));
-    assert!(result.content[0].text.contains("Path traversal"));
+    assert!(
+        result.content[0]
+            .as_text()
+            .unwrap()
+            .contains("Path traversal")
+    );
 }
 
 #[tokio::test]
@@ -1002,7 +1147,12 @@ async fn ingest_receipt_unsupported_extension() {
         )
         .await;
     assert!(result.is_error.unwrap_or(false));
-    assert!(result.content[0].text.contains("Unsupported file type"));
+    assert!(
+        result.content[0]
+            .as_text()
+            .unwrap()
+            .contains("Unsupported file type")
+    );
 }
 
 #[tokio::test]
@@ -1026,9 +1176,12 @@ async fn ingest_receipt_supported_extensions_pass_validation() {
         assert!(result.is_error.unwrap_or(false));
         // Should get past validation to file read stage
         assert!(
-            result.content[0].text.contains("Cannot read file"),
+            result.content[0]
+                .as_text()
+                .unwrap()
+                .contains("Cannot read file"),
             "Extension .{ext} should pass validation but got: {}",
-            result.content[0].text
+            result.content[0].as_text().unwrap()
         );
     }
 }
@@ -1044,17 +1197,21 @@ async fn ingest_receipt_no_file_path_param() {
         .call("aequi_ingest_receipt", json!({}), &db, &perms)
         .await;
     assert!(result.is_error.unwrap_or(false));
-    assert!(result.content[0].text.contains("file_path is required"));
+    assert!(
+        result.content[0]
+            .as_text()
+            .unwrap()
+            .contains("file_path is required")
+    );
 }
 
 #[tokio::test]
-async fn approve_receipt_without_transaction() {
+async fn agents_cannot_approve_receipts() {
     let db = test_db().await;
     let registry = ToolRegistry::new();
     let perms = Permissions::default();
 
-    // Insert a receipt directly for testing
-    aequi_storage::insert_receipt(
+    let receipt_id = aequi_storage::insert_receipt(
         &db,
         "abc123hash",
         "jpg",
@@ -1071,16 +1228,53 @@ async fn approve_receipt_without_transaction() {
     .await
     .unwrap();
 
-    let result = registry
-        .call(
-            "aequi_approve_receipt",
-            json!({ "receipt_id": 1 }),
-            &db,
-            &perms,
-        )
-        .await;
-    assert!(result.is_error.is_none());
-    assert!(result.content[0].text.contains("Receipt approved"));
+    // Approval is a human step in the app: no tool is listed for it...
+    let names: Vec<_> = registry
+        .list_definitions()
+        .iter()
+        .map(|d| d.name.as_str())
+        .collect();
+    assert!(
+        !names.iter().any(|n| n.contains("approve")),
+        "an approve tool is registered: {names:?}"
+    );
+
+    // ...and calling the old tool fails without changing the receipt.
+    for args in [
+        json!({ "receipt_id": receipt_id }),
+        json!({ "receipt_id": receipt_id, "transaction_id": 1 }),
+    ] {
+        let result = registry
+            .call("aequi_approve_receipt", args, &db, &perms)
+            .await;
+        assert!(result.is_error());
+        assert!(
+            result.content[0]
+                .as_text()
+                .unwrap()
+                .contains("Unknown tool: aequi_approve_receipt")
+        );
+    }
+    let receipt = aequi_storage::get_receipt_by_id(&db, receipt_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(receipt.status, "pending_review");
+    assert_eq!(receipt.transaction_id, None);
+
+    // The receipt tools tell agents where approval happens.
+    for tool in ["aequi_get_pending_receipts", "aequi_update_receipt_fields"] {
+        let def = registry
+            .list_definitions()
+            .into_iter()
+            .find(|d| d.name == tool)
+            .unwrap();
+        assert!(
+            def.description.contains("in the Aequi app"),
+            "{tool}: {}",
+            def.description
+        );
+    }
 }
 
 #[tokio::test]
@@ -1115,7 +1309,12 @@ async fn reject_receipt() {
         )
         .await;
     assert!(result.is_error.is_none());
-    assert!(result.content[0].text.contains("Receipt rejected"));
+    assert!(
+        result.content[0]
+            .as_text()
+            .unwrap()
+            .contains("Receipt rejected")
+    );
 }
 
 // -----------------------------------------------------------------------
@@ -1157,7 +1356,6 @@ fn write_tool_classification() {
     let mut expected = vec![
         "aequi_create_transaction",
         "aequi_ingest_receipt",
-        "aequi_approve_receipt",
         "aequi_reject_receipt",
         "aequi_record_tax_payment",
         "aequi_draft_invoice",
@@ -1167,6 +1365,10 @@ fn write_tool_classification() {
         "aequi_save_import_profile",
         "aequi_create_reconciliation_session",
         "aequi_resolve_item",
+        "aequi_update_receipt_fields",
+        "aequi_post_import",
+        "aequi_ignore_import",
+        "aequi_set_tax_return",
     ];
     expected.sort_unstable();
     assert_eq!(writes, expected);
@@ -1181,7 +1383,7 @@ async fn disabled_setting_refuses_every_tool() {
 
     let read = call(&db, "aequi_list_accounts", json!({})).await;
     assert!(read.is_error());
-    assert!(read.content[0].text.contains("disabled"));
+    assert!(read.content[0].as_text().unwrap().contains("disabled"));
 
     let write = call(
         &db,
@@ -1212,9 +1414,9 @@ async fn read_only_setting_blocks_every_write_tool() {
             .await;
         assert!(result.is_error(), "{tool} ran in read-only mode");
         assert!(
-            result.content[0].text.contains("read-only"),
+            result.content[0].as_text().unwrap().contains("read-only"),
             "{tool}: {}",
-            result.content[0].text
+            result.content[0].as_text().unwrap()
         );
     }
 
@@ -1240,7 +1442,11 @@ async fn read_only_setting_blocks_every_write_tool() {
         balanced_tx("2026-03-01", "X", 100),
     )
     .await;
-    assert!(!result.is_error(), "{}", result.content[0].text);
+    assert!(
+        !result.is_error(),
+        "{}",
+        result.content[0].as_text().unwrap()
+    );
     assert_eq!(count(&db, "transactions").await, 1);
 }
 
@@ -1253,7 +1459,11 @@ async fn unset_settings_allow_writes() {
         balanced_tx("2026-03-01", "X", 100),
     )
     .await;
-    assert!(!result.is_error(), "{}", result.content[0].text);
+    assert!(
+        !result.is_error(),
+        "{}",
+        result.content[0].as_text().unwrap()
+    );
 }
 
 // -----------------------------------------------------------------------
@@ -1427,7 +1637,12 @@ async fn fractional_cents_rejected() {
     });
     let result = call(&db, "aequi_create_transaction", args).await;
     assert!(result.is_error());
-    assert!(result.content[0].text.contains("lines[0].debit_cents"));
+    assert!(
+        result.content[0]
+            .as_text()
+            .unwrap()
+            .contains("lines[0].debit_cents")
+    );
     assert_eq!(count(&db, "transactions").await, 0);
 }
 
@@ -1443,7 +1658,11 @@ async fn integral_float_cents_accepted() {
         ]
     });
     let result = call(&db, "aequi_create_transaction", args).await;
-    assert!(!result.is_error(), "{}", result.content[0].text);
+    assert!(
+        !result.is_error(),
+        "{}",
+        result.content[0].as_text().unwrap()
+    );
 }
 
 #[tokio::test]
@@ -1489,7 +1708,7 @@ async fn archived_account_rejected() {
     )
     .await;
     assert!(result.is_error());
-    assert!(result.content[0].text.contains("archived"));
+    assert!(result.content[0].as_text().unwrap().contains("archived"));
 }
 
 #[tokio::test]
@@ -1512,7 +1731,7 @@ async fn transaction_insert_is_atomic() {
     )
     .await;
     assert!(result.is_error());
-    assert!(result.content[0].text.contains("boom"));
+    assert!(result.content[0].as_text().unwrap().contains("boom"));
     assert_eq!(count(&db, "transactions").await, 0);
     assert_eq!(count(&db, "transaction_lines").await, 0);
 }
@@ -1527,7 +1746,7 @@ async fn unknown_arguments_rejected() {
     )
     .await;
     assert!(result.is_error());
-    assert!(result.content[0].text.contains("start_dat"));
+    assert!(result.content[0].as_text().unwrap().contains("start_dat"));
 
     let result = call(&db, "aequi_list_accounts", json!([1, 2])).await;
     assert!(result.is_error());
@@ -1569,7 +1788,12 @@ async fn save_rule_requires_pattern_and_valid_type() {
     bad_regex["match_type"] = json!("regex");
     bad_regex["match_pattern"] = json!("(unclosed");
     let result = call(&db, "aequi_save_categorization_rule", bad_regex).await;
-    assert!(result.content[0].text.contains("Invalid regex"));
+    assert!(
+        result.content[0]
+            .as_text()
+            .unwrap()
+            .contains("Invalid regex")
+    );
 
     let mut bad_account = base.clone();
     bad_account["account_id"] = json!(9999);
@@ -1632,6 +1856,223 @@ async fn estimate_requires_valid_quarter() {
     }
 }
 
+fn this_year() -> i64 {
+    chrono::Datelike::year(&chrono::Local::now().date_naive()).into()
+}
+
+#[tokio::test]
+async fn tax_return_figures_round_trip() {
+    let db = test_db().await;
+    let get = |year: i64| call(&db, "aequi_get_tax_return", json!({ "year": year }));
+
+    // Nothing entered yet.
+    assert_eq!(
+        parse(&get(2025).await),
+        json!({ "year": 2025, "total_tax_cents": null, "agi_cents": null })
+    );
+
+    let v = parse(
+        &call(
+            &db,
+            "aequi_set_tax_return",
+            json!({ "year": 2025, "total_tax_cents": 1_500_000, "agi_cents": 20_000_000 }),
+        )
+        .await,
+    );
+    assert_eq!(
+        v,
+        json!({ "year": 2025, "total_tax_cents": 1_500_000, "agi_cents": 20_000_000 })
+    );
+
+    // An omitted field is left unchanged; AGI may be negative.
+    let v = parse(
+        &call(
+            &db,
+            "aequi_set_tax_return",
+            json!({ "year": 2025, "agi_cents": -500_000 }),
+        )
+        .await,
+    );
+    assert_eq!(
+        v,
+        json!({ "year": 2025, "total_tax_cents": 1_500_000, "agi_cents": -500_000 })
+    );
+
+    // An explicit null clears the stored value.
+    let v = parse(
+        &call(
+            &db,
+            "aequi_set_tax_return",
+            json!({ "year": 2025, "total_tax_cents": null }),
+        )
+        .await,
+    );
+    assert_eq!(
+        v,
+        json!({ "year": 2025, "total_tax_cents": null, "agi_cents": -500_000 })
+    );
+    assert_eq!(parse(&get(2025).await), v);
+    assert_eq!(
+        aequi_storage::get_tax_return_figures(&db, 2025)
+            .await
+            .unwrap(),
+        aequi_storage::TaxReturnFigures {
+            total_tax_cents: None,
+            agi_cents: Some(-500_000),
+        }
+    );
+
+    // Each year is separate.
+    assert_eq!(
+        parse(&get(2024).await),
+        json!({ "year": 2024, "total_tax_cents": null, "agi_cents": null })
+    );
+}
+
+#[tokio::test]
+async fn tax_return_args_validated() {
+    let db = test_db().await;
+    let this_year = this_year();
+
+    for args in [
+        json!({ "total_tax_cents": 100 }),
+        json!({ "year": 1999, "total_tax_cents": 100 }),
+        json!({ "year": 67562, "total_tax_cents": 100 }),
+        json!({ "year": this_year, "total_tax_cents": 100 }),
+        json!({ "year": this_year + 1, "total_tax_cents": 100 }),
+        json!({ "year": 2025, "total_tax_cents": -1 }),
+        json!({ "year": 2025, "total_tax_cents": 12.5 }),
+        json!({ "year": 2025, "total_tax_cents": "1500" }),
+        json!({ "year": 2025, "agi_cents": 1.5 }),
+        json!({ "year": 2025 }),
+        json!({ "year": 2025, "total_tax": 100 }),
+    ] {
+        let result = call(&db, "aequi_set_tax_return", args.clone()).await;
+        assert!(result.is_error(), "accepted {args}");
+    }
+    for year in [2025, this_year as u16] {
+        assert_eq!(
+            aequi_storage::get_tax_return_figures(&db, year)
+                .await
+                .unwrap(),
+            aequi_storage::TaxReturnFigures::default()
+        );
+    }
+
+    let result = call(&db, "aequi_set_tax_return", json!({ "year": 2025 })).await;
+    assert!(
+        result.content[0]
+            .as_text()
+            .unwrap()
+            .contains("Nothing to change")
+    );
+    let result = call(
+        &db,
+        "aequi_set_tax_return",
+        json!({ "year": this_year, "agi_cents": 100 }),
+    )
+    .await;
+    assert!(
+        result.content[0]
+            .as_text()
+            .unwrap()
+            .contains(&format!("must be before {this_year}")),
+        "{}",
+        result.content[0].as_text().unwrap()
+    );
+
+    for args in [
+        json!({}),
+        json!({ "year": 1999 }),
+        json!({ "year": this_year }),
+        json!({ "year": 2025.5 }),
+    ] {
+        let result = call(&db, "aequi_get_tax_return", args.clone()).await;
+        assert!(result.is_error(), "accepted {args}");
+    }
+}
+
+#[tokio::test]
+async fn estimate_uses_filed_prior_year_return() {
+    let db = test_db().await;
+    // $25,000 of Q1 revenue ($100,000 annualized): below the QBI limits, and
+    // 90% of this year's projected tax is above last year's tax, so the
+    // prior-year test decides the safe harbor.
+    assert!(
+        !call(
+            &db,
+            "aequi_create_transaction",
+            balanced_tx("2026-01-15", "Big client", 2_500_000),
+        )
+        .await
+        .is_error()
+    );
+    let estimate = || async {
+        parse(
+            &call(
+                &db,
+                "aequi_estimate_quarterly_tax",
+                json!({ "year": 2026, "quarter": 1 }),
+            )
+            .await,
+        )
+    };
+    let dollars = |v: &serde_json::Value, field: &str| -> rust_decimal::Decimal {
+        v[field].as_str().unwrap().parse().unwrap()
+    };
+    let set = |args: serde_json::Value| call(&db, "aequi_set_tax_return", args);
+
+    // QBI deduction is reported in cents too.
+    let v = estimate().await;
+    let qbi_cents = v["qbi_deduction_cents"].as_i64().unwrap();
+    assert!(qbi_cents > 0);
+    assert_eq!(
+        rust_decimal::Decimal::from(qbi_cents),
+        dollars(&v, "qbi_deduction") * rust_decimal::Decimal::ONE_HUNDRED
+    );
+
+    // Last year's AGI above $150,000: 110% of last year's tax.
+    assert!(
+        !set(json!({ "year": 2025, "total_tax_cents": 1_500_000, "agi_cents": 20_000_000 }))
+            .await
+            .is_error()
+    );
+    let v = estimate().await;
+    assert_eq!(v["safe_harbor_prior_year_percentage"], "1.10");
+    assert_eq!(
+        dollars(&v, "safe_harbor_amount"),
+        rust_decimal::Decimal::from(16_500)
+    );
+    let note = v["safe_harbor_note"].as_str().unwrap();
+    assert!(note.contains("from your filed 2025 return"), "{note}");
+    assert!(!note.contains("Not exact"), "{note}");
+
+    // At exactly $150,000: 100%.
+    assert!(
+        !set(json!({ "year": 2025, "agi_cents": 15_000_000 }))
+            .await
+            .is_error()
+    );
+    let v = estimate().await;
+    assert_eq!(v["safe_harbor_prior_year_percentage"], "1.00");
+    assert_eq!(
+        dollars(&v, "safe_harbor_amount"),
+        rust_decimal::Decimal::from(15_000)
+    );
+
+    // Without last year's AGI, 100% is assumed and the note says so.
+    assert!(
+        !set(json!({ "year": 2025, "agi_cents": null }))
+            .await
+            .is_error()
+    );
+    let v = estimate().await;
+    assert_eq!(v["safe_harbor_prior_year_percentage"], "1.00");
+    let note = v["safe_harbor_note"].as_str().unwrap();
+    assert!(note.contains("2025's AGI is not entered"), "{note}");
+    assert!(note.contains("aequi_set_tax_return"), "{note}");
+}
+
 #[tokio::test]
 async fn dates_are_validated() {
     let db = test_db().await;
@@ -1687,7 +2128,7 @@ async fn get_transactions_filters_by_date() {
     }
 
     let descriptions = |r: ToolResult| -> Vec<String> {
-        let v: serde_json::Value = serde_json::from_str(&r.content[0].text).unwrap();
+        let v: serde_json::Value = serde_json::from_str(r.content[0].as_text().unwrap()).unwrap();
         v.as_array()
             .unwrap()
             .iter()
@@ -1737,7 +2178,6 @@ async fn get_transactions_filters_by_date() {
 async fn nonexistent_ids_report_not_found() {
     let db = test_db().await;
     for (tool, args) in [
-        ("aequi_approve_receipt", json!({ "receipt_id": 99 })),
         ("aequi_reject_receipt", json!({ "receipt_id": 99 })),
         (
             "aequi_resolve_item",
@@ -1751,10 +2191,18 @@ async fn nonexistent_ids_report_not_found() {
             "aequi_get_reconciliation_items",
             json!({ "session_id": 99 }),
         ),
+        ("aequi_draft_invoice", invoice_args("I-9", 99)),
+        ("aequi_get_invoice", json!({ "invoice_id": 99 })),
+        ("aequi_get_receipt_image", json!({ "receipt_id": 99 })),
         (
-            "aequi_draft_invoice",
-            json!({ "invoice_number": "I-9", "contact_id": 99, "issue_date": "2026-03-01", "due_date": "2026-03-31" }),
+            "aequi_update_receipt_fields",
+            json!({ "receipt_id": 99, "vendor": "X", "confidence": 0.5 }),
         ),
+        (
+            "aequi_post_import",
+            json!({ "imported_id": 99, "bank_account_code": "1000", "category_account_code": "5010" }),
+        ),
+        ("aequi_ignore_import", json!({ "imported_id": 99 })),
         (
             "aequi_create_reconciliation_session",
             json!({ "account_id": 9999, "start_date": "2026-01-01", "end_date": "2026-01-31", "statement_balance_cents": 0 }),
@@ -1763,40 +2211,11 @@ async fn nonexistent_ids_report_not_found() {
         let result = call(&db, tool, args).await;
         assert!(result.is_error(), "{tool}");
         assert!(
-            result.content[0].text.contains("not found"),
+            result.content[0].as_text().unwrap().contains("not found"),
             "{tool}: {}",
-            result.content[0].text
+            result.content[0].as_text().unwrap()
         );
     }
-}
-
-#[tokio::test]
-async fn approve_receipt_with_missing_transaction_fails() {
-    let db = test_db().await;
-    aequi_storage::insert_receipt(
-        &db,
-        "h1",
-        "jpg",
-        "/tmp/x.jpg",
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        0.0,
-    )
-    .await
-    .unwrap();
-    let result = call(
-        &db,
-        "aequi_approve_receipt",
-        json!({ "receipt_id": 1, "transaction_id": 42 }),
-    )
-    .await;
-    assert!(result.is_error());
-    assert!(result.content[0].text.contains("Transaction 42 not found"));
 }
 
 // -----------------------------------------------------------------------
@@ -1804,6 +2223,15 @@ async fn approve_receipt_with_missing_transaction_fails() {
 // -----------------------------------------------------------------------
 
 async fn insert_pending_import(db: &aequi_storage::DbPool, batch: &str, description: &str) -> i64 {
+    insert_import(db, batch, description, -1000).await
+}
+
+async fn insert_import(
+    db: &aequi_storage::DbPool,
+    batch: &str,
+    description: &str,
+    amount_cents: i64,
+) -> i64 {
     aequi_storage::insert_imported_transaction(
         db,
         &aequi_storage::ImportedTransaction {
@@ -1813,7 +2241,7 @@ async fn insert_pending_import(db: &aequi_storage::DbPool, batch: &str, descript
             import_batch_id: batch.to_string(),
             date: "2026-03-01".to_string(),
             description: description.to_string(),
-            amount_cents: -1000,
+            amount_cents,
             debit_cents: None,
             credit_cents: None,
             memo: None,
@@ -1848,12 +2276,12 @@ async fn apply_rules_uses_regex_and_fuzzy_semantics() {
             }),
         )
         .await;
-        assert!(!r.is_error(), "{}", r.content[0].text);
+        assert!(!r.is_error(), "{}", r.content[0].as_text().unwrap());
     }
 
     let r = call(&db, "aequi_apply_rules", json!({ "batch_id": "b1" })).await;
-    assert!(!r.is_error(), "{}", r.content[0].text);
-    let v: serde_json::Value = serde_json::from_str(&r.content[0].text).unwrap();
+    assert!(!r.is_error(), "{}", r.content[0].as_text().unwrap());
+    let v: serde_json::Value = serde_json::from_str(r.content[0].as_text().unwrap()).unwrap();
     assert_eq!(v["total_pending"], 4);
     assert_eq!(v["matched"], 2);
     assert_eq!(v["unmatched"], 2);
@@ -1898,7 +2326,7 @@ async fn apply_rules_skips_invalid_stored_rules() {
 
     let r = call(&db, "aequi_apply_rules", json!({ "batch_id": "b2" })).await;
     assert!(!r.is_error());
-    let v: serde_json::Value = serde_json::from_str(&r.content[0].text).unwrap();
+    let v: serde_json::Value = serde_json::from_str(r.content[0].as_text().unwrap()).unwrap();
     assert_eq!(v["matched"], 0);
     assert_eq!(v["skipped_rules"].as_array().unwrap().len(), 1);
 }
@@ -1930,8 +2358,12 @@ async fn ingest_receipt_copies_into_attachments() {
         json!({ "file_path": source.to_str().unwrap(), "vendor": "Shop", "date": "2026-03-01", "total_cents": 1234 }),
     )
     .await;
-    assert!(!result.is_error(), "{}", result.content[0].text);
-    let v: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert!(
+        !result.is_error(),
+        "{}",
+        result.content[0].as_text().unwrap()
+    );
+    let v: serde_json::Value = serde_json::from_str(result.content[0].as_text().unwrap()).unwrap();
     let hash = v["file_hash"].as_str().unwrap();
 
     let expected = data_dir
@@ -1973,7 +2405,12 @@ async fn ingest_receipt_copies_into_attachments() {
     )
     .await;
     assert!(dup.is_error());
-    assert!(dup.content[0].text.contains("Duplicate receipt"));
+    assert!(
+        dup.content[0]
+            .as_text()
+            .unwrap()
+            .contains("Duplicate receipt")
+    );
 }
 
 #[tokio::test]
@@ -1990,7 +2427,12 @@ async fn ingest_receipt_rejects_directories_and_large_files() {
     )
     .await;
     assert!(result.is_error());
-    assert!(result.content[0].text.contains("regular file"));
+    assert!(
+        result.content[0]
+            .as_text()
+            .unwrap()
+            .contains("regular file")
+    );
 
     // Sparse file just over the cap.
     let big = data_dir.path().join("big.pdf");
@@ -2004,7 +2446,7 @@ async fn ingest_receipt_rejects_directories_and_large_files() {
     )
     .await;
     assert!(result.is_error());
-    assert!(result.content[0].text.contains("too large"));
+    assert!(result.content[0].as_text().unwrap().contains("too large"));
     assert_eq!(count(&db, "receipts").await, 0);
 }
 
@@ -2021,7 +2463,7 @@ async fn ingest_receipt_needs_file_backed_ledger() {
     )
     .await;
     assert!(result.is_error());
-    assert!(result.content[0].text.contains("file-backed"));
+    assert!(result.content[0].as_text().unwrap().contains("file-backed"));
 }
 
 #[tokio::test]
@@ -2035,4 +2477,690 @@ async fn failed_tool_calls_are_audited_as_errors() {
     assert_eq!(logs.len(), 1);
     assert_eq!(logs[0].tool_name, "aequi_get_account");
     assert_eq!(logs[0].outcome, "error");
+}
+
+// -----------------------------------------------------------------------
+// Receipt extraction by an agent: image access and field updates
+// -----------------------------------------------------------------------
+
+const PNG_BYTES: &[u8] = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR not really a png";
+
+async fn insert_test_receipt(db: &aequi_storage::DbPool, hash: &str, path: &str) -> i64 {
+    aequi_storage::insert_receipt(
+        db,
+        hash,
+        "png",
+        path,
+        Some("OCR TEXT"),
+        Some("OCR Vendr"),
+        None,
+        Some(1000),
+        None,
+        None,
+        None,
+        0.4,
+    )
+    .await
+    .unwrap()
+}
+
+fn decode_base64(data: &str) -> Vec<u8> {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD
+        .decode(data)
+        .unwrap()
+}
+
+#[tokio::test]
+async fn receipt_image_returned_as_image_block() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let source_dir = tempfile::tempdir().unwrap();
+    let db = file_db(data_dir.path()).await;
+
+    // The extension says JPEG; the bytes say PNG, and the bytes win.
+    let source = source_dir.path().join("receipt.jpg");
+    std::fs::write(&source, PNG_BYTES).unwrap();
+    let v = parse(
+        &call(
+            &db,
+            "aequi_ingest_receipt",
+            json!({ "file_path": source.to_str().unwrap(), "vendor": "Shop" }),
+        )
+        .await,
+    );
+    let id = v["receipt_id"].as_i64().unwrap();
+
+    let result = call(&db, "aequi_get_receipt_image", json!({ "receipt_id": id })).await;
+    let info = parse(&result);
+    assert_eq!(info["receipt_id"], id);
+    assert_eq!(info["vendor"], "Shop");
+    assert_eq!(info["status"], "pending_review");
+    assert_eq!(info["mime_type"], "image/png");
+    assert_eq!(info["size_bytes"], PNG_BYTES.len());
+    assert_eq!(result.content.len(), 2);
+    match &result.content[1] {
+        crate::protocol::ToolContent::Image { data, mime_type } => {
+            assert_eq!(mime_type, "image/png");
+            assert_eq!(decode_base64(data), PNG_BYTES);
+        }
+        other => panic!("expected an image block, got {other:?}"),
+    }
+
+    // MCP wire format.
+    let server = crate::server::McpServer::new(db.clone(), Permissions::default());
+    let msg = format!(
+        r#"{{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{{"name":"aequi_get_receipt_image","arguments":{{"receipt_id":{id}}}}}}}"#
+    );
+    let resp = to_json(&server.handle_message(msg.as_bytes()).await.unwrap());
+    let content = &resp["result"]["content"];
+    assert_eq!(content[0]["type"], "text");
+    assert_eq!(content[1]["type"], "image");
+    assert_eq!(content[1]["mimeType"], "image/png");
+    assert_eq!(
+        decode_base64(content[1]["data"].as_str().unwrap()),
+        PNG_BYTES
+    );
+    assert!(resp["result"].get("isError").is_none());
+}
+
+#[tokio::test]
+async fn receipt_pdf_returned_as_embedded_resource() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let source_dir = tempfile::tempdir().unwrap();
+    let db = file_db(data_dir.path()).await;
+    let pdf = b"%PDF-1.4\n% fake receipt\n";
+    let source = source_dir.path().join("invoice.pdf");
+    std::fs::write(&source, pdf).unwrap();
+    let id = parse(
+        &call(
+            &db,
+            "aequi_ingest_receipt",
+            json!({ "file_path": source.to_str().unwrap() }),
+        )
+        .await,
+    )["receipt_id"]
+        .as_i64()
+        .unwrap();
+
+    let result = call(&db, "aequi_get_receipt_image", json!({ "receipt_id": id })).await;
+    assert_eq!(parse(&result)["mime_type"], "application/pdf");
+    let wire = serde_json::to_value(&result).unwrap();
+    let block = &wire["content"][1];
+    assert_eq!(block["type"], "resource");
+    assert_eq!(block["resource"]["mimeType"], "application/pdf");
+    assert_eq!(block["resource"]["uri"], format!("aequi://receipts/{id}"));
+    assert_eq!(
+        decode_base64(block["resource"]["blob"].as_str().unwrap()),
+        pdf
+    );
+}
+
+#[tokio::test]
+async fn receipt_image_refuses_paths_outside_attachments() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let outside_dir = tempfile::tempdir().unwrap();
+    let db = file_db(data_dir.path()).await;
+    let attachments = data_dir.path().join("attachments");
+    std::fs::create_dir_all(&attachments).unwrap();
+
+    let outside = outside_dir.path().join("secret.png");
+    std::fs::write(&outside, PNG_BYTES).unwrap();
+    let mut paths = vec![
+        outside.clone(),
+        // `..` that climbs out to the ledger itself.
+        attachments.join("..").join("ledger.db"),
+    ];
+    #[cfg(unix)]
+    {
+        let link = attachments.join("link.png");
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+        paths.push(link);
+    }
+
+    for (i, path) in paths.iter().enumerate() {
+        let id = insert_test_receipt(&db, &format!("out-{i}"), path.to_str().unwrap()).await;
+        let result = call(&db, "aequi_get_receipt_image", json!({ "receipt_id": id })).await;
+        let text = result.content[0].as_text().unwrap();
+        assert!(result.is_error(), "{}: {text}", path.display());
+        assert!(text.contains("outside"), "{}: {text}", path.display());
+        assert_eq!(result.content.len(), 1);
+    }
+}
+
+#[tokio::test]
+async fn receipt_image_refuses_bad_files() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let db = file_db(data_dir.path()).await;
+    let attachments = data_dir.path().join("attachments");
+    std::fs::create_dir_all(&attachments).unwrap();
+
+    let dir = attachments.join("folder.png");
+    std::fs::create_dir(&dir).unwrap();
+    let big = attachments.join("big.png");
+    let f = std::fs::File::create(&big).unwrap();
+    f.set_len(crate::tools::MAX_RECEIPT_IMAGE_BYTES + 1)
+        .unwrap();
+    drop(f);
+    let text_file = attachments.join("notes.png");
+    std::fs::write(&text_file, b"just some text").unwrap();
+    let missing = attachments.join("missing.png");
+
+    for (i, (path, expected)) in [
+        (dir, "not a regular file"),
+        (big, "larger than 20 MB"),
+        (text_file, "not a supported image"),
+        (missing, "can't be read"),
+    ]
+    .iter()
+    .enumerate()
+    {
+        let id = insert_test_receipt(&db, &format!("bad-{i}"), path.to_str().unwrap()).await;
+        let result = call(&db, "aequi_get_receipt_image", json!({ "receipt_id": id })).await;
+        let text = result.content[0].as_text().unwrap();
+        assert!(result.is_error(), "{expected}: {text}");
+        assert!(text.contains(expected), "{expected}: {text}");
+    }
+}
+
+#[tokio::test]
+async fn receipt_image_needs_file_backed_ledger() {
+    let db = test_db().await;
+    let id = insert_test_receipt(&db, "mem", "/tmp/whatever.png").await;
+    let result = call(&db, "aequi_get_receipt_image", json!({ "receipt_id": id })).await;
+    assert!(result.is_error());
+    assert!(result.content[0].as_text().unwrap().contains("file-backed"));
+}
+
+#[tokio::test]
+async fn update_receipt_fields_merges_and_stays_pending() {
+    let db = test_db().await;
+    let id = insert_test_receipt(&db, "h-upd", "/tmp/none.png").await;
+
+    let v = parse(
+        &call(
+            &db,
+            "aequi_update_receipt_fields",
+            json!({
+                "receipt_id": id, "vendor": "Blue Bottle", "receipt_date": "2026-03-04",
+                "total_cents": 1250, "tax_cents": 100, "confidence": 0.9
+            }),
+        )
+        .await,
+    );
+    assert_eq!(v["vendor"], "Blue Bottle");
+    assert_eq!(v["receipt_date"], "2026-03-04");
+    assert_eq!(v["total_cents"], 1250);
+    assert_eq!(v["tax_cents"], 100);
+    assert!(v["subtotal_cents"].is_null());
+    assert_eq!(v["confidence"], 0.9);
+    assert_eq!(v["status"], "pending_review");
+
+    // Omitted fields keep their values.
+    let v = parse(
+        &call(
+            &db,
+            "aequi_update_receipt_fields",
+            json!({ "receipt_id": id, "payment_method": "Visa ending 1234", "confidence": 0.95 }),
+        )
+        .await,
+    );
+    assert_eq!(v["vendor"], "Blue Bottle");
+    assert_eq!(v["total_cents"], 1250);
+    assert_eq!(v["payment_method"], "Visa ending 1234");
+    assert_eq!(v["confidence"], 0.95);
+
+    let pending = parse(&call(&db, "aequi_get_pending_receipts", json!({})).await);
+    assert_eq!(pending.as_array().unwrap().len(), 1);
+    let row = &pending[0];
+    assert_eq!(row["receipt_id"], id);
+    assert_eq!(row["status"], "pending_review");
+    assert_eq!(row["vendor"], "Blue Bottle");
+    assert_eq!(row["total_cents"], 1250);
+    assert_eq!(row["confidence"], 0.95);
+    assert_eq!(row["ocr_text"], "OCR TEXT");
+}
+
+#[tokio::test]
+async fn update_receipt_fields_validates() {
+    let db = test_db().await;
+    let id = insert_test_receipt(&db, "h-val", "/tmp/none.png").await;
+
+    for (args, expected) in [
+        (
+            json!({ "receipt_id": id, "vendor": "X" }),
+            "Missing required argument: confidence",
+        ),
+        (
+            json!({ "receipt_id": id, "confidence": 1.5 }),
+            "between 0 and 1",
+        ),
+        (
+            json!({ "receipt_id": id, "confidence": "high" }),
+            "confidence",
+        ),
+        (
+            json!({ "receipt_id": id, "confidence": 0.5, "total_cents": -5 }),
+            "must not be negative",
+        ),
+        (
+            json!({ "receipt_id": id, "confidence": 0.5, "total_cents": 12.5 }),
+            "whole number of cents",
+        ),
+        (
+            json!({ "receipt_id": id, "confidence": 0.5, "receipt_date": "03/04/2026" }),
+            "receipt_date",
+        ),
+        (
+            json!({ "receipt_id": id, "confidence": 0.5, "vendr": "X" }),
+            "vendr",
+        ),
+    ] {
+        let result = call(&db, "aequi_update_receipt_fields", args).await;
+        let text = result.content[0].as_text().unwrap();
+        assert!(result.is_error(), "{expected}: {text}");
+        assert!(text.contains(expected), "{expected}: {text}");
+    }
+    let receipt = aequi_storage::get_receipt_by_id(&db, id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(receipt.vendor.as_deref(), Some("OCR Vendr"));
+    assert_eq!(receipt.confidence, 0.4);
+
+    // Once a person has decided, the agent can't change it.
+    assert!(
+        !call(&db, "aequi_reject_receipt", json!({ "receipt_id": id }))
+            .await
+            .is_error()
+    );
+    let result = call(
+        &db,
+        "aequi_update_receipt_fields",
+        json!({ "receipt_id": id, "vendor": "Y", "confidence": 0.5 }),
+    )
+    .await;
+    assert!(result.is_error());
+    assert!(
+        result.content[0]
+            .as_text()
+            .unwrap()
+            .contains("can no longer be edited")
+    );
+}
+
+#[tokio::test]
+async fn read_only_blocks_new_write_tools_with_valid_arguments() {
+    let db = test_db().await;
+    let contact = add_contact(&db, "RO Client", false).await;
+    let receipt = insert_test_receipt(&db, "h-ro", "/tmp/none.png").await;
+    let import = insert_pending_import(&db, "b1", "COFFEE").await;
+    aequi_storage::set_setting(&db, "mcp_read_only", "true")
+        .await
+        .unwrap();
+
+    for (tool, args) in [
+        (
+            "aequi_update_receipt_fields",
+            json!({ "receipt_id": receipt, "vendor": "Changed", "confidence": 0.9 }),
+        ),
+        (
+            "aequi_post_import",
+            json!({ "imported_id": import, "bank_account_code": "1000", "category_account_code": "5100" }),
+        ),
+        ("aequi_ignore_import", json!({ "imported_id": import })),
+        ("aequi_draft_invoice", invoice_args("INV-RO", contact)),
+        (
+            "aequi_set_tax_return",
+            json!({ "year": 2025, "total_tax_cents": 1_500_000, "agi_cents": 20_000_000 }),
+        ),
+    ] {
+        let result = call(&db, tool, args).await;
+        let text = result.content[0].as_text().unwrap();
+        assert!(result.is_error(), "{tool} ran in read-only mode");
+        assert!(text.contains("read-only"), "{tool}: {text}");
+    }
+
+    let receipt = aequi_storage::get_receipt_by_id(&db, receipt)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(receipt.vendor.as_deref(), Some("OCR Vendr"));
+    let pending = parse(&call(&db, "aequi_get_pending_imports", json!({})).await);
+    assert_eq!(pending[0]["id"], import);
+    assert_eq!(pending[0]["status"], "pending");
+    assert_eq!(count(&db, "transactions").await, 0);
+    assert_eq!(count(&db, "invoices").await, 0);
+    assert_eq!(
+        aequi_storage::get_tax_return_figures(&db, 2025)
+            .await
+            .unwrap(),
+        aequi_storage::TaxReturnFigures::default()
+    );
+
+    // The new read tools still work.
+    for (tool, args) in [
+        ("aequi_list_contacts", json!({})),
+        ("aequi_get_1099_summary", json!({})),
+        ("aequi_get_tax_return", json!({ "year": 2025 })),
+    ] {
+        let result = call(&db, tool, args).await;
+        assert!(!result.is_error(), "{tool}");
+    }
+}
+
+// -----------------------------------------------------------------------
+// Contacts and payees
+// -----------------------------------------------------------------------
+
+#[tokio::test]
+async fn list_contacts_returns_ids_for_other_tools() {
+    let db = test_db().await;
+    let dev = add_contact(&db, "Dev Co", true).await;
+    let acme = add_contact(&db, "Acme", false).await;
+
+    let result = call(&db, "aequi_list_contacts", json!({})).await;
+    let v = parse(&result);
+    assert_eq!(
+        v,
+        json!([
+            { "id": acme, "name": "Acme", "contact_type": "customer", "is_contractor": false, "email": "billing@example.com" },
+            { "id": dev, "name": "Dev Co", "contact_type": "vendor", "is_contractor": true, "email": "billing@example.com" }
+        ])
+    );
+    // Tax ids are not exposed.
+    assert!(!result.content[0].as_text().unwrap().contains("12-3456789"));
+}
+
+#[tokio::test]
+async fn create_transaction_with_contact() {
+    let db = test_db().await;
+    let contact = add_contact(&db, "Dev Co", true).await;
+
+    let mut args = balanced_tx("2026-03-01", "Paid Dev Co", 5000);
+    args["contact_id"] = json!(contact);
+    let v = parse(&call(&db, "aequi_create_transaction", args.clone()).await);
+    let id = v["id"].as_i64().unwrap();
+    let listed = parse(&call(&db, "aequi_get_transactions", json!({})).await);
+    assert_eq!(listed[0]["id"], id);
+    assert_eq!(listed[0]["contact_id"], contact);
+
+    args["contact_id"] = json!(99);
+    let result = call(&db, "aequi_create_transaction", args).await;
+    assert!(result.is_error());
+    assert!(
+        result.content[0]
+            .as_text()
+            .unwrap()
+            .contains("contact 99 does not exist"),
+        "{}",
+        result.content[0].as_text().unwrap()
+    );
+
+    let mut args = balanced_tx("2026-03-01", "Typo", 5000);
+    args["lines"][0]["debit"] = json!(5000);
+    let result = call(&db, "aequi_create_transaction", args).await;
+    assert!(result.is_error());
+    assert!(
+        result.content[0]
+            .as_text()
+            .unwrap()
+            .contains("lines[0].debit")
+    );
+    assert_eq!(count(&db, "transactions").await, 1);
+}
+
+// -----------------------------------------------------------------------
+// Import review
+// -----------------------------------------------------------------------
+
+async fn import_status(db: &aequi_storage::DbPool, id: i64) -> String {
+    let (status,): (String,) =
+        sqlx::query_as("SELECT status FROM imported_transactions WHERE id = ?")
+            .bind(id)
+            .fetch_one(db)
+            .await
+            .unwrap();
+    status
+}
+
+#[tokio::test]
+async fn pending_imports_across_batches() {
+    let db = test_db().await;
+    let a = insert_pending_import(&db, "b1", "AMAZON MARKETPLACE").await;
+    let b = insert_pending_import(&db, "b2", "COFFEE SHOP").await;
+
+    let ids = |v: &serde_json::Value| -> Vec<i64> {
+        v.as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["id"].as_i64().unwrap())
+            .collect()
+    };
+    let all = parse(&call(&db, "aequi_get_pending_imports", json!({})).await);
+    assert_eq!(ids(&all), [a, b]);
+    let only_b2 = parse(
+        &call(
+            &db,
+            "aequi_get_pending_imports",
+            json!({ "batch_id": "b2" }),
+        )
+        .await,
+    );
+    assert_eq!(ids(&only_b2), [b]);
+    let limited = parse(&call(&db, "aequi_get_pending_imports", json!({ "limit": 1 })).await);
+    assert_eq!(ids(&limited), [a]);
+    for limit in [0, 1001] {
+        let result = call(&db, "aequi_get_pending_imports", json!({ "limit": limit })).await;
+        assert!(result.is_error(), "limit {limit}");
+    }
+
+    // A matched categorization rule shows up as the suggested category.
+    let office = aequi_storage::get_account_by_code(&db, "5100")
+        .await
+        .unwrap()
+        .unwrap()
+        .id
+        .unwrap()
+        .0;
+    let r = call(
+        &db,
+        "aequi_save_categorization_rule",
+        json!({ "name": "Amazon", "priority": 1, "match_pattern": "amazon", "match_type": "contains", "account_id": office }),
+    )
+    .await;
+    assert!(!r.is_error());
+    assert!(
+        !call(&db, "aequi_apply_rules", json!({ "batch_id": "b1" }))
+            .await
+            .is_error()
+    );
+    let all = parse(&call(&db, "aequi_get_pending_imports", json!({})).await);
+    assert_eq!(all[0]["status"], "categorized");
+    assert_eq!(all[0]["suggested_category"]["account_code"], "5100");
+    assert_eq!(
+        all[0]["suggested_category"]["account_name"],
+        "Office Supplies"
+    );
+    assert!(all[1]["suggested_category"].is_null());
+}
+
+#[tokio::test]
+async fn post_import_creates_ledger_entry() {
+    let db = test_db().await;
+    let payee = add_contact(&db, "Office Depot", false).await;
+    let out = insert_pending_import(&db, "b1", "OFFICE DEPOT").await;
+
+    let v = parse(
+        &call(
+            &db,
+            "aequi_post_import",
+            json!({ "imported_id": out, "bank_account_code": "1000", "category_account_code": "5100", "contact_id": payee }),
+        )
+        .await,
+    );
+    assert_eq!(v["status"], "posted");
+    let tx = v["transaction_id"].as_i64().unwrap();
+    // Negative import: money out of checking into the expense.
+    assert_eq!(posted(&db, tx, "5100").await, 1000);
+    assert_eq!(posted(&db, tx, "1000").await, -1000);
+    let (contact_id,): (Option<i64>,) =
+        sqlx::query_as("SELECT contact_id FROM transactions WHERE id = ?")
+            .bind(tx)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+    assert_eq!(contact_id, Some(payee));
+    assert_eq!(import_status(&db, out).await, "posted");
+
+    let again = call(
+        &db,
+        "aequi_post_import",
+        json!({ "imported_id": out, "bank_account_code": "1000", "category_account_code": "5100" }),
+    )
+    .await;
+    assert!(again.is_error());
+    assert!(
+        again.content[0]
+            .as_text()
+            .unwrap()
+            .contains("already posted")
+    );
+
+    // Positive import: money into checking from income.
+    let incoming = insert_import(&db, "b1", "CLIENT ACH", 5000).await;
+    let v = parse(
+        &call(
+            &db,
+            "aequi_post_import",
+            json!({ "imported_id": incoming, "bank_account_code": "1000", "category_account_code": "4000" }),
+        )
+        .await,
+    );
+    let tx = v["transaction_id"].as_i64().unwrap();
+    assert_eq!(posted(&db, tx, "1000").await, 5000);
+    assert_eq!(posted(&db, tx, "4000").await, -5000);
+
+    // No category and no rule, or a non-bank account: refused, nothing posted.
+    let mystery = insert_import(&db, "b1", "MYSTERY", -200).await;
+    for (args, expected) in [
+        (
+            json!({ "imported_id": mystery, "bank_account_code": "1000" }),
+            "no categorization rule",
+        ),
+        (
+            json!({ "imported_id": mystery, "bank_account_code": "5100", "category_account_code": "5010" }),
+            "bank (asset) or card (liability)",
+        ),
+    ] {
+        let result = call(&db, "aequi_post_import", args).await;
+        let text = result.content[0].as_text().unwrap();
+        assert!(result.is_error(), "{expected}: {text}");
+        assert!(text.contains(expected), "{expected}: {text}");
+    }
+    assert_eq!(import_status(&db, mystery).await, "pending");
+    assert_eq!(count(&db, "transactions").await, 2);
+}
+
+#[tokio::test]
+async fn ignore_import_dismisses_it() {
+    let db = test_db().await;
+    let id = insert_pending_import(&db, "b1", "TRANSFER TO SAVINGS").await;
+
+    let v = parse(&call(&db, "aequi_ignore_import", json!({ "imported_id": id })).await);
+    assert_eq!(v["status"], "ignored");
+    assert_eq!(import_status(&db, id).await, "ignored");
+    let pending = parse(&call(&db, "aequi_get_pending_imports", json!({})).await);
+    assert_eq!(pending, json!([]));
+
+    let again = call(&db, "aequi_ignore_import", json!({ "imported_id": id })).await;
+    assert!(again.is_error());
+    assert!(
+        again.content[0]
+            .as_text()
+            .unwrap()
+            .contains("already ignored")
+    );
+    let post = call(
+        &db,
+        "aequi_post_import",
+        json!({ "imported_id": id, "bank_account_code": "1000", "category_account_code": "5100" }),
+    )
+    .await;
+    assert!(post.is_error());
+    assert_eq!(count(&db, "transactions").await, 0);
+}
+
+// -----------------------------------------------------------------------
+// 1099-NEC summary
+// -----------------------------------------------------------------------
+
+#[tokio::test]
+async fn summary_1099_counts_bank_payments_to_contractors() {
+    let db = test_db().await;
+    let big = add_contact(&db, "Big Contractor", true).await;
+    let small = aequi_storage::insert_contact(
+        &db,
+        "Small Contractor",
+        None,
+        None,
+        None,
+        "vendor",
+        true,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let client = add_contact(&db, "Client", false).await;
+
+    let pay = |contact: i64, cents: i64, from: &'static str, date: &'static str| {
+        let db = db.clone();
+        async move {
+            let args = json!({
+                "date": date,
+                "description": "Contract work",
+                "contact_id": contact,
+                "lines": [
+                    { "account_code": "5080", "debit_cents": cents, "credit_cents": 0 },
+                    { "account_code": from, "debit_cents": 0, "credit_cents": cents }
+                ]
+            });
+            parse(&call(&db, "aequi_create_transaction", args).await);
+        }
+    };
+    pay(big, 150_000, "1000", "2026-02-01").await;
+    pay(big, 60_000, "1000", "2026-05-01").await;
+    pay(big, 500_000, "2000", "2026-06-01").await; // by card: 1099-K, not NEC
+    pay(big, 70_000, "1000", "2025-12-31").await;
+    pay(small, 50_000, "1000", "2026-03-01").await;
+    pay(client, 900_000, "1000", "2026-03-01").await; // not a contractor
+
+    let v = parse(&call(&db, "aequi_get_1099_summary", json!({ "year": 2026 })).await);
+    assert_eq!(v["year"], 2026);
+    assert_eq!(v["threshold_cents"], 200_000);
+    assert_eq!(v["contractors_over_threshold"], 1);
+    assert_eq!(
+        v["contractors"],
+        json!([
+            { "contact_id": big, "name": "Big Contractor", "paid_cents": 210_000, "over_threshold": true, "has_tax_id": true },
+            { "contact_id": small, "name": "Small Contractor", "paid_cents": 50_000, "over_threshold": false, "has_tax_id": false }
+        ])
+    );
+
+    let v = parse(&call(&db, "aequi_get_1099_summary", json!({ "year": 2025 })).await);
+    assert_eq!(v["threshold_cents"], 60_000);
+    assert_eq!(v["contractors"][0]["paid_cents"], 70_000);
+    assert_eq!(v["contractors"][0]["over_threshold"], true);
+    assert_eq!(v["contractors"][1]["paid_cents"], 0);
+
+    assert!(
+        !call(&db, "aequi_get_1099_summary", json!({}))
+            .await
+            .is_error()
+    );
+    assert!(
+        call(&db, "aequi_get_1099_summary", json!({ "year": 1999 }))
+            .await
+            .is_error()
+    );
 }

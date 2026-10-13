@@ -4,7 +4,20 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+- **Invoice line items:** invoices have line items, sales-tax lines and a discount (desktop app, HTTP API and MCP); drafts can be edited, unpaid invoices voided, and every view shows subtotal, tax, total, paid and balance.
+- **Cash-basis posting:** recording an invoice payment posts it to the ledger (deposit account → Services Revenue, with the sales-tax share to Taxes Payable).
+- **Payees and 1099-NEC:** transactions can carry a payee/payer contact; the 1099-NEC summary totals payments made to contractors from bank accounts (card payments are reported on 1099-K).
+- **Import review:** queued bank transactions (e.g. from Plaid) can be posted to the ledger or ignored (`/api/v1/imports/*`, MCP `aequi_post_import` / `aequi_ignore_import`).
+- **AI receipt extraction:** MCP tools let an agent view a pending receipt image and fill in its fields for review.
+- **Tax estimate:** the qualified business income (QBI) deduction, and the 110% prior-year safe harbor when last year's AGI exceeded $150,000; last year's filed total tax and AGI can be entered to make the safe harbor exact.
+- **Linear work items:** a configurable hours-per-point conversion for story-point estimates.
+- **Signed auto-updates:** releases are built with tauri-action, carry signed updater bundles and `latest.json`, and are published as the latest (non-pre) release with `SHA256SUMS.txt`. See CONTRIBUTING for the one-time signing-key setup.
+
 ### Changed
+- **CI:** GitHub Actions on current major versions (Trivy pinned to a commit), Node 24, and tests for all crates; coverage uses tarpaulin's LLVM engine.
+- Receipt image decoding is limited to JPEG, PNG, GIF, WebP, TIFF and BMP.
+- Repository URLs point to MacCracken/aequi.
 - **Toolchain:** Rust edition 2024 (MSRV 1.94, resolver 3); Docker builder `rust:1.99-slim-bookworm`.
 - **Rust dependencies** updated to latest, including sqlx 0.9, reqwest 0.13, toml 1.1, sha2 0.11, notify 8, tower-http 0.7, directories 6, jsonwebtoken 11 (`aws_lc_rs` backend), typst 0.15 / typst-as-lib 0.17.
 - **Frontend dependencies** updated to latest: TypeScript 7, Vite 8, @vitejs/plugin-react 6, Tailwind 4.3, React 19.3, react-router 7.18, @tauri-apps/* 2.12 (`npm audit`: 0 vulnerabilities).
@@ -30,6 +43,7 @@ All notable changes to this project will be documented in this file.
 - Import parsers: XML/QFX OFX amounts imported as 0, decimal commas read 100×, CSV debit/credit sign and date-fallback errors, duplicate auto-matches, Wave parenthesized negatives, rule files that could never load.
 - Receipt watch folder missed moved-in files and partial writes and dropped events under load; OCR total/tax extraction picked subtotals and rates.
 - MCP JSON-RPC conformance (notifications, error ids, `ping`), non-atomic transaction writes, strict argument validation, and receipt files copied into attachments.
+- Coverage CI failed to compile (`pulp` under tarpaulin's `-C link-dead-code`); the Docker image check started the server without authentication.
 
 ## [2026.3.18] - 2026-03-18
 

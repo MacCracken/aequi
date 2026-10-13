@@ -63,6 +63,20 @@ pub enum PlaidError {
     Deserialize(String),
 }
 
+/// Plaid's error code when an Item's transactions changed while a
+/// `/transactions/sync` pagination loop was running.
+pub const SYNC_MUTATION_DURING_PAGINATION: &str = "TRANSACTIONS_SYNC_MUTATION_DURING_PAGINATION";
+
+impl PlaidError {
+    /// Plaid's `error_code` for API errors (e.g. `ITEM_LOGIN_REQUIRED`).
+    pub fn error_code(&self) -> Option<&str> {
+        match self {
+            PlaidError::Api { error_code, .. } => Some(error_code),
+            _ => None,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // API request/response types
 // ---------------------------------------------------------------------------
@@ -191,6 +205,121 @@ pub struct PlaidBalances {
     pub iso_currency_code: Option<String>,
 }
 
+#[derive(Serialize)]
+struct TransactionsSyncRequest<'a> {
+    client_id: &'a str,
+    secret: &'a str,
+    access_token: &'a str,
+    /// Omitted on the first sync of an Item: Plaid then returns its whole history.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cursor: Option<&'a str>,
+    count: u32,
+}
+
+/// One page of a `/transactions/sync` response.
+#[derive(Debug, Deserialize, Serialize)]
+pub struct TransactionsSyncPage {
+    #[serde(default)]
+    pub accounts: Vec<PlaidAccount>,
+    #[serde(default)]
+    pub added: Vec<PlaidTransaction>,
+    #[serde(default)]
+    pub modified: Vec<PlaidTransaction>,
+    #[serde(default)]
+    pub removed: Vec<RemovedTransaction>,
+    pub next_cursor: String,
+    pub has_more: bool,
+    #[serde(default)]
+    pub request_id: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct RemovedTransaction {
+    pub transaction_id: String,
+    #[serde(default)]
+    pub account_id: Option<String>,
+}
+
+/// Every change to an Item's transactions since a cursor, across all pages.
+/// Apply `added`, then `modified`, then `removed`.
+#[derive(Debug, Default)]
+pub struct TransactionsSyncResult {
+    /// The Item's accounts (for display names).
+    pub accounts: Vec<PlaidAccount>,
+    pub added: Vec<PlaidTransaction>,
+    pub modified: Vec<PlaidTransaction>,
+    /// Ids of transactions Plaid no longer reports.
+    pub removed: Vec<String>,
+    /// Cursor for the next sync. Persist it only once the changes above are
+    /// saved, or they are lost: Plaid won't send them again for this cursor.
+    pub next_cursor: String,
+}
+
+/// Plaid's maximum `count` for `/transactions/sync`.
+const SYNC_PAGE_SIZE: u32 = 500;
+
+/// How many times one sync runs its pagination loop before giving up when
+/// Plaid keeps reporting `TRANSACTIONS_SYNC_MUTATION_DURING_PAGINATION`.
+const SYNC_MAX_ATTEMPTS: u32 = 4;
+
+/// Follow `has_more` from `start_cursor`, fetching each page with
+/// `fetch_page`. If the Item changes mid-loop, Plaid requires restarting the
+/// whole loop from the cursor it began with, discarding the pages so far.
+async fn sync_all_pages<F, Fut>(
+    start_cursor: Option<&str>,
+    mut fetch_page: F,
+) -> Result<TransactionsSyncResult, PlaidError>
+where
+    F: FnMut(Option<String>) -> Fut,
+    Fut: std::future::Future<Output = Result<TransactionsSyncPage, PlaidError>>,
+{
+    let start_cursor = start_cursor.filter(|c| !c.is_empty());
+    let mut attempt = 1;
+    'restart: loop {
+        let mut result = TransactionsSyncResult::default();
+        let mut cursor = start_cursor.map(str::to_string);
+        loop {
+            let page = match fetch_page(cursor.clone()).await {
+                Ok(page) => page,
+                Err(e)
+                    if e.error_code() == Some(SYNC_MUTATION_DURING_PAGINATION)
+                        && attempt < SYNC_MAX_ATTEMPTS =>
+                {
+                    attempt += 1;
+                    continue 'restart;
+                }
+                Err(e) => return Err(e),
+            };
+
+            for account in page.accounts {
+                if !result
+                    .accounts
+                    .iter()
+                    .any(|a| a.account_id == account.account_id)
+                {
+                    result.accounts.push(account);
+                }
+            }
+            result.added.extend(page.added);
+            result.modified.extend(page.modified);
+            result
+                .removed
+                .extend(page.removed.into_iter().map(|r| r.transaction_id));
+
+            if !page.has_more {
+                result.next_cursor = page.next_cursor;
+                return Ok(result);
+            }
+            if page.next_cursor.is_empty() || cursor.as_deref() == Some(page.next_cursor.as_str()) {
+                return Err(PlaidError::Deserialize(
+                    "Plaid reported more transactions without advancing the cursor".to_string(),
+                ));
+            }
+            cursor = Some(page.next_cursor);
+        }
+    }
+}
+
 /// Plaid API error response body.
 #[derive(Debug, Deserialize)]
 struct PlaidApiErrorBody {
@@ -206,20 +335,33 @@ struct PlaidApiErrorBody {
 pub struct PlaidClient {
     http: reqwest::Client,
     config: PlaidConfig,
+    base_url: String,
 }
 
 impl PlaidClient {
     pub fn new(config: PlaidConfig) -> Self {
+        let base_url = config.environment.base_url().to_string();
+        Self::with_base_url(config, base_url)
+    }
+
+    /// A client that sends requests to `base_url` instead of the
+    /// environment's Plaid host (a local test double or an egress proxy).
+    pub fn with_base_url(config: PlaidConfig, base_url: impl Into<String>) -> Self {
         let http = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
             .connect_timeout(std::time::Duration::from_secs(10))
             .build()
             .expect("failed to build HTTP client");
-        Self { http, config }
+        let base_url = base_url.into().trim_end_matches('/').to_string();
+        Self {
+            http,
+            config,
+            base_url,
+        }
     }
 
     fn base_url(&self) -> &str {
-        self.config.environment.base_url()
+        &self.base_url
     }
 
     /// Create a Link token for initializing Plaid Link in the frontend.
@@ -330,6 +472,44 @@ impl PlaidClient {
             total_transactions: total,
             request_id,
         })
+    }
+
+    /// Fetch every change to the Item's transactions since `cursor` with
+    /// `/transactions/sync`, following `has_more` pagination. `None` (or an
+    /// empty cursor) starts from the beginning of the Item's history.
+    ///
+    /// The result's `next_cursor` must be stored for the next call only after
+    /// its changes are saved.
+    pub async fn transactions_sync(
+        &self,
+        access_token: &str,
+        cursor: Option<&str>,
+    ) -> Result<TransactionsSyncResult, PlaidError> {
+        sync_all_pages(cursor, |page_cursor| {
+            self.transactions_sync_page(access_token, page_cursor)
+        })
+        .await
+    }
+
+    async fn transactions_sync_page(
+        &self,
+        access_token: &str,
+        cursor: Option<String>,
+    ) -> Result<TransactionsSyncPage, PlaidError> {
+        let body = TransactionsSyncRequest {
+            client_id: &self.config.client_id,
+            secret: &self.config.secret,
+            access_token,
+            cursor: cursor.as_deref(),
+            count: SYNC_PAGE_SIZE,
+        };
+        let resp = self
+            .http
+            .post(format!("{}/transactions/sync", self.base_url()))
+            .json(&body)
+            .send()
+            .await?;
+        self.handle_response(resp).await
     }
 
     async fn handle_response<T: serde::de::DeserializeOwned>(
@@ -771,6 +951,216 @@ mod tests {
         assert!(tx.iso_currency_code.is_none());
         assert!(tx.merchant_name.is_none());
         assert_eq!(tx.amount_cents(), 1000);
+    }
+
+    /// Drive a future whose awaits are all immediately ready (the fake
+    /// page fetchers below), without an async runtime.
+    fn block_on<F: std::future::Future>(fut: F) -> F::Output {
+        let mut fut = std::pin::pin!(fut);
+        let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+        loop {
+            if let std::task::Poll::Ready(out) = fut.as_mut().poll(&mut cx) {
+                return out;
+            }
+        }
+    }
+
+    fn sync_page(
+        added: &[&str],
+        removed: &[&str],
+        next_cursor: &str,
+        has_more: bool,
+    ) -> Result<TransactionsSyncPage, PlaidError> {
+        let tx = |id: &&str| {
+            serde_json::json!({
+                "transaction_id": id, "name": "Shop", "amount": 1.25, "date": "2026-03-10",
+                "account_id": "acc_1", "pending": false, "iso_currency_code": "USD"
+            })
+        };
+        let removed: Vec<_> = removed
+            .iter()
+            .map(|id| serde_json::json!({"transaction_id": id, "account_id": "acc_1"}))
+            .collect();
+        Ok(serde_json::from_value(serde_json::json!({
+            "accounts": [{
+                "account_id": "acc_1", "name": "Checking", "type": "depository",
+                "subtype": "checking",
+                "balances": {"available": null, "current": null, "limit": null, "iso_currency_code": "USD"}
+            }],
+            "added": added.iter().map(tx).collect::<Vec<_>>(),
+            "modified": [],
+            "removed": removed,
+            "next_cursor": next_cursor,
+            "has_more": has_more,
+            "request_id": "req"
+        }))
+        .unwrap())
+    }
+
+    fn mutation_error() -> Result<TransactionsSyncPage, PlaidError> {
+        Err(PlaidError::Api {
+            error_type: "TRANSACTIONS_ERROR".into(),
+            error_code: SYNC_MUTATION_DURING_PAGINATION.into(),
+            error_message: "Underlying transaction data changed since last page was fetched".into(),
+        })
+    }
+
+    /// Run `sync_all_pages` against scripted responses; returns the result
+    /// and the cursor sent with each request.
+    fn run_sync(
+        start: Option<&str>,
+        responses: Vec<Result<TransactionsSyncPage, PlaidError>>,
+    ) -> (
+        Result<TransactionsSyncResult, PlaidError>,
+        Vec<Option<String>>,
+    ) {
+        let mut responses = std::collections::VecDeque::from(responses);
+        let mut cursors = Vec::new();
+        let result = block_on(sync_all_pages(start, |cursor| {
+            cursors.push(cursor);
+            std::future::ready(responses.pop_front().expect("unexpected extra request"))
+        }));
+        assert!(responses.is_empty(), "not every scripted page was fetched");
+        (result, cursors)
+    }
+
+    #[test]
+    fn sync_follows_has_more_and_returns_last_cursor() {
+        let (result, cursors) = run_sync(
+            None,
+            vec![
+                sync_page(&["t1", "t2"], &[], "c1", true),
+                sync_page(&["t3"], &["t0"], "c2", false),
+            ],
+        );
+        let result = result.unwrap();
+        let ids: Vec<_> = result
+            .added
+            .iter()
+            .map(|t| t.transaction_id.as_str())
+            .collect();
+        assert_eq!(ids, ["t1", "t2", "t3"]);
+        assert_eq!(result.removed, ["t0"]);
+        assert_eq!(result.next_cursor, "c2");
+        // Accounts repeat on every page; they are reported once.
+        assert_eq!(result.accounts.len(), 1);
+        assert_eq!(cursors, [None, Some("c1".to_string())]);
+    }
+
+    #[test]
+    fn sync_treats_empty_cursor_as_initial_sync() {
+        let (result, cursors) = run_sync(Some(""), vec![sync_page(&[], &[], "c1", false)]);
+        assert_eq!(result.unwrap().next_cursor, "c1");
+        assert_eq!(cursors, [None]);
+    }
+
+    #[test]
+    fn sync_restarts_from_original_cursor_on_mutation() {
+        let (result, cursors) = run_sync(
+            Some("c0"),
+            vec![
+                sync_page(&["stale"], &[], "c1", true),
+                mutation_error(),
+                sync_page(&["t1"], &[], "c1b", true),
+                sync_page(&["t2"], &[], "c2", false),
+            ],
+        );
+        let result = result.unwrap();
+        // Pages from the abandoned loop are discarded.
+        let ids: Vec<_> = result
+            .added
+            .iter()
+            .map(|t| t.transaction_id.as_str())
+            .collect();
+        assert_eq!(ids, ["t1", "t2"]);
+        assert_eq!(result.next_cursor, "c2");
+        let sent: Vec<_> = cursors.iter().map(|c| c.as_deref()).collect();
+        assert_eq!(sent, [Some("c0"), Some("c1"), Some("c0"), Some("c1b")]);
+    }
+
+    #[test]
+    fn sync_gives_up_after_repeated_mutations() {
+        let responses = (0..SYNC_MAX_ATTEMPTS).map(|_| mutation_error()).collect();
+        let (result, cursors) = run_sync(Some("c0"), responses);
+        let err = result.unwrap_err();
+        assert_eq!(err.error_code(), Some(SYNC_MUTATION_DURING_PAGINATION));
+        assert_eq!(cursors.len(), SYNC_MAX_ATTEMPTS as usize);
+        assert!(cursors.iter().all(|c| c.as_deref() == Some("c0")));
+    }
+
+    #[test]
+    fn sync_does_not_retry_other_errors() {
+        let (result, cursors) = run_sync(
+            Some("c0"),
+            vec![Err(PlaidError::Api {
+                error_type: "ITEM_ERROR".into(),
+                error_code: "ITEM_LOGIN_REQUIRED".into(),
+                error_message: "login required".into(),
+            })],
+        );
+        assert_eq!(
+            result.unwrap_err().error_code(),
+            Some("ITEM_LOGIN_REQUIRED")
+        );
+        assert_eq!(cursors.len(), 1);
+    }
+
+    #[test]
+    fn sync_rejects_has_more_without_a_new_cursor() {
+        let (result, _) = run_sync(Some("c0"), vec![sync_page(&[], &[], "c0", true)]);
+        assert!(matches!(result, Err(PlaidError::Deserialize(_))));
+    }
+
+    #[test]
+    fn sync_request_omits_missing_cursor() {
+        let body = |cursor| {
+            serde_json::to_value(TransactionsSyncRequest {
+                client_id: "id",
+                secret: "s",
+                access_token: "tok",
+                cursor,
+                count: SYNC_PAGE_SIZE,
+            })
+            .unwrap()
+        };
+        assert!(body(None).get("cursor").is_none());
+        assert_eq!(body(Some("c1"))["cursor"], "c1");
+        assert_eq!(body(None)["count"], 500);
+    }
+
+    #[test]
+    fn sync_page_deserializes_plaid_response() {
+        // Plaid omits fields this client doesn't use (and the deprecated
+        // `category`); removed entries are objects.
+        let json = r#"{
+            "added": [{
+                "transaction_id": "t1", "name": "Coffee", "amount": 4.5, "date": "2026-03-10",
+                "account_id": "acc_1", "pending": false, "iso_currency_code": "USD",
+                "merchant_name": "Cafe", "personal_finance_category": {"primary": "FOOD_AND_DRINK"}
+            }],
+            "modified": [],
+            "removed": [{"transaction_id": "t0", "account_id": "acc_1"}],
+            "next_cursor": "c1",
+            "has_more": false,
+            "request_id": "req_1",
+            "transactions_update_status": "HISTORICAL_UPDATE_COMPLETE"
+        }"#;
+        let page: TransactionsSyncPage = serde_json::from_str(json).unwrap();
+        assert!(page.accounts.is_empty());
+        assert_eq!(page.added[0].amount_cents(), 450);
+        assert!(page.added[0].category.is_none());
+        assert_eq!(page.removed[0].transaction_id, "t0");
+    }
+
+    #[test]
+    fn client_base_url_override() {
+        let config = PlaidConfig {
+            client_id: "id".into(),
+            secret: "secret".into(),
+            environment: PlaidEnvironment::Production,
+        };
+        let client = PlaidClient::with_base_url(config, "http://127.0.0.1:9999/");
+        assert_eq!(client.base_url(), "http://127.0.0.1:9999");
     }
 
     #[test]

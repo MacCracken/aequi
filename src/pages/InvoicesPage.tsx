@@ -1,42 +1,40 @@
 import { useEffect, useState, useMemo, useRef, useCallback } from "react";
 import {
   getInvoices,
-  getInvoiceAging,
   getContacts,
-  createInvoice,
+  getAccounts,
   errorMessage,
-  type InvoiceRecord,
+  type Account,
   type ContactRecord,
+  type InvoiceDetail,
+  type InvoiceSummary,
 } from "../lib/api";
-import { formatDate, todayLocal } from "../lib/format";
+import { daysUntil, formatCents, formatDate } from "../lib/format";
 import { TableSkeleton } from "../components/Skeleton";
 import { useToast } from "../components/Toast";
+import { InvoiceForm } from "../components/InvoiceForm";
+import { InvoiceDetailPanel } from "../components/InvoiceDetailPanel";
+import { InvoiceStatusBadge } from "../components/InvoiceStatusBadge";
 
-function statusBadge(status: string) {
-  const colors: Record<string, string> = {
-    Draft: "bg-gray-200 text-gray-800",
-    Sent: "bg-blue-100 text-blue-800",
-    Viewed: "bg-indigo-100 text-indigo-800",
-    PartiallyPaid: "bg-yellow-100 text-yellow-900",
-    Paid: "bg-green-100 text-green-800",
-    Void: "bg-red-100 text-red-800",
-  };
-  return (
-    <span
-      className={`px-2 py-0.5 rounded-full text-xs font-medium ${colors[status] || "bg-gray-100"}`}
-    >
-      {status}
-    </span>
-  );
+/** What occupies the panel above the list. */
+type Panel =
+  | { kind: "none" }
+  | { kind: "create" }
+  | { kind: "detail"; id: number }
+  | { kind: "edit"; invoice: InvoiceDetail };
+
+/** Billed invoices with money still owed (drafts are not receivables yet). */
+function isReceivable(inv: InvoiceSummary): boolean {
+  return inv.balance_cents > 0 && inv.status_type !== "Draft" && inv.status_type !== "Void";
 }
 
 export function InvoicesPage() {
-  const [invoices, setInvoices] = useState<InvoiceRecord[]>([]);
-  const [aging, setAging] = useState<InvoiceRecord[]>([]);
+  const [invoices, setInvoices] = useState<InvoiceSummary[]>([]);
   const [contacts, setContacts] = useState<ContactRecord[]>([]);
+  const [accounts, setAccounts] = useState<Account[]>([]);
   const [loading, setLoading] = useState(true);
   const [tab, setTab] = useState<"all" | "aging">("all");
-  const [showForm, setShowForm] = useState(false);
+  const [panel, setPanel] = useState<Panel>({ kind: "none" });
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("");
   const { toast } = useToast();
@@ -46,12 +44,12 @@ export function InvoicesPage() {
   const refresh = useCallback(() => {
     const id = ++requestIdRef.current;
     setLoading(true);
-    Promise.all([getInvoices(), getInvoiceAging(), getContacts()])
-      .then(([inv, ag, cont]) => {
+    Promise.all([getInvoices(), getContacts(), getAccounts()])
+      .then(([inv, cont, accts]) => {
         if (id !== requestIdRef.current) return;
         setInvoices(inv);
-        setAging(ag);
         setContacts(cont);
+        setAccounts(accts);
       })
       .catch((e) => {
         if (id === requestIdRef.current) toast("error", errorMessage(e));
@@ -67,6 +65,18 @@ export function InvoicesPage() {
     return () => { ref.current++; };
   }, [refresh]);
 
+  const contactNames = useMemo(() => new Map(contacts.map((c) => [c.id, c.name])), [contacts]);
+  const contactName = useCallback(
+    (contactId: number) => contactNames.get(contactId) ?? `Contact #${contactId}`,
+    [contactNames],
+  );
+
+  // Aging: outstanding receivables, oldest due date first.
+  const aging = useMemo(
+    () => invoices.filter(isReceivable).sort((a, b) => a.due_date.localeCompare(b.due_date)),
+    [invoices],
+  );
+
   const displayed = tab === "all" ? invoices : aging;
 
   const filtered = useMemo(() => {
@@ -76,14 +86,17 @@ export function InvoicesPage() {
       result = result.filter(
         (inv) =>
           inv.invoice_number.toLowerCase().includes(q) ||
-          String(inv.contact_id).includes(q)
+          contactName(inv.contact_id).toLowerCase().includes(q)
       );
     }
     if (statusFilter) {
       result = result.filter((inv) => inv.status_type === statusFilter);
     }
     return result;
-  }, [displayed, search, statusFilter]);
+  }, [displayed, search, statusFilter, contactName]);
+
+  const agingTotal = aging.reduce((sum, inv) => sum + inv.balance_cents, 0);
+  const selectedId = panel.kind === "detail" ? panel.id : panel.kind === "edit" ? panel.invoice.id : null;
 
   if (loading && invoices.length === 0) {
     return (
@@ -114,28 +127,64 @@ export function InvoicesPage() {
             </button>
           </div>
           <button
-            onClick={() => setShowForm(!showForm)}
+            onClick={() => setPanel(panel.kind === "create" ? { kind: "none" } : { kind: "create" })}
             className="px-4 py-2 text-sm font-medium bg-primary text-white rounded-md hover:bg-primary-hover transition-colors"
           >
-            {showForm ? "Cancel" : "New Invoice"}
+            {panel.kind === "create" ? "Cancel" : "New Invoice"}
           </button>
         </div>
       </div>
 
-      {showForm && (
+      {panel.kind === "create" && (
         <InvoiceForm
+          key="new"
           contacts={contacts}
-          onCreated={() => {
-            setShowForm(false);
+          onSaved={(inv) => {
+            setPanel({ kind: "detail", id: inv.id });
             refresh();
-            toast("success", "Invoice created");
+            toast("success", `Invoice ${inv.invoice_number} created`);
           }}
+          onCancel={() => setPanel({ kind: "none" })}
           onError={(msg) => toast("error", msg)}
         />
       )}
 
+      {panel.kind === "edit" && (
+        <InvoiceForm
+          key={`edit-${panel.invoice.id}`}
+          contacts={contacts}
+          initial={panel.invoice}
+          onSaved={(inv) => {
+            setPanel({ kind: "detail", id: inv.id });
+            refresh();
+            toast("success", `Invoice ${inv.invoice_number} updated`);
+          }}
+          onCancel={() => setPanel({ kind: "detail", id: panel.invoice.id })}
+          onError={(msg) => toast("error", msg)}
+        />
+      )}
+
+      {panel.kind === "detail" && (
+        <InvoiceDetailPanel
+          key={panel.id}
+          invoiceId={panel.id}
+          contactName={contactName}
+          accounts={accounts}
+          onClose={() => setPanel({ kind: "none" })}
+          onEdit={(invoice) => setPanel({ kind: "edit", invoice })}
+          onChanged={refresh}
+        />
+      )}
+
+      {tab === "aging" && aging.length > 0 && (
+        <p className="text-sm text-text-muted mb-3">
+          Outstanding receivables:{" "}
+          <span className="font-semibold text-text">{formatCents(agingTotal)}</span>
+        </p>
+      )}
+
       {/* Filters */}
-      <div className="flex gap-3 mb-4">
+      <div className="flex flex-wrap gap-3 mb-4">
         <input
           type="text"
           placeholder="Search invoices..."
@@ -146,6 +195,7 @@ export function InvoicesPage() {
         <select
           value={statusFilter}
           onChange={(e) => setStatusFilter(e.target.value)}
+          aria-label="Filter by status"
           className="px-3 py-1.5 text-sm border border-border rounded-md bg-bg focus:outline-none focus:border-primary"
         >
           <option value="">All statuses</option>
@@ -160,7 +210,11 @@ export function InvoicesPage() {
 
       {filtered.length === 0 ? (
         <p className="text-text-muted text-sm">
-          {invoices.length === 0 ? "No invoices yet. Create one to get started." : "No invoices match your filters."}
+          {invoices.length === 0
+            ? "No invoices yet. Create one to get started."
+            : tab === "aging" && aging.length === 0
+              ? "No outstanding invoices."
+              : "No invoices match your filters."}
         </p>
       ) : (
         <div className="overflow-x-auto">
@@ -169,21 +223,62 @@ export function InvoicesPage() {
               <tr className="text-left text-text-muted border-b border-border">
                 <th className="py-2 pr-4">Number</th>
                 <th className="py-2 pr-4">Contact</th>
-                <th className="py-2 pr-4">Status</th>
-                <th className="py-2 pr-4">Issue Date</th>
+                <th className="py-2 pr-4 hidden md:table-cell">Status</th>
+                <th className="py-2 pr-4 hidden md:table-cell">Issue Date</th>
                 <th className="py-2 pr-4">Due Date</th>
+                <th className="py-2 pr-4 text-right hidden md:table-cell">Total</th>
+                <th className="py-2 pr-4 text-right hidden md:table-cell">Paid</th>
+                <th className="py-2 text-right">Balance</th>
               </tr>
             </thead>
             <tbody>
               {filtered.map((inv) => {
-                const contact = contacts.find((c) => c.id === inv.contact_id);
+                const dueIn = daysUntil(inv.due_date);
+                const overdue = isReceivable(inv) && dueIn !== null && dueIn < 0;
+                const isVoid = inv.status_type === "Void";
+                const selected = inv.id === selectedId;
                 return (
-                  <tr key={inv.id} className="border-b border-border/50">
-                    <td className="py-2 pr-4 font-mono">{inv.invoice_number}</td>
-                    <td className="py-2 pr-4">{contact?.name || `#${inv.contact_id}`}</td>
-                    <td className="py-2 pr-4">{statusBadge(inv.status_type)}</td>
-                    <td className="py-2 pr-4">{formatDate(inv.issue_date)}</td>
-                    <td className="py-2 pr-4">{formatDate(inv.due_date)}</td>
+                  <tr
+                    key={inv.id}
+                    onClick={() => setPanel({ kind: "detail", id: inv.id })}
+                    className={`border-b border-border/50 cursor-pointer hover:bg-border/30 ${selected ? "bg-primary/5" : ""}`}
+                  >
+                    <td className="py-2 pr-4 font-mono whitespace-nowrap">
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setPanel({ kind: "detail", id: inv.id });
+                        }}
+                        aria-current={selected || undefined}
+                        className="text-primary hover:underline"
+                      >
+                        {inv.invoice_number}
+                      </button>
+                      <span className="block mt-0.5 md:hidden">
+                        <InvoiceStatusBadge status={inv.status_type} />
+                      </span>
+                    </td>
+                    <td className="py-2 pr-4">{contactName(inv.contact_id)}</td>
+                    <td className="py-2 pr-4 hidden md:table-cell"><InvoiceStatusBadge status={inv.status_type} /></td>
+                    <td className="py-2 pr-4 whitespace-nowrap hidden md:table-cell">{formatDate(inv.issue_date)}</td>
+                    <td className="py-2 pr-4 whitespace-nowrap">
+                      {formatDate(inv.due_date)}
+                      {overdue && dueIn !== null && (
+                        <span className="block text-xs text-danger font-medium">
+                          {-dueIn} {dueIn === -1 ? "day" : "days"} overdue
+                        </span>
+                      )}
+                    </td>
+                    <td className={`py-2 pr-4 text-right font-mono whitespace-nowrap hidden md:table-cell ${isVoid ? "line-through text-text-muted" : ""}`}>
+                      {formatCents(inv.total_cents)}
+                    </td>
+                    <td className="py-2 pr-4 text-right font-mono whitespace-nowrap hidden md:table-cell">
+                      {formatCents(inv.paid_cents)}
+                    </td>
+                    <td className="py-2 text-right font-mono whitespace-nowrap">
+                      {isVoid ? "—" : formatCents(inv.balance_cents)}
+                    </td>
                   </tr>
                 );
               })}
@@ -192,151 +287,5 @@ export function InvoicesPage() {
         </div>
       )}
     </div>
-  );
-}
-
-function InvoiceForm({
-  contacts,
-  onCreated,
-  onError,
-}: {
-  contacts: ContactRecord[];
-  onCreated: () => void;
-  onError: (msg: string) => void;
-}) {
-  const [invoiceNumber, setInvoiceNumber] = useState("");
-  const [contactId, setContactId] = useState<number | "">("");
-  const [issueDate, setIssueDate] = useState(todayLocal);
-  const [dueDate, setDueDate] = useState("");
-  const [notes, setNotes] = useState("");
-  const [terms, setTerms] = useState("");
-  const [submitting, setSubmitting] = useState(false);
-  const submittingRef = useRef(false);
-
-  async function handleSubmit(e: React.FormEvent) {
-    e.preventDefault();
-    if (submittingRef.current) return;
-    if (!invoiceNumber.trim()) {
-      onError("Invoice number is required");
-      return;
-    }
-    if (!contactId) {
-      onError("Please select a contact");
-      return;
-    }
-    if (!dueDate) {
-      onError("Due date is required");
-      return;
-    }
-    if (dueDate < issueDate) {
-      onError("Due date must be on or after issue date");
-      return;
-    }
-
-    submittingRef.current = true;
-    setSubmitting(true);
-    try {
-      await createInvoice({
-        invoice_number: invoiceNumber.trim(),
-        contact_id: contactId as number,
-        issue_date: issueDate,
-        due_date: dueDate,
-        notes: notes.trim() || undefined,
-        terms: terms.trim() || undefined,
-      });
-      onCreated();
-    } catch (err) {
-      onError(errorMessage(err));
-    } finally {
-      submittingRef.current = false;
-      setSubmitting(false);
-    }
-  }
-
-  return (
-    <form onSubmit={handleSubmit} className="bg-surface rounded-lg border border-border p-4 space-y-4 mb-4">
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        <div>
-          <label htmlFor="inv-invoiceNumber" className="block text-xs text-text-muted mb-1">Invoice Number *</label>
-          <input
-            id="inv-invoiceNumber"
-            type="text"
-            value={invoiceNumber}
-            onChange={(e) => setInvoiceNumber(e.target.value)}
-            required
-            placeholder="e.g. INV-001"
-            className="w-full px-3 py-1.5 text-sm border border-border rounded-md bg-bg focus:outline-none focus:border-primary"
-          />
-        </div>
-        <div>
-          <label htmlFor="inv-contactId" className="block text-xs text-text-muted mb-1">Contact *</label>
-          <select
-            id="inv-contactId"
-            value={contactId}
-            onChange={(e) => setContactId(e.target.value ? Number(e.target.value) : "")}
-            required
-            className="w-full px-3 py-1.5 text-sm border border-border rounded-md bg-bg focus:outline-none focus:border-primary"
-          >
-            <option value="">Select contact</option>
-            {contacts.map((c) => (
-              <option key={c.id} value={c.id}>
-                {c.name}
-              </option>
-            ))}
-          </select>
-        </div>
-        <div>
-          <label htmlFor="inv-issueDate" className="block text-xs text-text-muted mb-1">Issue Date</label>
-          <input
-            id="inv-issueDate"
-            type="date"
-            value={issueDate}
-            onChange={(e) => setIssueDate(e.target.value)}
-            required
-            className="w-full px-3 py-1.5 text-sm border border-border rounded-md bg-bg focus:outline-none focus:border-primary"
-          />
-        </div>
-        <div>
-          <label htmlFor="inv-dueDate" className="block text-xs text-text-muted mb-1">Due Date *</label>
-          <input
-            id="inv-dueDate"
-            type="date"
-            value={dueDate}
-            onChange={(e) => setDueDate(e.target.value)}
-            required
-            min={issueDate}
-            className="w-full px-3 py-1.5 text-sm border border-border rounded-md bg-bg focus:outline-none focus:border-primary"
-          />
-        </div>
-        <div>
-          <label htmlFor="inv-terms" className="block text-xs text-text-muted mb-1">Terms</label>
-          <input
-            id="inv-terms"
-            type="text"
-            value={terms}
-            onChange={(e) => setTerms(e.target.value)}
-            placeholder="e.g. Net 30"
-            className="w-full px-3 py-1.5 text-sm border border-border rounded-md bg-bg focus:outline-none focus:border-primary"
-          />
-        </div>
-        <div>
-          <label htmlFor="inv-notes" className="block text-xs text-text-muted mb-1">Notes</label>
-          <input
-            id="inv-notes"
-            type="text"
-            value={notes}
-            onChange={(e) => setNotes(e.target.value)}
-            className="w-full px-3 py-1.5 text-sm border border-border rounded-md bg-bg focus:outline-none focus:border-primary"
-          />
-        </div>
-      </div>
-      <button
-        type="submit"
-        disabled={submitting}
-        className="px-4 py-2 text-sm font-medium bg-primary text-white rounded-md hover:bg-primary-hover transition-colors disabled:opacity-50"
-      >
-        {submitting ? "Creating..." : "Create Invoice"}
-      </button>
-    </form>
   );
 }

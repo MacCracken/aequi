@@ -17,7 +17,7 @@ inputs:
   node-version:
     description: 'Node.js version for frontend build'
     required: false
-    default: '22'
+    default: '24'
   install-tauri-deps:
     description: 'Install Tauri system dependencies (webkit2gtk, etc.)'
     required: false
@@ -54,7 +54,7 @@ runs:
         components: ${{ inputs.components }}
 
     - name: Cache cargo registry and build
-      uses: actions/cache@v4
+      uses: actions/cache@v6
       with:
         path: |
           ~/.cargo/registry
@@ -65,7 +65,7 @@ runs:
           ${{ inputs.cache-prefix }}-${{ runner.os }}-cargo-
 
     - name: Setup Node.js
-      uses: actions/setup-node@v4
+      uses: actions/setup-node@v7
       with:
         node-version: ${{ inputs.node-version }}
         cache: 'npm'

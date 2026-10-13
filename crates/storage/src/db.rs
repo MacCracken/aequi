@@ -742,11 +742,17 @@ pub async fn build_ledger_snapshot(
         }
     }
 
+    let prior_year_agi = get_tax_return_figures(pool, year.year() - 1)
+        .await?
+        .agi_cents
+        .map(Money::from_cents);
+
     Ok(LedgerSnapshot {
         year,
         through,
         line_totals,
         prior_year_tax,
+        prior_year_agi,
     })
 }
 
@@ -889,10 +895,77 @@ pub async fn get_tax_periods(
     Ok(rows)
 }
 
+/// Figures from a filed tax return, entered by the user. They make the
+/// prior-year safe harbor exact: the tax shown on last year's return, and last
+/// year's AGI (which decides between 100% and 110%).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct TaxReturnFigures {
+    pub total_tax_cents: Option<i64>,
+    pub agi_cents: Option<i64>,
+}
+
+fn tax_return_key(year: u16, field: &str) -> String {
+    format!("tax_return_{year}_{field}")
+}
+
+pub async fn get_tax_return_figures(
+    pool: &DbPool,
+    year: u16,
+) -> Result<TaxReturnFigures, sqlx::Error> {
+    let read = |field: &'static str| async move {
+        Ok::<_, sqlx::Error>(
+            get_setting(pool, &tax_return_key(year, field))
+                .await?
+                .and_then(|v| v.parse::<i64>().ok()),
+        )
+    };
+    Ok(TaxReturnFigures {
+        total_tax_cents: read("total_tax_cents").await?,
+        agi_cents: read("agi_cents").await?,
+    })
+}
+
+/// Store (or clear, with `None`) the figures from the `year` tax return.
+pub async fn set_tax_return_figures(
+    pool: &DbPool,
+    year: u16,
+    figures: TaxReturnFigures,
+) -> Result<(), sqlx::Error> {
+    if figures.total_tax_cents.is_some_and(|c| c < 0) {
+        return Err(sqlx::Error::InvalidArgument(
+            "total tax must not be negative".into(),
+        ));
+    }
+    for (field, value) in [
+        ("total_tax_cents", figures.total_tax_cents),
+        ("agi_cents", figures.agi_cents),
+    ] {
+        let key = tax_return_key(year, field);
+        match value {
+            Some(v) => set_setting(pool, &key, &v.to_string()).await?,
+            None => {
+                sqlx::query("DELETE FROM settings WHERE key = ?")
+                    .bind(&key)
+                    .execute(pool)
+                    .await?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Prior-year tax for the safe harbor: the total tax from last year's filed
+/// return if the user entered it, otherwise last year's latest projection.
 pub async fn get_prior_year_total_tax(
     pool: &DbPool,
     year: u16,
 ) -> Result<Option<i64>, sqlx::Error> {
+    if let Some(filed) = get_tax_return_figures(pool, year - 1)
+        .await?
+        .total_tax_cents
+    {
+        return Ok(Some(filed));
+    }
     // Each quarter's row holds the projected *annual* tax, so summing them
     // would count the year up to four times. The latest quarter's projection
     // is the most complete.
@@ -1313,8 +1386,13 @@ pub struct PaymentRecord {
     pub created_at: String,
 }
 
-/// Record a payment against an invoice and advance its status to
-/// `PartiallyPaid` or `Paid` in the same database transaction.
+/// Record a payment against an invoice, post it to the ledger (cash basis), and
+/// advance the invoice to `PartiallyPaid` or `Paid`, all in one database
+/// transaction.
+///
+/// The ledger entry debits `deposit_account_code` (default 1000 Checking),
+/// credits Services Revenue, and credits Taxes Payable with the payment's share
+/// of the invoice's sales tax; the payment row is linked to it.
 ///
 /// Rejects non-positive amounts, malformed dates, payments on void or
 /// already-paid invoices, and payments that exceed the invoice total. An
@@ -1325,7 +1403,7 @@ pub async fn insert_payment(
     amount_cents: i64,
     date: &str,
     method: Option<&str>,
-    transaction_id: Option<i64>,
+    deposit_account_code: Option<&str>,
 ) -> Result<i64, sqlx::Error> {
     if amount_cents <= 0 {
         return Err(sqlx::Error::InvalidArgument(
@@ -1367,16 +1445,13 @@ pub async fn insert_payment(
     .bind(invoice_id)
     .fetch_all(&mut *db_tx)
     .await?;
-    let total_cents = invoice_from_records(&rec, &lines, &tax_lines)?
-        .total()
-        .checked_to_cents()
-        .ok_or_else(|| sqlx::Error::Protocol("invoice total out of range".into()))?;
-
     let (already_paid,): (i64,) =
         sqlx::query_as("SELECT COALESCE(SUM(amount_cents), 0) FROM payments WHERE invoice_id = ?")
             .bind(invoice_id)
             .fetch_one(&mut *db_tx)
             .await?;
+    let totals = crate::ledger::invoice_totals_for_payment(&rec, &lines, &tax_lines, already_paid)?;
+    let total_cents = totals.total_cents;
     let paid = already_paid + amount_cents;
     if total_cents > 0 && paid > total_cents {
         return Err(sqlx::Error::InvalidArgument(format!(
@@ -1393,10 +1468,26 @@ pub async fn insert_payment(
     .bind(amount_cents)
     .bind(date)
     .bind(method)
-    .bind(transaction_id)
+    .bind(None::<i64>)
     .execute(&mut *db_tx)
     .await?;
     let payment_id = result.last_insert_rowid();
+
+    let transaction_id = crate::ledger::post_invoice_payment(
+        &mut db_tx,
+        &rec,
+        &totals,
+        amount_cents,
+        date,
+        method,
+        deposit_account_code.unwrap_or(crate::ledger::DEFAULT_DEPOSIT_ACCOUNT),
+    )
+    .await?;
+    sqlx::query("UPDATE payments SET transaction_id = ? WHERE id = ?")
+        .bind(transaction_id)
+        .bind(payment_id)
+        .execute(&mut *db_tx)
+        .await?;
 
     let (status, data) = if total_cents == 0 || paid >= total_cents {
         ("Paid", serde_json::json!({ "paid_at": date }))
@@ -1450,7 +1541,13 @@ pub async fn get_ytd_payments_to_contact(
     Ok(row.0)
 }
 
-/// Get YTD payments for all contractors in a single query (avoids N+1).
+/// Amounts paid TO each contractor during `year`, for 1099-NEC reporting.
+///
+/// Counts money that left asset (bank/cash) accounts in transactions whose
+/// payee is the contractor. Money received from the contact (e.g. a client who
+/// is also flagged as a contractor) is not netted against it. Payments made by
+/// credit card or payment app are excluded: those are reported by the
+/// processor on Form 1099-K, not by you on 1099-NEC.
 pub async fn get_contractor_ytd_payments(
     pool: &DbPool,
     year: u16,
@@ -1458,10 +1555,15 @@ pub async fn get_contractor_ytd_payments(
     let start = format!("{year}-01-01");
     let end = format!("{year}-12-31");
     sqlx::query_as::<_, (i64, String, i64)>(
-        r#"SELECT c.id, c.name, COALESCE(SUM(p.amount_cents), 0) as ytd
+        r#"SELECT c.id, c.name, COALESCE(SUM(paid.cents), 0) as ytd
            FROM contacts c
-           LEFT JOIN invoices i ON i.contact_id = c.id
-           LEFT JOIN payments p ON p.invoice_id = i.id AND p.date >= ? AND p.date <= ?
+           LEFT JOIN (
+               SELECT t.contact_id, tl.credit_cents AS cents
+               FROM transactions t
+               JOIN transaction_lines tl ON tl.transaction_id = t.id
+               JOIN accounts a ON a.id = tl.account_id
+               WHERE a.account_type = 'Asset' AND t.date >= ? AND t.date <= ?
+           ) paid ON paid.contact_id = c.id
            WHERE c.is_contractor = 1
            GROUP BY c.id, c.name
            ORDER BY c.name"#,
@@ -1948,18 +2050,75 @@ mod tests {
 
     #[tokio::test]
     async fn test_contractor_ytd_payments() {
+        use aequi_core::{AccountId, TransactionLine, UnvalidatedTransaction};
         let pool = test_pool().await;
         let c1 = insert_test_contact(&pool, "Contractor A", true).await;
         let c2 = insert_test_contact(&pool, "Contractor B", true).await;
-        let _non = insert_test_contact(&pool, "Regular Vendor", false).await;
+        let vendor = insert_test_contact(&pool, "Regular Vendor", false).await;
 
-        let inv1 = insert_test_invoice(&pool, c1, "INV-C1").await;
-        let inv2 = insert_test_invoice(&pool, c2, "INV-C2").await;
+        let account = |code: &'static str| {
+            let pool = pool.clone();
+            async move {
+                get_account_by_code(&pool, code)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .id
+                    .unwrap()
+            }
+        };
+        let (checking, card, legal) = (
+            account("1000").await,
+            account("2000").await,
+            account("5080").await,
+        );
+        let pay = |date: &str, from: AccountId, cents: i64| UnvalidatedTransaction {
+            date: chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d").unwrap(),
+            description: "Contract work".into(),
+            lines: vec![
+                TransactionLine::debit(legal, Money::from_cents(cents), None),
+                TransactionLine::credit(from, Money::from_cents(cents), None),
+            ],
+            memo: None,
+        };
 
-        insert_payment(&pool, inv1, 100000, "2026-06-01", None, None)
+        // Paid from the bank: counts.
+        crate::ledger::create_ledger_transaction(
+            &pool,
+            pay("2026-06-01", checking, 100000),
+            Some(c1),
+        )
+        .await
+        .unwrap();
+        crate::ledger::create_ledger_transaction(
+            &pool,
+            pay("2026-07-01", checking, 200000),
+            Some(c2),
+        )
+        .await
+        .unwrap();
+        // Paid by credit card (reported on 1099-K): excluded.
+        crate::ledger::create_ledger_transaction(&pool, pay("2026-07-02", card, 50000), Some(c2))
             .await
             .unwrap();
-        insert_payment(&pool, inv2, 200000, "2026-07-01", None, None)
+        // Other year, and a non-contractor payee: excluded.
+        crate::ledger::create_ledger_transaction(
+            &pool,
+            pay("2025-12-31", checking, 70000),
+            Some(c1),
+        )
+        .await
+        .unwrap();
+        crate::ledger::create_ledger_transaction(
+            &pool,
+            pay("2026-03-01", checking, 90000),
+            Some(vendor),
+        )
+        .await
+        .unwrap();
+        // Money received from a contractor (they paid our invoice): not netted.
+        let inv = insert_test_invoice(&pool, c1, "INV-C1").await;
+        insert_payment(&pool, inv, 30000, "2026-08-01", None, None)
             .await
             .unwrap();
 
@@ -2321,6 +2480,44 @@ mod tests {
         // Each row is a full-year projection; use the latest one, never the sum.
         let total = get_prior_year_total_tax(&pool, 2026).await.unwrap();
         assert_eq!(total, Some(120000));
+
+        // The tax from the filed return wins over projections once entered.
+        let filed = TaxReturnFigures {
+            total_tax_cents: Some(130000),
+            agi_cents: Some(16_000_000),
+        };
+        set_tax_return_figures(&pool, 2025, filed).await.unwrap();
+        assert_eq!(get_tax_return_figures(&pool, 2025).await.unwrap(), filed);
+        assert_eq!(
+            get_prior_year_total_tax(&pool, 2026).await.unwrap(),
+            Some(130000)
+        );
+        let year = FiscalYear::new(2026);
+        let snap = build_ledger_snapshot(&pool, year, year.end_date(), None)
+            .await
+            .unwrap();
+        assert_eq!(snap.prior_year_agi, Some(Money::from_cents(16_000_000)));
+
+        // Clearing the figures falls back to the projection.
+        set_tax_return_figures(&pool, 2025, TaxReturnFigures::default())
+            .await
+            .unwrap();
+        assert_eq!(
+            get_prior_year_total_tax(&pool, 2026).await.unwrap(),
+            Some(120000)
+        );
+        assert!(
+            set_tax_return_figures(
+                &pool,
+                2025,
+                TaxReturnFigures {
+                    total_tax_cents: Some(-1),
+                    agi_cents: None
+                }
+            )
+            .await
+            .is_err()
+        );
     }
 
     // ── 10. Build ledger snapshot ────────────────────────────────────────────

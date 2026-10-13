@@ -23,6 +23,11 @@ pub struct TaxRules {
     pub year: YearField,
     pub se_tax: SeTaxRules,
     pub standard_deduction: StandardDeduction,
+    /// Qualified business income deduction; omitted for years before it existed.
+    #[serde(default)]
+    pub qbi: Option<QbiRules>,
+    #[serde(default)]
+    pub safe_harbor: SafeHarborRules,
     pub income_brackets: IncomeBrackets,
     pub mileage: MileageRules,
     pub meals_deduction_cap: MealsDeductionCap,
@@ -69,6 +74,40 @@ fn default_additional_medicare_threshold() -> Decimal {
 #[derive(Debug, Clone, Deserialize)]
 pub struct StandardDeduction {
     pub single: Decimal,
+}
+
+/// Section 199A qualified business income deduction (single filer).
+#[derive(Debug, Clone, Deserialize)]
+pub struct QbiRules {
+    /// Deduction rate (20%).
+    pub rate: Decimal,
+    /// Taxable income (before the deduction) above which it phases out.
+    pub threshold: Decimal,
+    /// Width of the phase-out band above `threshold`.
+    pub phase_in_range: Decimal,
+    /// Minimum deduction for taxpayers with at least `minimum_qbi` of QBI.
+    #[serde(default)]
+    pub minimum_deduction: Decimal,
+    #[serde(default)]
+    pub minimum_qbi: Decimal,
+}
+
+/// Prior-year safe harbor for estimated tax.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SafeHarborRules {
+    /// Prior-year AGI above which the prior-year safe harbor rises to `high_income_percentage`.
+    pub high_income_agi: Decimal,
+    pub high_income_percentage: Decimal,
+}
+
+// Statutory (§6654(d)(1)(C)) and not inflation-indexed.
+impl Default for SafeHarborRules {
+    fn default() -> Self {
+        Self {
+            high_income_agi: Decimal::from(150_000),
+            high_income_percentage: Decimal::new(110, 2),
+        }
+    }
 }
 
 impl SeTaxRules {
@@ -184,6 +223,20 @@ impl TaxRules {
         if self.standard_deduction.single < Decimal::ZERO {
             return invalid("standard_deduction.single must not be negative".into());
         }
+        if let Some(q) = &self.qbi {
+            if q.rate < Decimal::ZERO || q.rate > Decimal::ONE {
+                return invalid("qbi.rate must be between 0 and 1".into());
+            }
+            if q.threshold < Decimal::ZERO || q.phase_in_range <= Decimal::ZERO {
+                return invalid("qbi.threshold must be >= 0 and qbi.phase_in_range > 0".into());
+            }
+            if q.minimum_deduction < Decimal::ZERO || q.minimum_qbi < Decimal::ZERO {
+                return invalid("qbi minimums must not be negative".into());
+            }
+        }
+        if self.safe_harbor.high_income_percentage < Decimal::ONE {
+            return invalid("safe_harbor.high_income_percentage must be at least 1".into());
+        }
         Ok(())
     }
 
@@ -287,6 +340,16 @@ mod tests {
             TaxRules::from_toml(&toml),
             Err(TaxRulesError::Invalid(_))
         ));
+    }
+
+    #[test]
+    fn parses_qbi_and_safe_harbor() {
+        let rules = TaxRules::from_toml(sample_toml()).unwrap();
+        let qbi = rules.qbi.expect("2026 rules include QBI");
+        assert_eq!(qbi.threshold, Decimal::from(201_750));
+        assert_eq!(qbi.phase_in_range, Decimal::from(75_000));
+        assert_eq!(qbi.minimum_deduction, Decimal::from(400));
+        assert_eq!(rules.safe_harbor.high_income_agi, Decimal::from(150_000));
     }
 
     #[test]

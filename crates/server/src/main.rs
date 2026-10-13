@@ -14,6 +14,7 @@ mod error;
 pub(crate) mod oidc;
 mod routes;
 mod state;
+mod stripe_api;
 
 use state::ServerState;
 
@@ -83,11 +84,26 @@ async fn main() -> Result<()> {
         tracing::info!("Stripe webhook listener configured");
     }
 
+    let stripe_api = parse_stripe_api_key(env_opt("AEQUI_STRIPE_API_KEY").as_deref())?;
+    if let Some(api) = &stripe_api {
+        tracing::info!("Stripe processing fee lookup configured");
+        if !api.is_restricted_key() {
+            tracing::warn!(
+                "AEQUI_STRIPE_API_KEY is a secret key with full account access; use a \
+                 restricted key (rk_…) with read access to Balance transactions only"
+            );
+        }
+        if stripe_webhook_secret.is_none() {
+            tracing::warn!("AEQUI_STRIPE_API_KEY has no effect without STRIPE_WEBHOOK_SECRET");
+        }
+    }
+
     let plaid_config: Option<aequi_import::plaid::PlaidConfig> =
         parse_json_env("AEQUI_PLAID_CONFIG")?;
     if plaid_config.is_some() {
         tracing::info!("Plaid bank sync configured");
     }
+    let plaid = plaid_config.map(aequi_import::plaid::PlaidClient::new);
 
     let insecure_no_auth = env_opt("AEQUI_INSECURE_NO_AUTH")
         .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
@@ -116,7 +132,8 @@ async fn main() -> Result<()> {
         email_config,
         oidc,
         stripe_webhook_secret,
-        plaid_config,
+        stripe_api,
+        plaid,
         plaid_sync_lock: Default::default(),
     });
 
@@ -166,6 +183,18 @@ fn parse_json_config<T: DeserializeOwned>(name: &str, value: Option<&str>) -> Re
             .map(Some)
             .with_context(|| format!("{name} is set but is not a valid configuration")),
     }
+}
+
+/// `AEQUI_STRIPE_API_KEY`: absent is `None`; a value that isn't a Stripe
+/// secret-side key is an error (which never repeats the value).
+fn parse_stripe_api_key(value: Option<&str>) -> Result<Option<stripe_api::StripeApi>> {
+    value
+        .map(|key| {
+            stripe_api::StripeApi::new(key).map_err(|e| {
+                anyhow::anyhow!("AEQUI_STRIPE_API_KEY is set but is not a valid API key: {e}")
+            })
+        })
+        .transpose()
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -276,6 +305,18 @@ mod tests {
 
         let r: Result<Option<oidc::OidcConfig>> = parse_json_config("X", None);
         assert!(r.unwrap().is_none());
+    }
+
+    #[test]
+    fn invalid_stripe_api_key_is_an_error() {
+        assert!(parse_stripe_api_key(None).unwrap().is_none());
+        assert!(parse_stripe_api_key(Some("rk_live_abc")).unwrap().is_some());
+        let msg = format!(
+            "{:#}",
+            parse_stripe_api_key(Some("pk_live_publishable")).unwrap_err()
+        );
+        assert!(msg.contains("AEQUI_STRIPE_API_KEY"), "{msg}");
+        assert!(!msg.contains("pk_live_publishable"), "{msg}");
     }
 
     /// Every JSON example in .env.example must parse into its config type.

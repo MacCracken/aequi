@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use axum::extract::{Query, State};
+use axum::extract::{Path, Query, State};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use rust_decimal::Decimal;
@@ -34,11 +34,16 @@ struct EstimateOut {
     additional_medicare_tax_cents: i64,
     se_tax_deduction_cents: i64,
     standard_deduction_cents: i64,
+    qbi_deduction_cents: i64,
+    /// After the standard and QBI deductions.
     taxable_income_cents: i64,
     income_tax_cents: i64,
     /// Projected full-year tax.
     total_tax_cents: i64,
     safe_harbor_cents: i64,
+    /// Share of prior-year tax the prior-year safe harbor uses: "1.00", or
+    /// "1.10" when prior-year AGI was over the threshold.
+    safe_harbor_prior_year_percentage: Decimal,
     quarterly_payment_cents: i64,
     payment_due_date: String,
 }
@@ -99,10 +104,17 @@ async fn quarterly_estimate(
         additional_medicare_tax_cents: est.additional_medicare_tax.to_cents(),
         se_tax_deduction_cents: est.se_tax_deduction.to_cents(),
         standard_deduction_cents: est.standard_deduction.to_cents(),
+        qbi_deduction_cents: est.qbi_deduction.to_cents(),
         taxable_income_cents: est.taxable_income.to_cents(),
         income_tax_cents: est.estimated_income_tax.to_cents(),
         total_tax_cents: est.total_tax_estimate.to_cents(),
         safe_harbor_cents: est.safe_harbor_amount.to_cents(),
+        safe_harbor_prior_year_percentage: {
+            // Always two places ("1.00", "1.10"), whatever scale the rules use.
+            let mut pct = est.safe_harbor_prior_year_percentage;
+            pct.rescale(2);
+            pct
+        },
         quarterly_payment_cents: est.quarterly_payment.to_cents(),
         payment_due_date: est.payment_due_date.to_string(),
     }))
@@ -114,6 +126,13 @@ struct PaymentInput {
     quarter: u8,
     amount_cents: i64,
     date: String,
+}
+
+fn validate_year(year: u16) -> Result<(), ApiError> {
+    if !(2000..=2100).contains(&year) {
+        return Err(ApiError::BadRequest(format!("year {year} is out of range")));
+    }
+    Ok(())
 }
 
 fn validate_payment(input: &PaymentInput) -> Result<(), ApiError> {
@@ -128,12 +147,7 @@ fn validate_payment(input: &PaymentInput) -> Result<(), ApiError> {
             "amount_cents must be positive".to_string(),
         ));
     }
-    if !(2000..=2100).contains(&input.year) {
-        return Err(ApiError::BadRequest(format!(
-            "year {} is out of range",
-            input.year
-        )));
-    }
+    validate_year(input.year)?;
     aequi_storage::validate_date("date", &input.date)?;
     Ok(())
 }
@@ -152,6 +166,46 @@ async fn record_payment(
     )
     .await?;
     Ok(Json(()))
+}
+
+/// Figures from the filed return for a year. A field left out (or null)
+/// clears it; unknown fields are rejected so a typo can't clear a value.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TaxReturnInput {
+    #[serde(default)]
+    total_tax_cents: Option<i64>,
+    #[serde(default)]
+    agi_cents: Option<i64>,
+}
+
+/// GET /tax/returns/{year} — figures entered from that year's filed return.
+async fn get_tax_return(
+    State(state): State<Arc<ServerState>>,
+    Path(year): Path<u16>,
+) -> Result<Json<aequi_storage::TaxReturnFigures>, ApiError> {
+    validate_year(year)?;
+    Ok(Json(
+        aequi_storage::get_tax_return_figures(&state.db, year).await?,
+    ))
+}
+
+/// PUT /tax/returns/{year} — replace them. The next year's prior-year safe
+/// harbor uses the total tax, and the AGI picks 100% or 110%.
+async fn put_tax_return(
+    State(state): State<Arc<ServerState>>,
+    Path(year): Path<u16>,
+    Json(input): Json<TaxReturnInput>,
+) -> Result<Json<aequi_storage::TaxReturnFigures>, ApiError> {
+    validate_year(year)?;
+    let figures = aequi_storage::TaxReturnFigures {
+        total_tax_cents: input.total_tax_cents,
+        agi_cents: input.agi_cents,
+    };
+    aequi_storage::set_tax_return_figures(&state.db, year, figures).await?;
+    Ok(Json(
+        aequi_storage::get_tax_return_figures(&state.db, year).await?,
+    ))
 }
 
 async fn schedule_c(
@@ -173,6 +227,10 @@ pub fn routes() -> Router<Arc<ServerState>> {
         .route("/tax/quarterly-estimate", get(quarterly_estimate))
         .route("/tax/schedule-c", get(schedule_c))
         .route("/tax/payments", post(record_payment))
+        .route(
+            "/tax/returns/{year}",
+            get(get_tax_return).put(put_tax_return),
+        )
 }
 
 #[cfg(test)]
@@ -207,11 +265,113 @@ mod tests {
     }
 
     #[test]
+    fn payment_year_must_be_in_range() {
+        let mut p = payment(1, 100, "2026-04-15");
+        p.year = 1999;
+        assert!(matches!(validate_payment(&p), Err(ApiError::BadRequest(_))));
+    }
+
+    #[test]
     fn invalid_quarter_is_rejected_not_defaulted() {
         assert!(matches!(
             parse_quarter(Some(7)),
             Err(ApiError::BadRequest(_))
         ));
         assert_eq!(parse_quarter(Some(3)).unwrap(), Quarter::Q3);
+    }
+
+    #[tokio::test]
+    async fn tax_return_figures_round_trip_and_feed_the_safe_harbor() {
+        use crate::routes::tests::{call, test_state};
+        use axum::http::{Method, StatusCode};
+        use serde_json::json;
+
+        let state = test_state(None).await;
+        let (status, body) = call(&state, Method::GET, "/api/v1/tax/returns/2025", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, json!({"total_tax_cents": null, "agi_cents": null}));
+
+        // Over $150k AGI: the prior-year safe harbor is 110% of last year's tax.
+        let filed = json!({"total_tax_cents": 1_200_000, "agi_cents": 20_000_000});
+        let (status, body) = call(
+            &state,
+            Method::PUT,
+            "/api/v1/tax/returns/2025",
+            Some(filed.clone()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body, filed);
+        let (_, body) = call(&state, Method::GET, "/api/v1/tax/returns/2025", None).await;
+        assert_eq!(body, filed);
+
+        let (status, est) = call(
+            &state,
+            Method::GET,
+            "/api/v1/tax/quarterly-estimate?year=2026&quarter=1",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{est}");
+        assert_eq!(est["safe_harbor_prior_year_percentage"], "1.10");
+        assert!(est["qbi_deduction_cents"].is_i64(), "{est}");
+
+        // Omitted fields are cleared.
+        let (status, body) = call(
+            &state,
+            Method::PUT,
+            "/api/v1/tax/returns/2025",
+            Some(json!({"total_tax_cents": 900_000})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, json!({"total_tax_cents": 900_000, "agi_cents": null}));
+        let (_, est) = call(
+            &state,
+            Method::GET,
+            "/api/v1/tax/quarterly-estimate?year=2026&quarter=1",
+            None,
+        )
+        .await;
+        assert_eq!(est["safe_harbor_prior_year_percentage"], "1.00");
+    }
+
+    #[tokio::test]
+    async fn tax_return_input_is_validated() {
+        use crate::routes::tests::{call, test_state};
+        use axum::http::{Method, StatusCode};
+        use serde_json::json;
+
+        let state = test_state(None).await;
+        for uri in ["/api/v1/tax/returns/1999", "/api/v1/tax/returns/2101"] {
+            let (status, _) = call(&state, Method::GET, uri, None).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}");
+            let (status, _) = call(&state, Method::PUT, uri, Some(json!({}))).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}");
+        }
+        let (status, _) = call(&state, Method::GET, "/api/v1/tax/returns/abc", None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        let (status, body) = call(
+            &state,
+            Method::PUT,
+            "/api/v1/tax/returns/2025",
+            Some(json!({"total_tax_cents": -1})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(body["error"].as_str().unwrap().contains("negative"));
+
+        // A misspelled field is rejected rather than clearing the figures.
+        let (status, _) = call(
+            &state,
+            Method::PUT,
+            "/api/v1/tax/returns/2025",
+            Some(json!({"total_tax": 100})),
+        )
+        .await;
+        assert!(status.is_client_error());
+        let (_, body) = call(&state, Method::GET, "/api/v1/tax/returns/2025", None).await;
+        assert_eq!(body, json!({"total_tax_cents": null, "agi_cents": null}));
     }
 }

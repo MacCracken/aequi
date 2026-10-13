@@ -24,6 +24,9 @@ pub struct LedgerSnapshot {
     /// Prior year total tax liability (for safe harbor calculation).
     /// None if this is the first year using the app.
     pub prior_year_tax: Option<Money>,
+    /// Prior year adjusted gross income, which decides whether the prior-year
+    /// safe harbor is 100% or 110%. None if unknown (100% is assumed).
+    pub prior_year_agi: Option<Money>,
 }
 
 impl LedgerSnapshot {
@@ -83,14 +86,18 @@ pub struct QuarterlyEstimate {
     pub adjusted_net_income: Money,
     /// Standard deduction subtracted before applying brackets
     pub standard_deduction: Money,
-    /// adjusted_net_income - standard_deduction (floored at zero)
+    /// Qualified business income deduction (§199A)
+    pub qbi_deduction: Money,
+    /// adjusted_net_income - standard_deduction - qbi_deduction (floored at zero)
     pub taxable_income: Money,
     /// Estimated federal income tax from brackets
     pub estimated_income_tax: Money,
     /// Projected full-year tax (SE tax + Additional Medicare + income tax)
     pub total_tax_estimate: Money,
-    /// Safe harbor: min(100% prior year, 90% current year estimate)
+    /// Safe harbor: min(100% or 110% of prior year tax, 90% of current year estimate)
     pub safe_harbor_amount: Money,
+    /// Share of prior-year tax the prior-year safe harbor requires (1.00 or 1.10)
+    pub safe_harbor_prior_year_percentage: Decimal,
     /// Quarterly payment = total_tax_estimate / 4
     pub quarterly_payment: Money,
     /// When this quarter's estimated payment is due
@@ -196,8 +203,20 @@ pub fn compute_quarterly_estimate(
     };
 
     let standard_deduction = Money::from_decimal(rules.standard_deduction.single);
-    let taxable_income = if adjusted_net_income > standard_deduction {
+    let income_before_qbi = if adjusted_net_income > standard_deduction {
         adjusted_net_income - standard_deduction
+    } else {
+        Money::zero()
+    };
+    // QBI for a sole proprietor: net profit less the deductible half of SE tax.
+    let qbi = if annualized_net_profit > Money::zero() {
+        annualized_net_profit - se_tax_deduction
+    } else {
+        Money::zero()
+    };
+    let qbi_deduction = compute_qbi_deduction(rules, qbi, income_before_qbi);
+    let taxable_income = if income_before_qbi > qbi_deduction {
+        income_before_qbi - qbi_deduction
     } else {
         Money::zero()
     };
@@ -208,12 +227,20 @@ pub fn compute_quarterly_estimate(
     let total_tax_estimate =
         (se_tax_amount + additional_medicare_tax + estimated_income_tax).round_to_dollar();
 
-    // Safe harbor: 100% of prior year tax or 90% of current year estimate
+    // Safe harbor: the smaller of 90% of this year's tax and 100% of last
+    // year's (110% when last year's AGI was above the high-income threshold).
     let ninety_pct_current = total_tax_estimate * Decimal::from_str_exact("0.90").unwrap();
+    let safe_harbor_prior_year_percentage = match snapshot.prior_year_agi {
+        Some(agi) if agi.as_decimal() > rules.safe_harbor.high_income_agi => {
+            rules.safe_harbor.high_income_percentage
+        }
+        _ => Decimal::ONE,
+    };
     let safe_harbor_amount = match snapshot.prior_year_tax {
         Some(prior) => {
-            if prior < ninety_pct_current {
-                prior
+            let prior_requirement = prior * safe_harbor_prior_year_percentage;
+            if prior_requirement < ninety_pct_current {
+                prior_requirement
             } else {
                 ninety_pct_current
             }
@@ -251,10 +278,12 @@ pub fn compute_quarterly_estimate(
         se_tax_deduction,
         adjusted_net_income,
         standard_deduction,
+        qbi_deduction,
         taxable_income,
         estimated_income_tax,
         total_tax_estimate,
         safe_harbor_amount,
+        safe_harbor_prior_year_percentage,
         quarterly_payment,
         payment_due_date,
         schedule_c_lines,
@@ -278,6 +307,44 @@ fn compute_se_tax(rules: &TaxRules, se_tax_base: Money) -> Money {
     let medicare_tax = base * rules.se_tax.medicare_rate;
 
     Money::from_decimal(ss_tax + medicare_tax)
+}
+
+/// Qualified business income deduction (§199A) for a single filer.
+///
+/// `income_before_qbi` is taxable income before this deduction. Below the
+/// threshold it is the full rate × QBI. Above it, the business is treated as a
+/// specified service trade or business with no W-2 wages or qualified
+/// property (the usual freelancer case, and the conservative assumption), so
+/// the deduction phases out as rate × QBI × (1 − f)², where f is how far
+/// through the phase-in range taxable income is, and is zero beyond it. It
+/// never exceeds rate × taxable income, and is at least the minimum deduction
+/// when QBI reaches the minimum (except past the phase-out, where an SSTB has
+/// no qualified business income at all).
+fn compute_qbi_deduction(rules: &TaxRules, qbi: Money, income_before_qbi: Money) -> Money {
+    let Some(q) = &rules.qbi else {
+        return Money::zero();
+    };
+    let qbi = qbi.as_decimal();
+    let income = income_before_qbi.as_decimal();
+    if qbi <= Decimal::ZERO {
+        return Money::zero();
+    }
+
+    let excess = income - q.threshold;
+    let remaining = if excess <= Decimal::ZERO {
+        Decimal::ONE
+    } else if excess >= q.phase_in_range {
+        return Money::zero();
+    } else {
+        let left = Decimal::ONE - excess / q.phase_in_range;
+        left * left
+    };
+
+    let mut deduction = (q.rate * qbi * remaining).min(q.rate * income);
+    if qbi >= q.minimum_qbi && deduction < q.minimum_deduction {
+        deduction = q.minimum_deduction;
+    }
+    Money::from_decimal(deduction.max(Decimal::ZERO))
 }
 
 /// Additional Medicare Tax (0.9%) on SE earnings above the filing threshold.
@@ -346,6 +413,7 @@ mod tests {
             through: NaiveDate::from_ymd_opt(2026, 12, 31).unwrap(),
             line_totals,
             prior_year_tax: None,
+            prior_year_agi: None,
         }
     }
 
@@ -396,17 +464,19 @@ mod tests {
         // Adjusted income: $90,500 - $6,393.62 = $84,106.38
         assert_eq!(est.adjusted_net_income.to_cents(), 8_410_638);
 
-        // Taxable income after the $16,100 standard deduction: $68,006.38
+        // After the $16,100 standard deduction: $68,006.38. QBI is $84,106.38,
+        // but the deduction is capped at 20% of taxable income: $13,601.28.
         assert_eq!(est.standard_deduction.to_cents(), 1_610_000);
-        assert_eq!(est.taxable_income.to_cents(), 6_800_638);
+        assert_eq!(est.qbi_deduction.to_cents(), 1_360_128);
+        assert_eq!(est.taxable_income.to_cents(), 5_440_510);
 
-        // Income tax: 1,240 + 4,560 + 22% × 17,606.38 = $9,673.40
-        assert_eq!(est.estimated_income_tax.to_cents(), 967_340);
+        // Income tax: 1,240 + 4,560 + 22% × 4,005.10 = $6,681.12
+        assert_eq!(est.estimated_income_tax.to_cents(), 668_112);
 
-        // Total: $12,787.24 + $9,673.40 = $22,460.64 → $22,461
+        // Total: $12,787.24 + $6,681.12 = $19,468.36 → $19,468
         assert_eq!(est.additional_medicare_tax.to_cents(), 0);
-        assert_eq!(est.total_tax_estimate.to_cents(), 2_246_100);
-        assert_eq!(est.quarterly_payment.to_cents(), 561_500);
+        assert_eq!(est.total_tax_estimate.to_cents(), 1_946_800);
+        assert_eq!(est.quarterly_payment.to_cents(), 486_700);
 
         assert_eq!(
             est.payment_due_date,
@@ -427,14 +497,15 @@ mod tests {
             through: NaiveDate::from_ymd_opt(2026, 3, 31).unwrap(),
             line_totals,
             prior_year_tax: None,
+            prior_year_agi: None,
         };
         let est = compute_quarterly_estimate(&rules, &snap, Quarter::Q1);
 
         assert_eq!(est.ytd_net_profit.to_cents(), 2_262_500);
         assert_eq!(est.annualization_factor, Decimal::from(4));
         assert_eq!(est.annualized_net_profit.to_cents(), 9_050_000);
-        assert_eq!(est.total_tax_estimate.to_cents(), 2_246_100);
-        assert_eq!(est.quarterly_payment.to_cents(), 561_500);
+        assert_eq!(est.total_tax_estimate.to_cents(), 1_946_800);
+        assert_eq!(est.quarterly_payment.to_cents(), 486_700);
         assert_eq!(
             est.payment_due_date,
             NaiveDate::from_ymd_opt(2026, 4, 15).unwrap()
@@ -597,5 +668,71 @@ mod tests {
             // Just verify it doesn't panic
             let _ = est.payment_due_date;
         }
+    }
+
+    #[test]
+    fn qbi_deduction_phases_out_for_service_businesses() {
+        let rules = load_rules();
+        let m = |d: i64| Money::from_cents(d * 100);
+        // Below the $201,750 threshold: 20% of QBI, capped at 20% of taxable income.
+        assert_eq!(
+            compute_qbi_deduction(&rules, m(50_000), m(100_000)),
+            m(10_000)
+        );
+        assert_eq!(
+            compute_qbi_deduction(&rules, m(80_000), m(40_000)),
+            m(8_000)
+        );
+        // Halfway through the $75,000 phase-in: 20% × QBI × (1 − 0.5)².
+        assert_eq!(
+            compute_qbi_deduction(&rules, m(250_000), m(239_250)),
+            m(12_500)
+        );
+        // Past the phase-in range ($276,750): nothing.
+        assert_eq!(
+            compute_qbi_deduction(&rules, m(300_000), m(276_750)),
+            Money::zero()
+        );
+        // Minimum $400 once QBI reaches $1,000; not below that.
+        assert_eq!(compute_qbi_deduction(&rules, m(1_500), m(1_000)), m(400));
+        assert_eq!(compute_qbi_deduction(&rules, m(900), m(1_000)), m(180));
+        assert_eq!(
+            compute_qbi_deduction(&rules, Money::zero(), m(1_000)),
+            Money::zero()
+        );
+    }
+
+    #[test]
+    fn rules_without_qbi_give_no_deduction() {
+        let toml = include_str!("../../test_data/tax_rules_2026.toml");
+        let start = toml.find("[qbi]").unwrap();
+        let end = toml.find("[safe_harbor]").unwrap();
+        let rules = TaxRules::from_toml(&format!("{}{}", &toml[..start], &toml[end..])).unwrap();
+        let qbi = Money::from_cents(5_000_000);
+        assert_eq!(compute_qbi_deduction(&rules, qbi, qbi), Money::zero());
+    }
+
+    #[test]
+    fn safe_harbor_is_110_percent_for_high_prior_year_agi() {
+        let rules = load_rules();
+        let mut snap = sample_snapshot();
+        snap.prior_year_tax = Some(Money::from_cents(1_500_000)); // $15,000
+
+        // Prior-year AGI above $150,000: 110% of $15,000 = $16,500 < 90% of $19,468.
+        snap.prior_year_agi = Some(Money::from_cents(20_000_000));
+        let est = compute_quarterly_estimate(&rules, &snap, Quarter::Q4);
+        assert_eq!(est.safe_harbor_prior_year_percentage, Decimal::new(110, 2));
+        assert_eq!(est.safe_harbor_amount.to_cents(), 1_650_000);
+
+        // At or below $150,000: 100%.
+        snap.prior_year_agi = Some(Money::from_cents(15_000_000));
+        let est = compute_quarterly_estimate(&rules, &snap, Quarter::Q4);
+        assert_eq!(est.safe_harbor_prior_year_percentage, Decimal::ONE);
+        assert_eq!(est.safe_harbor_amount.to_cents(), 1_500_000);
+
+        // A large prior-year tax: 90% of this year's ($17,521.20) is smaller.
+        snap.prior_year_tax = Some(Money::from_cents(2_000_000));
+        let est = compute_quarterly_estimate(&rules, &snap, Quarter::Q4);
+        assert_eq!(est.safe_harbor_amount.to_cents(), 1_752_120);
     }
 }

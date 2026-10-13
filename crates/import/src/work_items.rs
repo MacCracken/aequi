@@ -27,7 +27,25 @@ pub enum WorkItemSource {
     Linear {
         api_key: String,
         team_id: String,
+        /// Linear estimates are story points; each point is billed as this
+        /// many hours.
+        #[serde(default = "default_hours_per_point")]
+        hours_per_point: f64,
     },
+}
+
+fn default_hours_per_point() -> f64 {
+    1.0
+}
+
+fn validate_hours_per_point(hours_per_point: f64) -> Result<(), WorkItemError> {
+    if hours_per_point.is_finite() && hours_per_point > 0.0 {
+        Ok(())
+    } else {
+        Err(WorkItemError::InvalidInput(
+            "hours_per_point must be a positive number".into(),
+        ))
+    }
 }
 
 /// A single completed work item (issue / PR) that may become an invoice line.
@@ -220,8 +238,13 @@ pub async fn fetch_work_items(
         WorkItemSource::GitHub { owner, repo, token } => {
             fetch_github_issues(owner, repo, token, filter).await
         }
-        WorkItemSource::Linear { api_key, team_id } => {
-            fetch_linear_issues(api_key, team_id, filter).await
+        WorkItemSource::Linear {
+            api_key,
+            team_id,
+            hours_per_point,
+        } => {
+            validate_hours_per_point(*hours_per_point)?;
+            fetch_linear_issues(api_key, team_id, *hours_per_point, filter).await
         }
     }
 }
@@ -562,6 +585,7 @@ fn linear_query(team_id: &str, filter: &WorkItemFilter) -> String {
 async fn fetch_linear_issues(
     api_key: &str,
     team_id: &str,
+    hours_per_point: f64,
     filter: &WorkItemFilter,
 ) -> Result<Vec<WorkItem>, WorkItemError> {
     let client = http_client()?;
@@ -636,7 +660,7 @@ async fn fetch_linear_issues(
             labels: i.labels.nodes.into_iter().map(|l| l.name).collect(),
             milestone: i.project_milestone.map(|m| m.name),
             assignee: i.assignee.map(|a| a.name),
-            hours: i.estimate,
+            hours: i.estimate.map(|points| points * hours_per_point),
         })
         .collect();
 
@@ -690,14 +714,20 @@ mod tests {
         let src = WorkItemSource::Linear {
             api_key: "lin_key".into(),
             team_id: "TEAM1".into(),
+            hours_per_point: 2.0,
         };
         let json = serde_json::to_string(&src).unwrap();
         assert!(json.contains(r#""type":"Linear"#));
         let back: WorkItemSource = serde_json::from_str(&json).unwrap();
         match back {
-            WorkItemSource::Linear { api_key, team_id } => {
+            WorkItemSource::Linear {
+                api_key,
+                team_id,
+                hours_per_point,
+            } => {
                 assert_eq!(api_key, "lin_key");
                 assert_eq!(team_id, "TEAM1");
+                assert_eq!(hours_per_point, 2.0);
             }
             _ => panic!("expected Linear variant"),
         }
@@ -1284,5 +1314,26 @@ mod tests {
         }];
         let estimates = estimate_line_items(&items, 50000); // $500/hr
         assert_eq!(estimates[0].total_cents, 5_000_000);
+    }
+
+    #[test]
+    fn linear_hours_per_point_defaults_to_one() {
+        let src: WorkItemSource =
+            serde_json::from_str(r#"{"type":"Linear","api_key":"k","team_id":"T"}"#).unwrap();
+        assert!(matches!(
+            src,
+            WorkItemSource::Linear { hours_per_point, .. } if hours_per_point == 1.0
+        ));
+    }
+
+    #[test]
+    fn linear_rejects_non_positive_hours_per_point() {
+        for bad in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert!(matches!(
+                validate_hours_per_point(bad),
+                Err(WorkItemError::InvalidInput(_))
+            ));
+        }
+        assert!(validate_hours_per_point(0.5).is_ok());
     }
 }

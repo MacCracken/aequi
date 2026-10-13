@@ -1,6 +1,6 @@
 use serde_json::json;
 
-use aequi_core::{Money, TransactionLine, UnvalidatedTransaction, ValidatedTransaction};
+use aequi_core::{Money, TransactionLine, UnvalidatedTransaction};
 
 use crate::protocol::{ToolDefinition, ToolResult};
 use crate::tools::args::{Args, ToolError, check_date_order};
@@ -38,8 +38,8 @@ pub fn register(registry: &mut ToolRegistry) {
             }
 
             // Unset bounds bind NULL and drop out of the filter.
-            let rows = sqlx::query_as::<_, (i64, String, String, Option<String>, i64)>(
-                "SELECT id, date, description, memo, balanced_total_cents FROM transactions \
+            let rows = sqlx::query_as::<_, (i64, String, String, Option<String>, i64, Option<i64>)>(
+                "SELECT id, date, description, memo, balanced_total_cents, contact_id FROM transactions \
                  WHERE (?1 IS NULL OR date >= ?1) AND (?2 IS NULL OR date <= ?2) \
                  ORDER BY date DESC, id DESC LIMIT ?3",
             )
@@ -54,7 +54,7 @@ pub fn register(registry: &mut ToolRegistry) {
                 .map(|r| {
                     json!({
                         "id": r.0, "date": r.1, "description": r.2,
-                        "memo": r.3, "balanced_total_cents": r.4
+                        "memo": r.3, "balanced_total_cents": r.4, "contact_id": r.5
                     })
                 })
                 .collect();
@@ -65,13 +65,14 @@ pub fn register(registry: &mut ToolRegistry) {
     registry.register(
         ToolDefinition {
             name: "aequi_create_transaction".to_string(),
-            description: "Create a balanced double-entry transaction. Each line has either a debit or a credit (whole cents, positive); total debits must equal total credits".to_string(),
+            description: "Create a balanced double-entry transaction. Each line has either a debit or a credit (whole cents, positive); total debits must equal total credits. Set contact_id to the payee or payer (see aequi_list_contacts); payments to contractors from a bank account count toward their 1099-NEC".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "date": { "type": "string", "description": "YYYY-MM-DD" },
                     "description": { "type": "string" },
                     "memo": { "type": "string" },
+                    "contact_id": { "type": "integer", "description": "Payee or payer contact id" },
                     "lines": {
                         "type": "array",
                         "minItems": 2,
@@ -98,10 +99,12 @@ pub fn register(registry: &mut ToolRegistry) {
                 .map_err(|e| ToolError(format!("Invalid date: {e}")))?;
             let description = args.str("description")?.to_string();
             let memo = args.opt_str("memo")?.map(str::to_string);
+            let contact_id = args.opt_id("contact_id")?;
 
             let mut lines = Vec::new();
             for (i, line) in args.array("lines")?.iter().enumerate() {
                 let line = Args::object(line, format!("lines[{i}]"))?;
+                line.only(&["account_code", "debit_cents", "credit_cents", "memo"])?;
                 let code = line.str("account_code")?;
                 let account = aequi_storage::get_account_by_code(&db, code)
                     .await?
@@ -126,10 +129,16 @@ pub fn register(registry: &mut ToolRegistry) {
                 lines,
                 memo,
             };
-            let validated = ValidatedTransaction::validate(tx)
-                .map_err(|e| ToolError(format!("Invalid transaction: {e}")))?;
-
-            let id = insert_transaction(&db, &validated).await?;
+            // Validation (balance, line rules, accounts, contact) and the
+            // atomic insert live in aequi-storage.
+            let id = aequi_storage::create_ledger_transaction(&db, tx, contact_id)
+                .await
+                .map_err(|e| match e {
+                    sqlx::Error::InvalidArgument(msg) => {
+                        ToolError(format!("Invalid transaction: {msg}"))
+                    }
+                    other => ToolError::from(other),
+                })?;
             Ok(ToolResult::text(
                 json!({ "id": id, "status": "created" }).to_string(),
             ))
@@ -207,40 +216,4 @@ pub fn register(registry: &mut ToolRegistry) {
             })))
         },
     );
-}
-
-/// Insert the header and all lines in one database transaction, so a failed
-/// line insert can't leave an unbalanced header behind.
-async fn insert_transaction(
-    db: &aequi_storage::DbPool,
-    tx: &ValidatedTransaction,
-) -> Result<i64, sqlx::Error> {
-    let mut db_tx = db.begin().await?;
-
-    let (id,) = sqlx::query_as::<_, (i64,)>(
-        "INSERT INTO transactions (date, description, memo, balanced_total_cents) VALUES (?, ?, ?, ?) RETURNING id",
-    )
-    .bind(tx.date.to_string())
-    .bind(&tx.description)
-    .bind(&tx.memo)
-    .bind(tx.balanced_total.to_cents())
-    .fetch_one(&mut *db_tx)
-    .await?;
-
-    for line in &tx.lines {
-        sqlx::query(
-            "INSERT INTO transaction_lines (transaction_id, account_id, debit_cents, credit_cents, memo) VALUES (?, ?, ?, ?, ?)",
-        )
-        .bind(id)
-        .bind(line.account_id.0)
-        .bind(line.debit.to_cents())
-        .bind(line.credit.to_cents())
-        .bind(&line.memo)
-        .execute(&mut *db_tx)
-        .await?;
-    }
-
-    // Dropping `db_tx` on any early return above rolls everything back.
-    db_tx.commit().await?;
-    Ok(id)
 }

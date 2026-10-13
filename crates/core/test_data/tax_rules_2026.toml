@@ -14,6 +14,22 @@ additional_medicare_threshold = 200000  # Single filer threshold (not indexed)
 [standard_deduction]
 single = 16100               # 2026 single filer (Rev. Proc. 2025-32)
 
+# Qualified business income deduction (§199A), single filer.
+# Threshold and phase-in from Rev. Proc. 2025-32 §4.26 ($201,750 → $276,750);
+# minimum deduction from §199A(i) as added by the OBBBA.
+[qbi]
+rate = 0.20
+threshold = 201750
+phase_in_range = 75000
+minimum_deduction = 400        # when QBI is at least minimum_qbi
+minimum_qbi = 1000
+
+# Prior-year safe harbor: 110% instead of 100% of last year's tax when last
+# year's AGI was above this amount (Form 1040-ES).
+[safe_harbor]
+high_income_agi = 150000
+high_income_percentage = 1.10
+
 # Single filer 2026 ordinary income brackets (Rev. Proc. 2025-32)
 [[income_brackets.single]]
 floor = 0

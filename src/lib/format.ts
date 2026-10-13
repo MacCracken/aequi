@@ -60,14 +60,11 @@ const GROUPED_AMOUNT = /^(\d{1,3}(?:,\d{3})+)(?:\.(\d*))?$/;
 const MAX_WHOLE_DIGITS = 12;
 
 /**
- * Parse a non-negative dollar amount typed by the user ("12", "12.5",
- * "$1,234.56") into integer cents without floating-point math.
- * Empty input is 0. Returns null for anything else: more than two decimal
- * places, misplaced commas, signs, letters, or absurdly large values.
+ * Parse a non-negative decimal with at most two places ("1.5", "1,234.25")
+ * into integer hundredths without floating-point math. Expects trimmed input;
+ * empty input is 0. Returns null for anything else.
  */
-export function parseDollarsToCents(text: string): number | null {
-  let s = text.trim();
-  if (s.startsWith("$")) s = s.slice(1).trimStart();
+function parseHundredths(s: string): number | null {
   if (s === "") return 0;
 
   const m = PLAIN_AMOUNT.exec(s) ?? GROUPED_AMOUNT.exec(s);
@@ -80,6 +77,58 @@ export function parseDollarsToCents(text: string): number | null {
   const wholeDigits = whole.replace(/^0+/, "");
   if (wholeDigits.length > MAX_WHOLE_DIGITS) return null;
   return Number(wholeDigits || "0") * 100 + Number(frac.padEnd(2, "0"));
+}
+
+/**
+ * Parse a non-negative dollar amount typed by the user ("12", "12.5",
+ * "$1,234.56") into integer cents without floating-point math.
+ * Empty input is 0. Returns null for anything else: more than two decimal
+ * places, misplaced commas, signs, letters, or absurdly large values.
+ */
+export function parseDollarsToCents(text: string): number | null {
+  let s = text.trim();
+  if (s.startsWith("$")) s = s.slice(1).trimStart();
+  return parseHundredths(s);
+}
+
+/**
+ * Parse a quantity ("1", "1.5", "0.25") into hundredths (150 = 1.5) with the
+ * same rules as {@link parseDollarsToCents}. Empty input is 0.
+ */
+export function parseQuantityToHundredths(text: string): number | null {
+  return parseHundredths(text.trim());
+}
+
+/**
+ * Parse a percentage ("8.25", "8.25%") into basis points (825 = 8.25%), at
+ * most two decimal places. Empty input is 0. Range checks are the caller's.
+ */
+export function parsePercentToBps(text: string): number | null {
+  let s = text.trim();
+  if (s.endsWith("%")) s = s.slice(0, -1).trimEnd();
+  return parseHundredths(s);
+}
+
+/**
+ * Format an integer number of hundredths without trailing zeros:
+ * 150 → "1.5", 100 → "1", 825 → "8.25". Used for quantities and percentages
+ * (basis points are hundredths of a percent).
+ */
+export function formatHundredths(hundredths: number): string {
+  const whole = Math.round(hundredths);
+  const sign = whole < 0 ? "-" : "";
+  const abs = Math.abs(whole);
+  const int = Math.floor(abs / 100);
+  const frac = String(abs % 100).padStart(2, "0").replace(/0+$/, "");
+  return frac ? `${sign}${int}.${frac}` : `${sign}${int}`;
+}
+
+/** Cents as plain editable text for an amount field: 15000 → "150.00". */
+export function centsToInputText(cents: number): string {
+  const whole = Math.round(cents);
+  const sign = whole < 0 ? "-" : "";
+  const abs = Math.abs(whole);
+  return `${sign}${Math.floor(abs / 100)}.${String(abs % 100).padStart(2, "0")}`;
 }
 
 export function confidenceLabel(confidence: number): string {

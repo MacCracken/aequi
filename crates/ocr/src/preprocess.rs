@@ -152,8 +152,15 @@ mod tests {
 
     #[test]
     fn rejects_decompression_bomb_before_decoding() {
-        // A 22-byte PGM header claiming 400 megapixels.
-        let err = prepare_for_ocr_from_bytes(b"P5\n20000 20000\n255\n\0\0\0").unwrap_err();
+        // A 57-byte PNG (header chunks only, no pixel data) claiming 400 megapixels.
+        const PNG_20000X20000: &[u8] = &[
+            0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48,
+            0x44, 0x52, 0x00, 0x00, 0x4e, 0x20, 0x00, 0x00, 0x4e, 0x20, 0x08, 0x00, 0x00, 0x00,
+            0x00, 0xc6, 0x1b, 0x19, 0xe5, 0x00, 0x00, 0x00, 0x00, 0x49, 0x44, 0x41, 0x54, 0x35,
+            0xaf, 0x06, 0x1e, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60,
+            0x82,
+        ];
+        let err = prepare_for_ocr_from_bytes(PNG_20000X20000).unwrap_err();
         assert!(
             matches!(
                 err,
@@ -178,5 +185,11 @@ mod tests {
         let img: GrayImage = ImageBuffer::from_fn(3000, 3000, |_, _| Luma([200u8]));
         let result = normalize(DynamicImage::ImageLuma8(img));
         assert!(result.width() <= 2800 && result.height() <= 2800);
+    }
+
+    #[test]
+    fn rejects_formats_outside_the_receipt_set() {
+        // PNM decoding is not compiled in; such files must fail cleanly.
+        assert!(prepare_for_ocr_from_bytes(b"P5\n2 2\n255\n\0\0\0\0").is_err());
     }
 }

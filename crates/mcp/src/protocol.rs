@@ -130,22 +130,57 @@ pub struct ToolResult {
     pub is_error: Option<bool>,
 }
 
-#[derive(Debug, Serialize)]
-pub struct ToolContent {
-    #[serde(rename = "type")]
-    pub content_type: String,
-    pub text: String,
+/// One block of a `tools/call` result's `content` array.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum ToolContent {
+    Text {
+        text: String,
+    },
+    /// A base64-encoded image.
+    Image {
+        data: String,
+        #[serde(rename = "mimeType")]
+        mime_type: String,
+    },
+    /// An embedded binary resource, e.g. a PDF, base64-encoded.
+    Resource {
+        resource: EmbeddedResource,
+    },
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct EmbeddedResource {
+    pub uri: String,
+    #[serde(rename = "mimeType")]
+    pub mime_type: String,
+    pub blob: String,
+}
+
+impl ToolContent {
+    pub fn text(text: impl Into<String>) -> Self {
+        ToolContent::Text { text: text.into() }
+    }
+
+    /// The text of a text block; `None` for other block types.
+    pub fn as_text(&self) -> Option<&str> {
+        match self {
+            ToolContent::Text { text } => Some(text),
+            _ => None,
+        }
+    }
 }
 
 impl ToolResult {
-    pub fn text(text: String) -> Self {
+    pub fn new(content: Vec<ToolContent>) -> Self {
         ToolResult {
-            content: vec![ToolContent {
-                content_type: "text".to_string(),
-                text,
-            }],
+            content,
             is_error: None,
         }
+    }
+
+    pub fn text(text: String) -> Self {
+        ToolResult::new(vec![ToolContent::text(text)])
     }
 
     /// Pretty-printed JSON payload.
@@ -158,10 +193,7 @@ impl ToolResult {
 
     pub fn error(message: String) -> Self {
         ToolResult {
-            content: vec![ToolContent {
-                content_type: "text".to_string(),
-                text: message,
-            }],
+            content: vec![ToolContent::text(message)],
             is_error: Some(true),
         }
     }

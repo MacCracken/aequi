@@ -3,7 +3,11 @@
 //! A missing required argument, a value of the wrong type, or a fractional
 //! number where whole cents are expected is an error, never a silent default.
 
+use std::str::FromStr;
+
 use aequi_core::Quarter;
+use rust_decimal::Decimal;
+use rust_decimal::prelude::ToPrimitive;
 use serde_json::{Map, Value};
 
 use crate::protocol::ToolResult;
@@ -54,6 +58,18 @@ fn as_integer(value: &Value) -> Option<i64> {
     const MAX_EXACT: f64 = 9_007_199_254_740_992.0;
     let f = value.as_f64()?;
     (f.fract() == 0.0 && f.abs() <= MAX_EXACT).then_some(f as i64)
+}
+
+/// The exact decimal value of a JSON number, as written (`1.15` stays 1.15,
+/// not the nearest binary float).
+fn as_decimal(value: &Value) -> Option<Decimal> {
+    let Value::Number(n) = value else {
+        return None;
+    };
+    let text = n.to_string();
+    Decimal::from_str(&text)
+        .or_else(|_| Decimal::from_scientific(&text))
+        .ok()
 }
 
 pub struct Args<'a> {
@@ -148,6 +164,17 @@ impl<'a> Args<'a> {
         }
     }
 
+    /// An amount in whole cents for an update that can also clear a value:
+    /// absent is `None` (leave unchanged), an explicit `null` is `Some(None)`
+    /// (clear), and a number is `Some(Some(cents))`.
+    pub fn nullable_cents(&self, name: &str) -> Result<Option<Option<i64>>, ToolError> {
+        match self.map.and_then(|m| m.get(name)) {
+            None => Ok(None),
+            Some(Value::Null) => Ok(Some(None)),
+            Some(_) => self.opt_cents(name).map(Some),
+        }
+    }
+
     /// A required database id (a positive integer).
     pub fn id(&self, name: &str) -> Result<i64, ToolError> {
         self.opt_id(name)?.ok_or_else(|| self.missing(name))
@@ -172,6 +199,78 @@ impl<'a> Args<'a> {
                 self.label(name)
             ))),
         }
+    }
+
+    pub fn f64(&self, name: &str) -> Result<f64, ToolError> {
+        self.opt_f64(name)?.ok_or_else(|| self.missing(name))
+    }
+
+    pub fn opt_f64(&self, name: &str) -> Result<Option<f64>, ToolError> {
+        match self.get(name) {
+            None => Ok(None),
+            Some(v) => v
+                .as_f64()
+                .filter(|f| f.is_finite())
+                .map(Some)
+                .ok_or_else(|| {
+                    ToolError(format!(
+                        "Argument {} must be a number, got {v}",
+                        self.label(name)
+                    ))
+                }),
+        }
+    }
+
+    /// A required quantity with at most two decimal places, returned in
+    /// hundredths (`1.5` becomes 150).
+    pub fn hundredths(&self, name: &str) -> Result<i64, ToolError> {
+        let value = self.get(name).ok_or_else(|| self.missing(name))?;
+        let err = || {
+            ToolError(format!(
+                "Argument {} must be a number with at most 2 decimal places, got {value}",
+                self.label(name)
+            ))
+        };
+        let scaled = as_decimal(value).ok_or_else(err)? * Decimal::ONE_HUNDRED;
+        if !scaled.fract().is_zero() {
+            return Err(err());
+        }
+        scaled.to_i64().ok_or_else(err)
+    }
+
+    /// An optional nested object.
+    pub fn opt_object(&self, name: &str) -> Result<Option<Args<'a>>, ToolError> {
+        self.get(name)
+            .map(|v| Args::object(v, self.label(name)))
+            .transpose()
+    }
+
+    /// An optional array; absent means empty.
+    pub fn opt_array(&self, name: &str) -> Result<&'a [Value], ToolError> {
+        match self.get(name) {
+            None => Ok(&[]),
+            Some(_) => self.array(name).map(Vec::as_slice),
+        }
+    }
+
+    /// Reject keys other than `allowed`, so a misspelled optional field in a
+    /// nested object fails loudly instead of being ignored.
+    pub fn only(&self, allowed: &[&str]) -> Result<(), ToolError> {
+        let unknown: Vec<String> = self
+            .map
+            .into_iter()
+            .flat_map(|m| m.keys())
+            .filter(|k| !allowed.contains(&k.as_str()))
+            .map(|k| self.label(k))
+            .collect();
+        if unknown.is_empty() {
+            return Ok(());
+        }
+        Err(ToolError(format!(
+            "Unknown argument(s): {}. Expected: {}",
+            unknown.join(", "),
+            allowed.join(", ")
+        )))
     }
 
     /// A required `YYYY-MM-DD` date.
@@ -295,12 +394,74 @@ mod tests {
     }
 
     #[test]
+    fn nullable_cents_distinguishes_absent_and_null() {
+        let params = json!({ "a": 1250, "b": null, "c": 12.5, "d": "5" });
+        let args = Args::new(&params);
+        assert_eq!(args.nullable_cents("a").unwrap(), Some(Some(1250)));
+        assert_eq!(args.nullable_cents("b").unwrap(), Some(None));
+        assert_eq!(args.nullable_cents("zzz").unwrap(), None);
+        assert!(args.nullable_cents("c").is_err());
+        assert!(args.nullable_cents("d").is_err());
+    }
+
+    #[test]
     fn ids_must_be_positive() {
         let params = json!({ "a": 0, "b": -3, "c": 7 });
         let args = Args::new(&params);
         assert!(args.id("a").is_err());
         assert!(args.id("b").is_err());
         assert_eq!(args.id("c").unwrap(), 7);
+    }
+
+    #[test]
+    fn hundredths_are_exact() {
+        let params = json!({
+            "a": 1.5, "b": 2, "c": 1.15, "d": 0.01, "e": 1.005, "f": "1.5",
+            "g": 1e300, "h": 1e-7, "i": 100.10
+        });
+        let args = Args::new(&params);
+        assert_eq!(args.hundredths("a").unwrap(), 150);
+        assert_eq!(args.hundredths("b").unwrap(), 200);
+        assert_eq!(args.hundredths("c").unwrap(), 115);
+        assert_eq!(args.hundredths("d").unwrap(), 1);
+        assert_eq!(args.hundredths("i").unwrap(), 10010);
+        assert!(args.hundredths("e").is_err());
+        assert!(args.hundredths("f").is_err());
+        assert!(args.hundredths("g").is_err());
+        assert!(args.hundredths("h").is_err());
+        assert!(args.hundredths("zzz").unwrap_err().0.contains("Missing"));
+    }
+
+    #[test]
+    fn floats_must_be_numbers() {
+        let params = json!({ "a": 0.5, "b": 1, "c": "0.5" });
+        let args = Args::new(&params);
+        assert_eq!(args.f64("a").unwrap(), 0.5);
+        assert_eq!(args.f64("b").unwrap(), 1.0);
+        assert!(args.f64("c").is_err());
+        assert_eq!(args.opt_f64("zzz").unwrap(), None);
+    }
+
+    #[test]
+    fn unknown_nested_keys_rejected() {
+        let line = json!({ "description": "x", "is_taxable": true });
+        let args = Args::object(&line, "lines[0]".to_string()).unwrap();
+        let err = args.only(&["description", "taxable"]).unwrap_err();
+        assert!(err.0.contains("lines[0].is_taxable"), "{}", err.0);
+        assert!(args.only(&["description", "is_taxable"]).is_ok());
+    }
+
+    #[test]
+    fn optional_containers() {
+        let params = json!({ "list": [1], "obj": { "x": 1 }, "bad": 3 });
+        let args = Args::new(&params);
+        assert_eq!(args.opt_array("list").unwrap().len(), 1);
+        assert!(args.opt_array("none").unwrap().is_empty());
+        assert!(args.opt_array("bad").is_err());
+        let obj = args.opt_object("obj").unwrap().unwrap();
+        assert_eq!(obj.i64("x").unwrap(), 1);
+        assert!(args.opt_object("none").unwrap().is_none());
+        assert!(args.opt_object("bad").is_err());
     }
 
     #[test]

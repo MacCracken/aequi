@@ -3,7 +3,7 @@ use aequi_core::{
     ValidatedTransaction,
 };
 use aequi_ocr::{PipelineError, ReceiptPipeline};
-use aequi_storage::DbPool;
+use aequi_storage::{DbPool, InvoiceDetail, InvoiceSummary, NewInvoice};
 use chrono::{Datelike, NaiveDate};
 use rust_decimal::prelude::ToPrimitive;
 use serde::{Deserialize, Serialize};
@@ -138,6 +138,10 @@ pub struct TransactionInput {
     pub description: String,
     pub lines: Vec<TransactionLineInput>,
     pub memo: Option<String>,
+    /// The payee or payer, e.g. the contractor a payment went to (counts
+    /// toward their 1099-NEC total when paid from a bank or cash account).
+    #[serde(default)]
+    pub contact_id: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -156,6 +160,49 @@ pub struct TransactionOutput {
     pub balanced_total: String,
     pub memo: Option<String>,
     pub created_at: String,
+    pub contact_id: Option<i64>,
+    pub contact_name: Option<String>,
+}
+
+/// A `transactions` row joined with its contact's name.
+#[derive(sqlx::FromRow)]
+struct TransactionRow {
+    id: i64,
+    date: String,
+    description: String,
+    memo: Option<String>,
+    balanced_total_cents: i64,
+    created_at: String,
+    contact_id: Option<i64>,
+    contact_name: Option<String>,
+}
+
+impl From<TransactionRow> for TransactionOutput {
+    fn from(r: TransactionRow) -> Self {
+        TransactionOutput {
+            id: r.id,
+            date: r.date,
+            description: r.description,
+            balanced_total: Money::from_cents(r.balanced_total_cents).to_string(),
+            memo: r.memo,
+            created_at: r.created_at,
+            contact_id: r.contact_id,
+            contact_name: r.contact_name,
+        }
+    }
+}
+
+/// The transaction query that fills a [`TransactionRow`], followed by `$tail`
+/// (filter / order / limit; columns are qualified with `t.`).
+macro_rules! transaction_query {
+    ($tail:literal) => {
+        concat!(
+            "SELECT t.id, t.date, t.description, t.memo, t.balanced_total_cents, t.created_at, \
+             t.contact_id, c.name AS contact_name \
+             FROM transactions t LEFT JOIN contacts c ON c.id = t.contact_id ",
+            $tail
+        )
+    };
 }
 
 #[derive(Debug, Serialize)]
@@ -187,8 +234,16 @@ pub async fn create_transaction(
         let s = state.lock().await;
         s.db.clone()
     };
-    let db = &db;
+    insert_transaction(&db, input).await
+}
 
+/// Resolve account codes and post the transaction. Storage validates the
+/// entry (balanced, non-negative, two or more lines), rejects archived
+/// accounts and an unknown contact, and inserts it atomically.
+async fn insert_transaction(
+    db: &DbPool,
+    input: TransactionInput,
+) -> Result<TransactionOutput, CommandError> {
     let description = input.description.trim().to_string();
     if description.is_empty() {
         return Err(CommandError::validation(
@@ -204,7 +259,7 @@ pub async fn create_transaction(
     let date = NaiveDate::parse_from_str(&input.date, "%Y-%m-%d")
         .map_err(|_| CommandError::validation("Invalid date format (expected YYYY-MM-DD)"))?;
 
-    let mut lines = Vec::new();
+    let mut lines = Vec::with_capacity(input.lines.len());
     for line in input.lines {
         let account = aequi_storage::get_account_by_code(db, &line.account_code)
             .await?
@@ -228,51 +283,14 @@ pub async fn create_transaction(
         lines,
         memo: input.memo,
     };
+    let id = aequi_storage::create_ledger_transaction(db, tx, input.contact_id).await?;
 
-    // Rejects negative, one-sided-and-both, zero and out-of-range lines too.
-    let validated = ValidatedTransaction::validate(tx)?;
-
-    // Use a SQL transaction for atomicity
-    let mut sql_tx = db.begin().await?;
-
-    let result = sqlx::query(
-        "INSERT INTO transactions (date, description, memo, balanced_total_cents) VALUES (?, ?, ?, ?) RETURNING id, date, description, memo, balanced_total_cents, created_at"
-    )
-    .bind(validated.date.to_string())
-    .bind(&validated.description)
-    .bind(&validated.memo)
-    .bind(validated.balanced_total.to_cents())
-    .fetch_one(&mut *sql_tx)
-    .await?;
-
-    let id: i64 = result.get("id");
-    let balanced_cents: i64 = result.get("balanced_total_cents");
-
-    for line in &validated.lines {
-        sqlx::query(
-            "INSERT INTO transaction_lines (transaction_id, account_id, debit_cents, credit_cents, memo) VALUES (?, ?, ?, ?, ?)"
-        )
+    sqlx::query_as::<_, TransactionRow>(transaction_query!("WHERE t.id = ?"))
         .bind(id)
-        .bind(line.account_id.0)
-        .bind(line.debit.to_cents())
-        .bind(line.credit.to_cents())
-        .bind(&line.memo)
-        .execute(&mut *sql_tx)
-        .await?;
-    }
-
-    sql_tx.commit().await?;
-
-    let created_at: String = result.get("created_at");
-
-    Ok(TransactionOutput {
-        id,
-        date: validated.date.to_string(),
-        description: validated.description,
-        balanced_total: Money::from_cents(balanced_cents).to_string(),
-        memo: validated.memo,
-        created_at,
-    })
+        .fetch_optional(db)
+        .await?
+        .map(TransactionOutput::from)
+        .ok_or_else(|| CommandError::internal("Transaction not found after insert"))
 }
 
 /// Sentinels for an open-ended date range. Dates are stored as YYYY-MM-DD
@@ -334,25 +352,15 @@ async fn query_transactions(
     start: &str,
     end: &str,
 ) -> Result<Vec<TransactionOutput>, CommandError> {
-    let rows = sqlx::query_as::<_, (i64, String, String, Option<String>, i64, String)>(
-        "SELECT id, date, description, memo, balanced_total_cents, created_at FROM transactions WHERE date >= ? AND date <= ? ORDER BY date DESC, id DESC"
-    )
+    let rows = sqlx::query_as::<_, TransactionRow>(transaction_query!(
+        "WHERE t.date >= ? AND t.date <= ? ORDER BY t.date DESC, t.id DESC"
+    ))
     .bind(start)
     .bind(end)
     .fetch_all(db)
     .await?;
 
-    Ok(rows
-        .into_iter()
-        .map(|r| TransactionOutput {
-            id: r.0,
-            date: r.1,
-            description: r.2,
-            memo: r.3,
-            balanced_total: Money::from_cents(r.4).to_string(),
-            created_at: r.5,
-        })
-        .collect())
+    Ok(rows.into_iter().map(TransactionOutput::from).collect())
 }
 
 /// Income and expense totals for the period. With no bounds at all this is
@@ -435,12 +443,18 @@ pub struct ReceiptOutput {
     pub transaction_id: Option<i64>,
     pub attachment_path: String,
     pub needs_review: bool,
+    /// The fields were filled in by an AI agent (over MCP) rather than read
+    /// by OCR: they have a confidence but no OCR text backs them. They still
+    /// need the user's approval.
+    pub filled_by_agent: bool,
     pub created_at: String,
 }
 
 impl From<aequi_storage::ReceiptRecord> for ReceiptOutput {
     fn from(r: aequi_storage::ReceiptRecord) -> Self {
         let needs_review = r.confidence < 0.7;
+        let filled_by_agent =
+            r.confidence > 0.0 && r.ocr_text.as_deref().is_none_or(|t| t.trim().is_empty());
         ReceiptOutput {
             id: r.id,
             file_hash: r.file_hash,
@@ -455,6 +469,7 @@ impl From<aequi_storage::ReceiptRecord> for ReceiptOutput {
             transaction_id: r.transaction_id,
             attachment_path: r.attachment_path,
             needs_review,
+            filled_by_agent,
             created_at: r.created_at,
         }
     }
@@ -625,11 +640,25 @@ pub struct QuarterlyEstimateOutput {
     pub se_tax_deduction_cents: i64,
     pub additional_medicare_tax_cents: i64,
     pub standard_deduction_cents: i64,
+    /// Qualified business income deduction (§199A), taken after the standard
+    /// deduction.
+    pub qbi_deduction_cents: i64,
+    /// Income taxed by the brackets (after the standard and QBI deductions).
     pub taxable_income_cents: i64,
     pub income_tax_cents: i64,
     /// Projected full-year tax.
     pub total_tax_cents: i64,
+    /// The smaller of 90% of the projected tax and the prior-year requirement
+    /// (`prior_year_tax_cents` × `safe_harbor_prior_year_percentage`).
     pub safe_harbor_cents: i64,
+    /// Share of last year's tax the prior-year safe harbor requires, as a
+    /// decimal string: "1.00", or "1.10" when last year's AGI was above the
+    /// high-income threshold.
+    pub safe_harbor_prior_year_percentage: String,
+    /// Last year's total tax the safe harbor is based on: the filed return's
+    /// figure when entered, else the app's own projection; `None` when neither
+    /// exists (the safe harbor is then 90% of this year's projection).
+    pub prior_year_tax_cents: Option<i64>,
     /// This quarter's installment (a quarter of the projected annual tax).
     pub quarterly_payment_cents: i64,
     pub payment_due_date: String,
@@ -660,9 +689,17 @@ pub async fn estimate_quarterly_tax(
         let s = state.lock().await;
         s.db.clone()
     };
-    let db = &db;
+    quarterly_estimate(&db, year, quarter, today()).await
+}
 
-    let today = today();
+/// Compute (and persist) the estimate for `year`/`quarter` — the current ones
+/// when omitted — as of `today`.
+async fn quarterly_estimate(
+    db: &DbPool,
+    year: Option<u16>,
+    quarter: Option<u8>,
+    today: NaiveDate,
+) -> Result<QuarterlyEstimateOutput, CommandError> {
     let yr = year.unwrap_or(today.year() as u16);
     let qtr = match quarter {
         Some(q) => Quarter::new(q)
@@ -673,9 +710,8 @@ pub async fn estimate_quarterly_tax(
     let rules = load_tax_rules(yr)?;
     let fy = FiscalYear::new(yr);
 
-    let prior_year_tax = aequi_storage::get_prior_year_total_tax(db, yr)
-        .await?
-        .map(Money::from_cents);
+    let prior_year_tax_cents = aequi_storage::get_prior_year_total_tax(db, yr).await?;
+    let prior_year_tax = prior_year_tax_cents.map(Money::from_cents);
 
     // Annualize activity through the end of the installment period, or
     // through today while the period is still open.
@@ -713,10 +749,13 @@ pub async fn estimate_quarterly_tax(
         se_tax_deduction_cents: cents(est.se_tax_deduction)?,
         additional_medicare_tax_cents: cents(est.additional_medicare_tax)?,
         standard_deduction_cents: cents(est.standard_deduction)?,
+        qbi_deduction_cents: cents(est.qbi_deduction)?,
         taxable_income_cents: cents(est.taxable_income)?,
         income_tax_cents: cents(est.estimated_income_tax)?,
         total_tax_cents: cents(est.total_tax_estimate)?,
         safe_harbor_cents: cents(est.safe_harbor_amount)?,
+        safe_harbor_prior_year_percentage: format!("{:.2}", est.safe_harbor_prior_year_percentage),
+        prior_year_tax_cents,
         quarterly_payment_cents: cents(est.quarterly_payment)?,
         payment_due_date: est.payment_due_date.to_string(),
         schedule_c_lines,
@@ -805,6 +844,70 @@ fn quarter_to_u8(q: Quarter) -> u8 {
     }
 }
 
+// ── Filed tax return figures ────────────────────────────────────────────────
+
+/// Years a filed return can be entered for.
+const TAX_RETURN_YEARS: std::ops::RangeInclusive<u16> = 2000..=2100;
+
+fn validate_tax_return_year(year: u16) -> Result<(), CommandError> {
+    if TAX_RETURN_YEARS.contains(&year) {
+        Ok(())
+    } else {
+        Err(CommandError::validation(format!(
+            "Year must be between {} and {}, got {year}",
+            TAX_RETURN_YEARS.start(),
+            TAX_RETURN_YEARS.end()
+        )))
+    }
+}
+
+async fn load_tax_return(
+    db: &DbPool,
+    year: u16,
+) -> Result<aequi_storage::TaxReturnFigures, CommandError> {
+    validate_tax_return_year(year)?;
+    Ok(aequi_storage::get_tax_return_figures(db, year).await?)
+}
+
+async fn save_tax_return(
+    db: &DbPool,
+    year: u16,
+    figures: aequi_storage::TaxReturnFigures,
+) -> Result<aequi_storage::TaxReturnFigures, CommandError> {
+    validate_tax_return_year(year)?;
+    aequi_storage::set_tax_return_figures(db, year, figures).await?;
+    Ok(aequi_storage::get_tax_return_figures(db, year).await?)
+}
+
+/// Figures entered from the user's filed return for `year` (each `None` when
+/// unknown). Last year's make the prior-year safe harbor exact.
+#[tauri::command]
+pub async fn get_tax_return(
+    state: State<'_, Arc<Mutex<AppState>>>,
+    year: u16,
+) -> Result<aequi_storage::TaxReturnFigures, CommandError> {
+    let db = {
+        let s = state.lock().await;
+        s.db.clone()
+    };
+    load_tax_return(&db, year).await
+}
+
+/// Store the figures from the filed return for `year` (`None` clears a
+/// figure) and return what is now stored.
+#[tauri::command]
+pub async fn set_tax_return(
+    state: State<'_, Arc<Mutex<AppState>>>,
+    year: u16,
+    figures: aequi_storage::TaxReturnFigures,
+) -> Result<aequi_storage::TaxReturnFigures, CommandError> {
+    let db = {
+        let s = state.lock().await;
+        s.db.clone()
+    };
+    save_tax_return(&db, year, figures).await
+}
+
 // ── Contact commands ─────────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
@@ -877,75 +980,96 @@ pub async fn create_contact(
 
 // ── Invoice commands ─────────────────────────────────────────────────────────
 
-#[derive(Debug, Deserialize)]
-pub struct InvoiceInput {
-    pub invoice_number: String,
-    pub contact_id: i64,
-    pub issue_date: String,
-    pub due_date: String,
-    pub notes: Option<String>,
-    pub terms: Option<String>,
+/// A trimmed optional text input, with blank meaning "not given".
+fn non_blank(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|v| !v.is_empty())
 }
 
+/// Report a missing invoice as such rather than as a generic missing record.
+fn invoice_error(e: sqlx::Error) -> CommandError {
+    match e {
+        sqlx::Error::RowNotFound => CommandError::not_found("Invoice not found"),
+        other => other.into(),
+    }
+}
+
+async fn invoice_detail(db: &DbPool, id: i64) -> Result<InvoiceDetail, CommandError> {
+    aequi_storage::get_invoice_detail(db, id)
+        .await?
+        .ok_or_else(|| CommandError::not_found("Invoice not found"))
+}
+
+/// All invoices, newest first, with their totals, amount paid and balance.
 #[tauri::command]
 pub async fn get_invoices(
     state: State<'_, Arc<Mutex<AppState>>>,
-) -> Result<Vec<aequi_storage::InvoiceRecord>, CommandError> {
+) -> Result<Vec<InvoiceSummary>, CommandError> {
     let db = {
         let s = state.lock().await;
         s.db.clone()
     };
-    Ok(aequi_storage::get_all_invoices(&db).await?)
+    Ok(aequi_storage::list_invoice_summaries(&db).await?)
 }
 
+/// One invoice with its line items, tax lines, payments and totals.
+#[tauri::command]
+pub async fn get_invoice(
+    state: State<'_, Arc<Mutex<AppState>>>,
+    id: i64,
+) -> Result<InvoiceDetail, CommandError> {
+    let db = {
+        let s = state.lock().await;
+        s.db.clone()
+    };
+    invoice_detail(&db, id).await
+}
+
+/// Create a draft invoice. Storage validates the number (unique), dates,
+/// contact, line items, tax rates and discount.
 #[tauri::command]
 pub async fn create_invoice(
     state: State<'_, Arc<Mutex<AppState>>>,
-    input: InvoiceInput,
-) -> Result<aequi_storage::InvoiceRecord, CommandError> {
-    // Input validation
-    let invoice_number = input.invoice_number.trim().to_string();
-    if invoice_number.is_empty() {
-        return Err(CommandError::validation("Invoice number is required"));
-    }
-    let issue_date = NaiveDate::parse_from_str(&input.issue_date, "%Y-%m-%d")
-        .map_err(|_| CommandError::validation("Invalid issue date format (expected YYYY-MM-DD)"))?;
-    let due_date = NaiveDate::parse_from_str(&input.due_date, "%Y-%m-%d")
-        .map_err(|_| CommandError::validation("Invalid due date format (expected YYYY-MM-DD)"))?;
-    if due_date < issue_date {
-        return Err(CommandError::validation(
-            "Due date must be on or after issue date",
-        ));
-    }
-
+    input: NewInvoice,
+) -> Result<InvoiceDetail, CommandError> {
     let db = {
         let s = state.lock().await;
         s.db.clone()
     };
+    let id = aequi_storage::create_invoice(&db, &input).await?;
+    invoice_detail(&db, id).await
+}
 
-    // Verify contact exists
-    aequi_storage::get_contact_by_id(&db, input.contact_id)
-        .await?
-        .ok_or_else(|| CommandError::not_found("Contact not found"))?;
+/// Replace the contents of a draft invoice (sent invoices can't be edited).
+#[tauri::command]
+pub async fn update_invoice(
+    state: State<'_, Arc<Mutex<AppState>>>,
+    id: i64,
+    input: NewInvoice,
+) -> Result<InvoiceDetail, CommandError> {
+    let db = {
+        let s = state.lock().await;
+        s.db.clone()
+    };
+    aequi_storage::update_draft_invoice(&db, id, &input)
+        .await
+        .map_err(invoice_error)?;
+    invoice_detail(&db, id).await
+}
 
-    let id = aequi_storage::insert_invoice(
-        &db,
-        &invoice_number,
-        input.contact_id,
-        "Draft",
-        None,
-        &input.issue_date,
-        &input.due_date,
-        None,
-        None,
-        input.notes.as_deref(),
-        input.terms.as_deref(),
-    )
-    .await?;
-
-    aequi_storage::get_invoice_by_id(&db, id)
-        .await?
-        .ok_or_else(|| CommandError::not_found("Invoice not found after insert"))
+/// Void an invoice that has no payments (Draft, Sent or Viewed).
+#[tauri::command]
+pub async fn void_invoice(
+    state: State<'_, Arc<Mutex<AppState>>>,
+    id: i64,
+    reason: String,
+) -> Result<(), CommandError> {
+    let db = {
+        let s = state.lock().await;
+        s.db.clone()
+    };
+    aequi_storage::void_invoice(&db, id, reason.trim())
+        .await
+        .map_err(invoice_error)
 }
 
 #[tauri::command]
@@ -965,11 +1089,15 @@ pub struct PaymentInput {
     pub amount_cents: i64,
     pub date: String,
     pub method: Option<String>,
+    /// Asset account the money went into; storage defaults to 1000 Checking.
+    #[serde(default)]
+    pub deposit_account_code: Option<String>,
 }
 
-/// Record a payment against an invoice. Storage validates the amount, date
-/// and invoice state (no void/paid invoices, no overpayment) and advances the
-/// invoice to PartiallyPaid / Paid.
+/// Record a payment against an invoice. Storage validates the amount, date,
+/// deposit account and invoice state (no void/paid invoices, no overpayment),
+/// posts the cash-basis ledger entry and advances the invoice to
+/// PartiallyPaid / Paid, all atomically.
 #[tauri::command]
 pub async fn record_invoice_payment(
     state: State<'_, Arc<Mutex<AppState>>>,
@@ -979,25 +1107,87 @@ pub async fn record_invoice_payment(
         let s = state.lock().await;
         s.db.clone()
     };
-    Ok(aequi_storage::insert_payment(
-        &db,
+    record_payment(&db, &input).await
+}
+
+async fn record_payment(db: &DbPool, input: &PaymentInput) -> Result<i64, CommandError> {
+    aequi_storage::insert_payment(
+        db,
         input.invoice_id,
         input.amount_cents,
         &input.date,
-        input.method.as_deref(),
-        None,
+        non_blank(input.method.as_deref()),
+        non_blank(input.deposit_account_code.as_deref()),
     )
-    .await?)
+    .await
+    .map_err(invoice_error)
+}
+
+/// Invoice statuses that are awaiting payment.
+const OPEN_INVOICE_STATUSES: [&str; 3] = ["Sent", "Viewed", "PartiallyPaid"];
+
+/// Whether the client still owes money on this invoice: it has been sent (not
+/// a draft, paid or void) and has a balance left.
+fn is_receivable(inv: &InvoiceSummary) -> bool {
+    OPEN_INVOICE_STATUSES.contains(&inv.invoice.status_type.as_str())
+        && inv.totals.balance_cents > 0
+}
+
+/// Whether a receivable invoice is past due on `today` (the user's local date;
+/// an invoice due today is not overdue yet).
+fn is_overdue(inv: &InvoiceSummary, today: NaiveDate) -> bool {
+    is_receivable(inv)
+        && NaiveDate::parse_from_str(&inv.invoice.due_date, "%Y-%m-%d").is_ok_and(|d| d < today)
+}
+
+/// Money owed by clients on sent invoices.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Receivables {
+    outstanding: u32,
+    overdue: u32,
+    balance_cents: i64,
+}
+
+fn receivables(invoices: &[InvoiceSummary], today: NaiveDate) -> Receivables {
+    invoices
+        .iter()
+        .filter(|inv| is_receivable(inv))
+        .fold(Receivables::default(), |mut r, inv| {
+            r.outstanding += 1;
+            r.overdue += u32::from(is_overdue(inv, today));
+            r.balance_cents = r.balance_cents.saturating_add(inv.totals.balance_cents);
+            r
+        })
 }
 
 #[derive(Debug, Serialize)]
 pub struct NecSummaryEntry {
     pub contact_id: i64,
     pub contact_name: String,
+    /// Paid to the contractor from bank or cash accounts during the year.
     pub ytd_cents: i64,
+    /// Whether `ytd_cents` reaches the year's 1099-NEC filing threshold.
     pub over_threshold: bool,
+    pub threshold_cents: i64,
 }
 
+/// 1099-NEC totals: what each contractor was paid during `year`.
+async fn nec_summary(db: &DbPool, year: u16) -> Result<Vec<NecSummaryEntry>, CommandError> {
+    let threshold_cents = cents(aequi_core::nec_threshold(year))?;
+    let rows = aequi_storage::get_contractor_ytd_payments(db, year).await?;
+    Ok(rows
+        .into_iter()
+        .map(|(contact_id, contact_name, ytd_cents)| NecSummaryEntry {
+            contact_id,
+            contact_name,
+            ytd_cents,
+            over_threshold: aequi_core::check_1099_threshold(Money::from_cents(ytd_cents), year),
+            threshold_cents,
+        })
+        .collect())
+}
+
+/// Payments made to each contractor in `year` (default: the current year).
 #[tauri::command]
 pub async fn get_1099_summary(
     state: State<'_, Arc<Mutex<AppState>>>,
@@ -1007,21 +1197,7 @@ pub async fn get_1099_summary(
         let s = state.lock().await;
         s.db.clone()
     };
-    let yr = year.unwrap_or(today().year() as u16);
-
-    // Single JOIN query instead of N+1
-    let rows = aequi_storage::get_contractor_ytd_payments(&db, yr).await?;
-
-    let entries = rows
-        .into_iter()
-        .map(|(id, name, ytd)| NecSummaryEntry {
-            contact_id: id,
-            contact_name: name,
-            ytd_cents: ytd,
-            over_threshold: aequi_core::check_1099_threshold(Money::from_cents(ytd), yr),
-        })
-        .collect();
-    Ok(entries)
+    nec_summary(&db, year.unwrap_or(today().year() as u16)).await
 }
 
 // ── Email delivery ──────────────────────────────────────────────────────────
@@ -1081,6 +1257,12 @@ pub async fn send_invoice(
     }
 
     let lines = aequi_storage::get_invoice_lines(&db, input.invoice_id).await?;
+    // Invoices created before line items existed have none (and total $0).
+    if lines.is_empty() {
+        return Err(CommandError::validation(
+            "Add at least one line item before sending",
+        ));
+    }
     let tax_lines = aequi_storage::get_invoice_tax_lines(&db, input.invoice_id).await?;
     let invoice = aequi_storage::invoice_from_records(&rec, &lines, &tax_lines)?;
 
@@ -1357,6 +1539,17 @@ pub async fn check_for_updates(app: tauri::AppHandle) -> Result<UpdateStatus, Co
 
 // ── Notification commands ───────────────────────────────────────────────────
 
+/// Notification text for the overdue invoices, if there are any.
+fn overdue_notice(overdue: &[&InvoiceSummary]) -> Option<String> {
+    match overdue {
+        [] => None,
+        [inv] => Some(format!("Invoice {} is overdue", inv.invoice.invoice_number)),
+        many => Some(format!("{} invoices are past due", many.len())),
+    }
+}
+
+/// Notify about invoices that are past due (by the local date) and still have
+/// a balance owed. Returns how many there are.
 #[tauri::command]
 pub async fn check_overdue_invoices(
     app: tauri::AppHandle,
@@ -1366,36 +1559,22 @@ pub async fn check_overdue_invoices(
         let s = state.lock().await;
         s.db.clone()
     };
-    let aging = aequi_storage::get_invoice_aging(&db).await?;
-
-    let today = today();
-    let overdue: Vec<_> = aging
+    let invoices = aequi_storage::list_invoice_summaries(&db).await?;
+    let overdue: Vec<_> = invoices
         .iter()
-        .filter(|inv| {
-            NaiveDate::parse_from_str(&inv.due_date, "%Y-%m-%d")
-                .map(|d| d < today)
-                .unwrap_or(false)
-        })
+        .filter(|inv| is_overdue(inv, today()))
         .collect();
-
     let count = overdue.len() as u32;
 
-    if count > 0 {
-        let body = if count == 1 {
-            format!("Invoice {} is overdue", overdue[0].invoice_number)
-        } else {
-            format!("{count} invoices are past due")
-        };
-
-        if let Err(e) = app
+    if let Some(body) = overdue_notice(&overdue)
+        && let Err(e) = app
             .notification()
             .builder()
             .title("Overdue Invoices")
             .body(&body)
             .show()
-        {
-            tracing::warn!("Failed to show overdue-invoice notification: {e}");
-        }
+    {
+        tracing::warn!("Failed to show overdue-invoice notification: {e}");
     }
 
     Ok(count)
@@ -1408,8 +1587,12 @@ pub struct DashboardSummary {
     pub ytd_income_cents: i64,
     pub ytd_expenses_cents: i64,
     pub ytd_net_profit_cents: i64,
+    /// Sent invoices with a balance still owed.
     pub outstanding_invoices: u32,
+    /// Outstanding invoices past their due date.
     pub overdue_invoices: u32,
+    /// Total balance owed on outstanding invoices.
+    pub outstanding_receivables_cents: i64,
     pub pending_receipts: u32,
     pub total_accounts: u32,
     pub total_transactions: u32,
@@ -1458,17 +1641,9 @@ pub async fn get_dashboard_summary(
     let ytd_income = pl_row.0;
     let ytd_expenses = pl_row.1;
 
-    // Outstanding + overdue invoices
-    let aging = aequi_storage::get_invoice_aging(db).await?;
-    let outstanding = aging.len() as u32;
-    let overdue = aging
-        .iter()
-        .filter(|inv| {
-            NaiveDate::parse_from_str(&inv.due_date, "%Y-%m-%d")
-                .map(|d| d < now)
-                .unwrap_or(false)
-        })
-        .count() as u32;
+    // Outstanding + overdue invoices (paid, void and $0 invoices never count)
+    let invoices = aequi_storage::list_invoice_summaries(db).await?;
+    let owed = receivables(&invoices, now);
 
     // Pending receipts
     let receipts = aequi_storage::get_receipts_pending_review(db).await?;
@@ -1483,23 +1658,14 @@ pub async fn get_dashboard_summary(
         .await?;
 
     // Recent transactions (last 5)
-    let recent = sqlx::query_as::<_, (i64, String, String, Option<String>, i64, String)>(
-        "SELECT id, date, description, memo, balanced_total_cents, created_at FROM transactions ORDER BY date DESC, id DESC LIMIT 5"
-    )
+    let recent_transactions = sqlx::query_as::<_, TransactionRow>(transaction_query!(
+        "ORDER BY t.date DESC, t.id DESC LIMIT 5"
+    ))
     .fetch_all(db)
-    .await?;
-
-    let recent_transactions: Vec<TransactionOutput> = recent
-        .into_iter()
-        .map(|r| TransactionOutput {
-            id: r.0,
-            date: r.1,
-            description: r.2,
-            memo: r.3,
-            balanced_total: Money::from_cents(r.4).to_string(),
-            created_at: r.5,
-        })
-        .collect();
+    .await?
+    .into_iter()
+    .map(TransactionOutput::from)
+    .collect();
 
     // Current quarter's estimated tax still to pay
     let current_quarter = quarter_to_u8(quarter_of(now));
@@ -1512,8 +1678,9 @@ pub async fn get_dashboard_summary(
         ytd_income_cents: ytd_income,
         ytd_expenses_cents: ytd_expenses,
         ytd_net_profit_cents: ytd_income - ytd_expenses,
-        outstanding_invoices: outstanding,
-        overdue_invoices: overdue,
+        outstanding_invoices: owed.outstanding,
+        overdue_invoices: owed.overdue,
+        outstanding_receivables_cents: owed.balance_cents,
         pending_receipts,
         total_accounts: accounts.0 as u32,
         total_transactions: tx_count.0 as u32,
@@ -1806,5 +1973,495 @@ mod tests {
         assert_eq!(rel.code, "VALIDATION");
         let dotdot = is_within(&tmp.path().join("x").join("..").join("data"), &data).unwrap_err();
         assert_eq!(dotdot.code, "VALIDATION");
+    }
+
+    async fn contact(db: &DbPool, name: &str, is_contractor: bool) -> i64 {
+        let kind = if is_contractor {
+            "Contractor"
+        } else {
+            "Client"
+        };
+        aequi_storage::insert_contact(db, name, None, None, None, kind, is_contractor, None, None)
+            .await
+            .unwrap()
+    }
+
+    fn tx_input(
+        date: &str,
+        lines: &[(&str, i64, i64)],
+        contact_id: Option<i64>,
+    ) -> TransactionInput {
+        TransactionInput {
+            date: date.into(),
+            description: "Test entry".into(),
+            lines: lines
+                .iter()
+                .map(|&(code, debit_cents, credit_cents)| TransactionLineInput {
+                    account_code: code.into(),
+                    debit_cents,
+                    credit_cents,
+                    memo: None,
+                })
+                .collect(),
+            memo: None,
+            contact_id,
+        }
+    }
+
+    #[test]
+    fn transaction_contact_id_is_optional() {
+        let json = serde_json::json!({
+            "date": "2026-03-01",
+            "description": "Coffee",
+            "lines": [],
+            "memo": null,
+        });
+        let input: TransactionInput = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(input.contact_id, None);
+
+        let mut with_contact = json;
+        with_contact["contact_id"] = 7.into();
+        let input: TransactionInput = serde_json::from_value(with_contact).unwrap();
+        assert_eq!(input.contact_id, Some(7));
+    }
+
+    #[tokio::test]
+    async fn created_transactions_carry_their_payee() {
+        let db = test_db().await;
+        let ana = contact(&db, "Ana Designer", true).await;
+
+        let out = insert_transaction(
+            &db,
+            tx_input(
+                "2026-03-01",
+                &[("5080", 25_000, 0), ("1000", 0, 25_000)],
+                Some(ana),
+            ),
+        )
+        .await
+        .unwrap();
+        assert_eq!(out.contact_id, Some(ana));
+        assert_eq!(out.contact_name.as_deref(), Some("Ana Designer"));
+        assert_eq!(out.balanced_total, Money::from_cents(25_000).to_string());
+
+        let plain = insert_transaction(
+            &db,
+            tx_input("2026-03-02", &[("5010", 500, 0), ("1000", 0, 500)], None),
+        )
+        .await
+        .unwrap();
+        assert_eq!((plain.contact_id, plain.contact_name), (None, None));
+
+        let listed = query_transactions(&db, MIN_DATE, MAX_DATE).await.unwrap();
+        let names: Vec<_> = listed
+            .iter()
+            .map(|t| (t.id, t.contact_name.as_deref()))
+            .collect();
+        assert_eq!(names, [(plain.id, None), (out.id, Some("Ana Designer"))]);
+    }
+
+    #[tokio::test]
+    async fn invalid_transactions_are_rejected() {
+        let db = test_db().await;
+        let ok = [("5010", 500, 0), ("1000", 0, 500)];
+        let cases = [
+            (
+                tx_input("2026-03-01", &[("5010", 500, 0), ("1000", 0, 400)], None),
+                "VALIDATION",
+            ),
+            (
+                tx_input("2026-03-01", &[("5010", 500, 500)], None),
+                "VALIDATION",
+            ),
+            (tx_input("2026-03-01", &ok, Some(999)), "VALIDATION"),
+            (tx_input("03/01/2026", &ok, None), "VALIDATION"),
+            (
+                tx_input("2026-03-01", &[("9999", 500, 0), ("1000", 0, 500)], None),
+                "NOT_FOUND",
+            ),
+            (
+                TransactionInput {
+                    description: "  ".into(),
+                    ..tx_input("2026-03-01", &ok, None)
+                },
+                "VALIDATION",
+            ),
+        ];
+        for (input, code) in cases {
+            let what = format!("{input:?}");
+            let err = insert_transaction(&db, input).await.unwrap_err();
+            assert_eq!(err.code, code, "{what}: {}", err.message);
+        }
+
+        sqlx::query("UPDATE accounts SET is_archived = 1 WHERE code = '5010'")
+            .execute(&db)
+            .await
+            .unwrap();
+        let err = insert_transaction(&db, tx_input("2026-03-01", &ok, None))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "VALIDATION");
+
+        let (count,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM transactions")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    fn summary(status: &str, due_date: &str, total_cents: i64, paid_cents: i64) -> InvoiceSummary {
+        InvoiceSummary {
+            invoice: aequi_storage::InvoiceRecord {
+                id: 1,
+                invoice_number: format!("INV-{status}"),
+                contact_id: 1,
+                status_type: status.into(),
+                status_data: None,
+                issue_date: "2026-01-01".into(),
+                due_date: due_date.into(),
+                discount_type: None,
+                discount_value: None,
+                notes: None,
+                terms: None,
+                created_at: String::new(),
+                updated_at: String::new(),
+            },
+            totals: aequi_storage::InvoiceTotals {
+                subtotal_cents: total_cents,
+                total_cents,
+                paid_cents,
+                balance_cents: (total_cents - paid_cents).max(0),
+                ..Default::default()
+            },
+        }
+    }
+
+    fn day(s: &str) -> NaiveDate {
+        NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap()
+    }
+
+    #[test]
+    fn receivables_count_only_sent_invoices_with_a_balance() {
+        let invoices = [
+            summary("Sent", "2026-03-01", 10_000, 0),
+            summary("Viewed", "2026-04-01", 5_000, 0),
+            summary("PartiallyPaid", "2026-02-01", 8_000, 3_000),
+            summary("Draft", "2026-01-15", 9_000, 0),
+            summary("Paid", "2026-01-15", 7_000, 7_000),
+            summary("Void", "2026-01-15", 6_000, 0),
+            // Legacy invoice without line items: nothing is owed.
+            summary("Sent", "2026-01-15", 0, 0),
+        ];
+        assert_eq!(
+            receivables(&invoices, day("2026-03-15")),
+            Receivables {
+                outstanding: 3,
+                overdue: 2,
+                balance_cents: 20_000,
+            }
+        );
+        assert_eq!(receivables(&invoices, day("2026-01-01")).overdue, 0);
+        assert_eq!(receivables(&[], day("2026-01-01")), Receivables::default());
+    }
+
+    #[test]
+    fn invoices_are_overdue_only_after_the_due_date() {
+        let inv = summary("Sent", "2026-03-01", 10_000, 0);
+        assert!(!is_overdue(&inv, day("2026-03-01")));
+        assert!(is_overdue(&inv, day("2026-03-02")));
+        assert!(!is_overdue(
+            &summary("Paid", "2026-03-01", 10_000, 10_000),
+            day("2026-04-01")
+        ));
+        assert!(!is_overdue(
+            &summary("Sent", "03/01/2026", 10_000, 0),
+            day("2026-04-01")
+        ));
+    }
+
+    #[test]
+    fn overdue_notice_names_a_single_invoice() {
+        let a = summary("Sent", "2026-03-01", 100, 0);
+        let b = summary("Viewed", "2026-03-01", 100, 0);
+        assert_eq!(overdue_notice(&[]), None);
+        assert_eq!(
+            overdue_notice(&[&a]).as_deref(),
+            Some("Invoice INV-Sent is overdue")
+        );
+        assert_eq!(
+            overdue_notice(&[&a, &b]).as_deref(),
+            Some("2 invoices are past due")
+        );
+    }
+
+    #[test]
+    fn payment_input_deposit_account_is_optional() {
+        let input: PaymentInput = serde_json::from_value(serde_json::json!({
+            "invoice_id": 1, "amount_cents": 100, "date": "2026-03-01",
+        }))
+        .unwrap();
+        assert_eq!((input.method, input.deposit_account_code), (None, None));
+
+        assert_eq!(non_blank(Some(" 1010 ")), Some("1010"));
+        assert_eq!(non_blank(Some("  ")), None);
+        assert_eq!(non_blank(None), None);
+    }
+
+    fn new_invoice(number: &str, contact_id: i64, rate_cents: i64) -> NewInvoice {
+        serde_json::from_value(serde_json::json!({
+            "invoice_number": number,
+            "contact_id": contact_id,
+            "issue_date": "2026-03-01",
+            "due_date": "2026-03-31",
+            "lines": [{
+                "description": "Consulting",
+                "quantity_hundredths": 200,
+                "unit_rate_cents": rate_cents,
+            }],
+        }))
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn invoice_payments_post_to_the_deposit_account_and_reduce_receivables() {
+        let db = test_db().await;
+        let client = contact(&db, "Acme", false).await;
+        let id = aequi_storage::create_invoice(&db, &new_invoice("INV-1", client, 5_000))
+            .await
+            .unwrap();
+        aequi_storage::mark_invoice_sent(&db, id, "2026-03-01T00:00:00Z")
+            .await
+            .unwrap();
+        let open = |db: DbPool| async move {
+            let invoices = aequi_storage::list_invoice_summaries(&db).await.unwrap();
+            receivables(&invoices, day("2026-04-15"))
+        };
+        assert_eq!(
+            open(db.clone()).await,
+            Receivables {
+                outstanding: 1,
+                overdue: 1,
+                balance_cents: 10_000,
+            }
+        );
+
+        let payment = |amount_cents: i64, deposit: Option<&str>, invoice_id: i64| PaymentInput {
+            invoice_id,
+            amount_cents,
+            date: "2026-04-01".into(),
+            method: Some("ACH".into()),
+            deposit_account_code: deposit.map(Into::into),
+        };
+        let err = record_payment(&db, &payment(4_000, Some("4000"), id))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "VALIDATION");
+        let err = record_payment(&db, &payment(4_000, None, id + 100))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            (err.code.as_str(), err.message.as_str()),
+            ("NOT_FOUND", "Invoice not found")
+        );
+
+        record_payment(&db, &payment(4_000, Some("1010"), id))
+            .await
+            .unwrap();
+        let (savings,): (i64,) = sqlx::query_as(
+            "SELECT COALESCE(SUM(tl.debit_cents), 0) FROM transaction_lines tl \
+             JOIN accounts a ON a.id = tl.account_id WHERE a.code = '1010'",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(savings, 4_000);
+        assert_eq!(open(db.clone()).await.balance_cents, 6_000);
+
+        // Blank deposit account means the default (Checking).
+        record_payment(&db, &payment(6_000, Some(" "), id))
+            .await
+            .unwrap();
+        assert_eq!(open(db.clone()).await, Receivables::default());
+        let detail = invoice_detail(&db, id).await.unwrap();
+        assert_eq!(detail.invoice.status_type, "Paid");
+        assert_eq!(detail.payments.len(), 2);
+
+        let err = invoice_detail(&db, id + 100).await.unwrap_err();
+        assert_eq!(err.code, "NOT_FOUND");
+    }
+
+    #[test]
+    fn invoice_errors_name_the_missing_invoice() {
+        let e = invoice_error(sqlx::Error::RowNotFound);
+        assert_eq!(
+            (e.code.as_str(), e.message.as_str()),
+            ("NOT_FOUND", "Invoice not found")
+        );
+        let e = invoice_error(sqlx::Error::InvalidArgument("only draft".into()));
+        assert_eq!(
+            (e.code.as_str(), e.message.as_str()),
+            ("VALIDATION", "only draft")
+        );
+    }
+
+    #[tokio::test]
+    async fn nec_summary_counts_bank_payments_to_contractors() {
+        let db = test_db().await;
+        let ana = contact(&db, "Ana Designer", true).await;
+        let client = contact(&db, "Acme", false).await;
+        let pay = |date: &str, from: &str, cents: i64, who: i64| {
+            tx_input(date, &[("5080", cents, 0), (from, 0, cents)], Some(who))
+        };
+        for input in [
+            pay("2026-02-01", "1000", 150_000, ana),
+            pay("2026-05-01", "1010", 60_000, ana),
+            // Card payments are reported on 1099-K, not by the payer.
+            pay("2026-06-01", "2000", 90_000, ana),
+            pay("2025-12-31", "1000", 70_000, ana),
+            pay("2026-02-01", "1000", 99_000, client),
+        ] {
+            insert_transaction(&db, input).await.unwrap();
+        }
+
+        let summary = nec_summary(&db, 2026).await.unwrap();
+        assert_eq!(summary.len(), 1);
+        let entry = &summary[0];
+        assert_eq!(
+            (
+                entry.contact_id,
+                entry.contact_name.as_str(),
+                entry.ytd_cents
+            ),
+            (ana, "Ana Designer", 210_000)
+        );
+        assert!(entry.over_threshold);
+        assert_eq!(entry.threshold_cents, 200_000);
+
+        let prior = nec_summary(&db, 2025).await.unwrap();
+        assert_eq!(prior[0].ytd_cents, 70_000);
+        assert_eq!(prior[0].threshold_cents, 60_000);
+        assert!(prior[0].over_threshold);
+    }
+
+    #[tokio::test]
+    async fn estimate_reports_qbi_and_the_safe_harbor_rule_from_last_years_return() {
+        let db = test_db().await;
+        // $120,000 of 2026 revenue, estimated for the full year.
+        post(
+            &db,
+            "2026-02-01",
+            &[("1000", 12_000_000, 0), ("4000", 0, 12_000_000)],
+        )
+        .await;
+        let estimate = || quarterly_estimate(&db, Some(2026), Some(4), day("2026-12-31"));
+
+        let est = estimate().await.unwrap();
+        assert_eq!(est.annualized_net_profit_cents, 12_000_000);
+        assert!(est.qbi_deduction_cents > 0);
+        // QBI is at most 20% of profit less the deductible half of SE tax.
+        assert!(est.qbi_deduction_cents * 5 <= 12_000_000 - est.se_tax_deduction_cents);
+        assert!(
+            est.taxable_income_cents
+                < 12_000_000 - est.se_tax_deduction_cents - est.standard_deduction_cents
+        );
+        // Nothing known about 2025: 90% of this year's projection, at 100%.
+        assert_eq!(est.prior_year_tax_cents, None);
+        assert_eq!(est.safe_harbor_prior_year_percentage, "1.00");
+        assert_eq!(est.safe_harbor_cents, est.total_tax_cents * 9 / 10);
+
+        // Last year's return: $5,000 tax on an AGI over $150,000 → 110%.
+        let filed = aequi_storage::TaxReturnFigures {
+            total_tax_cents: Some(500_000),
+            agi_cents: Some(16_000_000),
+        };
+        assert_eq!(save_tax_return(&db, 2025, filed).await.unwrap(), filed);
+        let est = estimate().await.unwrap();
+        assert_eq!(est.prior_year_tax_cents, Some(500_000));
+        assert_eq!(est.safe_harbor_prior_year_percentage, "1.10");
+        assert_eq!(est.safe_harbor_cents, 550_000);
+
+        // Below the threshold → 100%.
+        let filed = aequi_storage::TaxReturnFigures {
+            agi_cents: Some(10_000_000),
+            ..filed
+        };
+        save_tax_return(&db, 2025, filed).await.unwrap();
+        let est = estimate().await.unwrap();
+        assert_eq!(est.safe_harbor_prior_year_percentage, "1.00");
+        assert_eq!(est.safe_harbor_cents, 500_000);
+    }
+
+    #[tokio::test]
+    async fn tax_return_figures_round_trip_and_are_validated() {
+        let db = test_db().await;
+        assert_eq!(
+            load_tax_return(&db, 2025).await.unwrap(),
+            aequi_storage::TaxReturnFigures::default()
+        );
+
+        let figures = aequi_storage::TaxReturnFigures {
+            total_tax_cents: Some(1_234_500),
+            agi_cents: Some(9_800_000),
+        };
+        assert_eq!(save_tax_return(&db, 2025, figures).await.unwrap(), figures);
+        assert_eq!(load_tax_return(&db, 2025).await.unwrap(), figures);
+
+        // `None` clears a figure.
+        let cleared = aequi_storage::TaxReturnFigures {
+            agi_cents: None,
+            ..figures
+        };
+        assert_eq!(save_tax_return(&db, 2025, cleared).await.unwrap(), cleared);
+
+        let negative = aequi_storage::TaxReturnFigures {
+            total_tax_cents: Some(-1),
+            agi_cents: None,
+        };
+        let err = save_tax_return(&db, 2025, negative).await.unwrap_err();
+        assert_eq!(err.code, "VALIDATION");
+        assert_eq!(load_tax_return(&db, 2025).await.unwrap(), cleared);
+
+        for year in [1999, 2101] {
+            assert_eq!(
+                load_tax_return(&db, year).await.unwrap_err().code,
+                "VALIDATION"
+            );
+            let err = save_tax_return(&db, year, figures).await.unwrap_err();
+            assert_eq!(err.code, "VALIDATION");
+        }
+    }
+
+    #[test]
+    fn tax_return_figures_use_snake_case_fields() {
+        let figures: aequi_storage::TaxReturnFigures =
+            serde_json::from_str(r#"{"total_tax_cents": 100, "agi_cents": null}"#).unwrap();
+        assert_eq!(figures.total_tax_cents, Some(100));
+        assert_eq!(figures.agi_cents, None);
+    }
+
+    #[test]
+    fn receipts_filled_by_an_agent_are_flagged() {
+        let record = |ocr_text: Option<&str>, confidence: f64| aequi_storage::ReceiptRecord {
+            id: 1,
+            file_hash: "abc".into(),
+            file_ext: "png".into(),
+            ocr_text: ocr_text.map(Into::into),
+            vendor: Some("Acme".into()),
+            receipt_date: Some("2026-03-01".into()),
+            total_cents: Some(1_250),
+            subtotal_cents: None,
+            tax_cents: None,
+            payment_method: None,
+            confidence,
+            status: "pending_review".into(),
+            transaction_id: None,
+            attachment_path: "/tmp/r.png".into(),
+            created_at: "2026-03-01 10:00:00".into(),
+            reviewed_at: None,
+        };
+        assert!(ReceiptOutput::from(record(None, 0.9)).filled_by_agent);
+        assert!(ReceiptOutput::from(record(Some("  "), 0.9)).filled_by_agent);
+        assert!(!ReceiptOutput::from(record(Some("ACME 12.50"), 0.9)).filled_by_agent);
+        assert!(!ReceiptOutput::from(record(None, 0.0)).filled_by_agent);
     }
 }
