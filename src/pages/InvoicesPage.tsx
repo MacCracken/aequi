@@ -1,13 +1,14 @@
-import { useEffect, useState, useMemo } from "react";
+import { useEffect, useState, useMemo, useRef, useCallback } from "react";
 import {
   getInvoices,
   getInvoiceAging,
   getContacts,
   createInvoice,
+  errorMessage,
   type InvoiceRecord,
   type ContactRecord,
 } from "../lib/api";
-import { formatDate } from "../lib/format";
+import { formatDate, todayLocal } from "../lib/format";
 import { TableSkeleton } from "../components/Skeleton";
 import { useToast } from "../components/Toast";
 
@@ -39,22 +40,32 @@ export function InvoicesPage() {
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("");
   const { toast } = useToast();
+  // Only the latest request may update state; bumped on unmount.
+  const requestIdRef = useRef(0);
 
-  function refresh() {
+  const refresh = useCallback(() => {
+    const id = ++requestIdRef.current;
     setLoading(true);
     Promise.all([getInvoices(), getInvoiceAging(), getContacts()])
       .then(([inv, ag, cont]) => {
+        if (id !== requestIdRef.current) return;
         setInvoices(inv);
         setAging(ag);
         setContacts(cont);
       })
-      .catch((e) => toast("error", String(e)))
-      .finally(() => setLoading(false));
-  }
+      .catch((e) => {
+        if (id === requestIdRef.current) toast("error", errorMessage(e));
+      })
+      .finally(() => {
+        if (id === requestIdRef.current) setLoading(false);
+      });
+  }, [toast]);
 
   useEffect(() => {
     refresh();
-  }, []);
+    const ref = requestIdRef;
+    return () => { ref.current++; };
+  }, [refresh]);
 
   const displayed = tab === "all" ? invoices : aging;
 
@@ -193,17 +204,18 @@ function InvoiceForm({
   onCreated: () => void;
   onError: (msg: string) => void;
 }) {
-  const today = new Date().toISOString().split("T")[0];
   const [invoiceNumber, setInvoiceNumber] = useState("");
   const [contactId, setContactId] = useState<number | "">("");
-  const [issueDate, setIssueDate] = useState(today);
+  const [issueDate, setIssueDate] = useState(todayLocal);
   const [dueDate, setDueDate] = useState("");
   const [notes, setNotes] = useState("");
   const [terms, setTerms] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const submittingRef = useRef(false);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
+    if (submittingRef.current) return;
     if (!invoiceNumber.trim()) {
       onError("Invoice number is required");
       return;
@@ -221,6 +233,7 @@ function InvoiceForm({
       return;
     }
 
+    submittingRef.current = true;
     setSubmitting(true);
     try {
       await createInvoice({
@@ -233,8 +246,9 @@ function InvoiceForm({
       });
       onCreated();
     } catch (err) {
-      onError(String(err));
+      onError(errorMessage(err));
     } finally {
+      submittingRef.current = false;
       setSubmitting(false);
     }
   }

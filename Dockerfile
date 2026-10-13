@@ -1,5 +1,5 @@
 # Stage 1: Build
-FROM rust:1.89-slim-bookworm AS builder
+FROM rust:1.99-slim-bookworm AS builder
 
 RUN apt-get update && apt-get install -y pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*
 
@@ -27,6 +27,8 @@ USER aequi
 
 ENV AEQUI_DB_PATH=/data/aequi.db
 ENV AEQUI_PORT=8060
+# The server binds 0.0.0.0 and refuses to start without authentication:
+# pass AEQUI_API_KEY or AEQUI_OIDC_CONFIG at run time (see .env.example).
 
 EXPOSE 8060
 VOLUME /data

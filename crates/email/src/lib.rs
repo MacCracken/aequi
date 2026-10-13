@@ -2,4 +2,4 @@ mod config;
 mod deliver;
 
 pub use config::{EmailConfig, SmtpConfig};
-pub use deliver::{send_invoice, DeliveryError, DeliveryResult};
+pub use deliver::{DeliveryError, DeliveryResult, send_invoice};

@@ -1,3 +1,4 @@
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use axum::extract::State;
@@ -5,8 +6,7 @@ use axum::routing::post;
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
-use aequi_core::{Money, TransactionLine, UnvalidatedTransaction, ValidatedTransaction};
-use aequi_import::plaid::PlaidClient;
+use aequi_import::plaid::{PlaidAccount, PlaidClient, PlaidTransaction};
 
 use crate::error::ApiError;
 use crate::state::ServerState;
@@ -46,9 +46,17 @@ pub struct SyncRequest {
     pub end_date: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Default, Serialize)]
 pub struct SyncResponse {
-    pub transactions_imported: usize,
+    /// Review-queue batch the newly queued transactions belong to.
+    pub import_batch_id: String,
+    /// New bank transactions added to the review queue.
+    pub transactions_queued: usize,
+    /// Still-pending queue entries updated because Plaid changed them.
+    pub transactions_updated: usize,
+    /// Still-pending queue entries dropped because Plaid no longer reports them.
+    pub transactions_removed: usize,
+    /// Pending at the bank, non-USD, zero, or already queued/reviewed.
     pub transactions_skipped: usize,
 }
 
@@ -113,11 +121,23 @@ async fn exchange_public_token(
     }))
 }
 
-/// POST /plaid/sync — fetch recent transactions from Plaid and import them.
+/// POST /plaid/sync — fetch transactions from Plaid into the import review queue.
+///
+/// Nothing is posted to the ledger here: a bank feed can't tell revenue from
+/// a transfer or a card payment, so every transaction is reviewed and
+/// categorized like any other import before it reaches the books.
 async fn sync_transactions(
     State(state): State<Arc<ServerState>>,
     Json(body): Json<SyncRequest>,
 ) -> Result<Json<SyncResponse>, ApiError> {
+    aequi_storage::validate_date("start_date", &body.start_date)?;
+    aequi_storage::validate_date("end_date", &body.end_date)?;
+    if body.start_date > body.end_date {
+        return Err(ApiError::BadRequest(
+            "start_date must not be after end_date".to_string(),
+        ));
+    }
+
     let client = plaid_client(&state)?;
 
     let access_token = aequi_storage::get_setting(&state.db, "plaid_access_token")
@@ -129,157 +149,210 @@ async fn sync_transactions(
             )
         })?;
 
+    // One sync at a time, so concurrent requests can't queue duplicates.
+    let _sync_guard = state.plaid_sync_lock.lock().await;
+
     let resp = client
         .get_transactions(&access_token, &body.start_date, &body.end_date)
         .await
         .map_err(|e| ApiError::Internal(format!("Plaid transactions error: {e}")))?;
 
-    // Look up accounts for Plaid imports
-    let checking = aequi_storage::get_account_by_code(&state.db, "1000")
-        .await?
-        .ok_or_else(|| ApiError::Internal("Checking account (1000) not found".to_string()))?;
+    let result = queue_plaid_transactions(
+        &state.db,
+        &resp.accounts,
+        &resp.transactions,
+        &body.start_date,
+        &body.end_date,
+    )
+    .await?;
 
-    let expense = aequi_storage::get_account_by_code(&state.db, "5000")
-        .await?
-        .ok_or_else(|| ApiError::Internal("Expense account (5000) not found".to_string()))?;
+    tracing::info!(
+        batch = %result.import_batch_id,
+        queued = result.transactions_queued,
+        updated = result.transactions_updated,
+        removed = result.transactions_removed,
+        skipped = result.transactions_skipped,
+        total = resp.total_transactions,
+        "Plaid sync complete"
+    );
 
-    // Use revenue account for income (negative Plaid amounts = inflows)
-    let revenue = aequi_storage::get_account_by_code(&state.db, "4000")
-        .await?
-        .ok_or_else(|| ApiError::Internal("Revenue account (4000) not found".to_string()))?;
+    Ok(Json(result))
+}
 
-    let checking_id = checking.id.unwrap_or(aequi_core::AccountId(0));
-    let expense_id = expense.id.unwrap_or(aequi_core::AccountId(0));
-    let revenue_id = revenue.id.unwrap_or(aequi_core::AccountId(0));
+fn account_memo_prefix(plaid_account_id: &str) -> String {
+    format!("Plaid account {plaid_account_id} (")
+}
 
-    let mut imported = 0usize;
-    let mut skipped = 0usize;
+/// Reconcile one `/transactions/get` result for `start..=end` with the review
+/// queue: queue new posted transactions, refresh still-pending entries Plaid
+/// changed, and drop still-pending entries in the range Plaid no longer returns.
+/// Entries a user already matched or categorized are never touched.
+async fn queue_plaid_transactions(
+    db: &aequi_storage::DbPool,
+    accounts: &[PlaidAccount],
+    transactions: &[PlaidTransaction],
+    start: &str,
+    end: &str,
+) -> Result<SyncResponse, ApiError> {
+    let mut result = SyncResponse {
+        import_batch_id: format!("plaid-{}", uuid::Uuid::new_v4()),
+        ..Default::default()
+    };
+    let account_names: HashMap<&str, &str> = accounts
+        .iter()
+        .map(|a| (a.account_id.as_str(), a.name.as_str()))
+        .collect();
+    let returned: HashSet<&str> = transactions
+        .iter()
+        .map(|t| t.transaction_id.as_str())
+        .collect();
 
-    // Wrap all inserts in a DB transaction for atomicity
-    let mut db_tx = state
-        .db
-        .begin()
-        .await
-        .map_err(|e| ApiError::Internal(format!("DB transaction begin failed: {e}")))?;
-
-    for ptx in &resp.transactions {
-        // Skip pending transactions
+    for ptx in transactions {
         if ptx.pending {
-            skipped += 1;
+            // Pending transactions get a new id once they post; queue that one.
+            result.transactions_skipped += 1;
             continue;
         }
-
-        let amount_cents = ptx.amount_cents();
-        if amount_cents == 0 {
-            skipped += 1;
+        if ptx.iso_currency_code.as_deref() != Some("USD") {
+            tracing::warn!(
+                transaction_id = %ptx.transaction_id,
+                currency = ?ptx.iso_currency_code,
+                "Skipping non-USD Plaid transaction"
+            );
+            result.transactions_skipped += 1;
             continue;
         }
-
-        // Duplicate detection: skip if transaction_id already imported
-        let memo_marker = format!("Plaid: {}", ptx.transaction_id);
-        let exists =
-            sqlx::query_as::<_, (i64,)>("SELECT 1 FROM transactions WHERE memo = ? LIMIT 1")
-                .bind(&memo_marker)
-                .fetch_optional(&mut *db_tx)
-                .await
-                .map_err(|e| ApiError::Internal(format!("Duplicate check: {e}")))?;
-
-        if exists.is_some() {
-            skipped += 1;
+        // Plaid reports money leaving the account as positive; the import
+        // queue uses negative for money out.
+        let amount_cents = match ptx.amount_cents().checked_neg() {
+            Some(0) | None => {
+                result.transactions_skipped += 1;
+                continue;
+            }
+            Some(c) => c,
+        };
+        if aequi_storage::validate_date("date", &ptx.date).is_err() {
+            tracing::warn!(
+                transaction_id = %ptx.transaction_id,
+                date = %ptx.date,
+                "Skipping Plaid transaction with invalid date"
+            );
+            result.transactions_skipped += 1;
             continue;
         }
-
-        let date = chrono::NaiveDate::parse_from_str(&ptx.date, "%Y-%m-%d")
-            .map_err(|e| ApiError::Internal(format!("Bad date '{}': {e}", ptx.date)))?;
 
         let description = ptx
             .merchant_name
             .as_deref()
             .unwrap_or(&ptx.name)
             .to_string();
-
-        // Plaid: positive amount = money leaving the account (expense),
-        // negative amount = money entering the account (income/revenue).
-        let (debit_id, credit_id, abs_cents) = if amount_cents > 0 {
-            (expense_id, checking_id, amount_cents)
+        let account_name = account_names
+            .get(ptx.account_id.as_str())
+            .copied()
+            .unwrap_or("unknown");
+        let memo = format!("{}{account_name})", account_memo_prefix(&ptx.account_id));
+        let (debit_cents, credit_cents) = if amount_cents < 0 {
+            (Some(-amount_cents), None)
         } else {
-            (checking_id, revenue_id, -amount_cents)
+            (None, Some(amount_cents))
         };
 
-        let lines = vec![
-            TransactionLine {
-                account_id: debit_id,
-                debit: Money::from_cents(abs_cents),
-                credit: Money::from_cents(0),
-                memo: None,
-            },
-            TransactionLine {
-                account_id: credit_id,
-                debit: Money::from_cents(0),
-                credit: Money::from_cents(abs_cents),
-                memo: None,
-            },
-        ];
-
-        let tx = UnvalidatedTransaction {
-            date,
-            description,
-            lines,
-            memo: Some(memo_marker),
-        };
-
-        let validated = ValidatedTransaction::validate(tx)
-            .map_err(|e| ApiError::Internal(format!("Validation error: {e}")))?;
-
-        let row = sqlx::query_as::<_, (i64,)>(
-            "INSERT INTO transactions (date, description, memo, balanced_total_cents) \
-             VALUES (?, ?, ?, ?) RETURNING id",
-        )
-        .bind(validated.date.to_string())
-        .bind(&validated.description)
-        .bind(&validated.memo)
-        .bind(validated.balanced_total.to_cents())
-        .fetch_one(&mut *db_tx)
-        .await
-        .map_err(|e| ApiError::Internal(format!("Insert transaction: {e}")))?;
-
-        let tx_id = row.0;
-
-        for line in &validated.lines {
-            sqlx::query(
-                "INSERT INTO transaction_lines \
-                 (transaction_id, account_id, debit_cents, credit_cents, memo) \
-                 VALUES (?, ?, ?, ?, ?)",
-            )
-            .bind(tx_id)
-            .bind(line.account_id.0)
-            .bind(line.debit.to_cents())
-            .bind(line.credit.to_cents())
-            .bind(&line.memo)
-            .execute(&mut *db_tx)
-            .await
-            .map_err(|e| ApiError::Internal(format!("Insert line: {e}")))?;
+        // Posted to the ledger directly by versions before the review queue.
+        let legacy =
+            sqlx::query_as::<_, (i64,)>("SELECT id FROM transactions WHERE memo = ? LIMIT 1")
+                .bind(format!("Plaid: {}", ptx.transaction_id))
+                .fetch_optional(db)
+                .await?;
+        if legacy.is_some() {
+            result.transactions_skipped += 1;
+            continue;
         }
 
-        imported += 1;
+        let existing = sqlx::query_as::<_, (i64, String, String, String, i64, Option<String>)>(
+            "SELECT id, status, date, description, amount_cents, memo FROM imported_transactions \
+             WHERE source_type = 'plaid' AND source_id = ? LIMIT 1",
+        )
+        .bind(&ptx.transaction_id)
+        .fetch_optional(db)
+        .await?;
+
+        match existing {
+            None => {
+                aequi_storage::insert_imported_transaction(
+                    db,
+                    &aequi_storage::ImportedTransaction {
+                        id: 0,
+                        source_type: "plaid".to_string(),
+                        source_id: Some(ptx.transaction_id.clone()),
+                        import_batch_id: result.import_batch_id.clone(),
+                        date: ptx.date.clone(),
+                        description,
+                        amount_cents,
+                        debit_cents,
+                        credit_cents,
+                        memo: Some(memo),
+                        matched_transaction_id: None,
+                        category_rule_id: None,
+                        status: "pending".to_string(),
+                        created_at: String::new(),
+                    },
+                )
+                .await?;
+                result.transactions_queued += 1;
+            }
+            Some((id, status, date, old_desc, old_amount, old_memo))
+                if status == "pending"
+                    && (date != ptx.date
+                        || old_desc != description
+                        || old_amount != amount_cents
+                        || old_memo.as_deref() != Some(memo.as_str())) =>
+            {
+                sqlx::query(
+                    "UPDATE imported_transactions SET date = ?, description = ?, amount_cents = ?, \
+                     debit_cents = ?, credit_cents = ?, memo = ? WHERE id = ? AND status = 'pending'",
+                )
+                .bind(&ptx.date)
+                .bind(&description)
+                .bind(amount_cents)
+                .bind(debit_cents)
+                .bind(credit_cents)
+                .bind(&memo)
+                .bind(id)
+                .execute(db)
+                .await?;
+                result.transactions_updated += 1;
+            }
+            Some(_) => result.transactions_skipped += 1,
+        }
     }
 
-    db_tx
-        .commit()
-        .await
-        .map_err(|e| ApiError::Internal(format!("DB commit failed: {e}")))?;
+    // Removed: still-pending entries for these accounts dated in the synced
+    // range that Plaid no longer returns. If one was dropped by mistake, the
+    // next sync of its date re-queues it.
+    let candidates = sqlx::query_as::<_, (i64, Option<String>, Option<String>)>(
+        "SELECT id, source_id, memo FROM imported_transactions \
+         WHERE source_type = 'plaid' AND status = 'pending' AND date >= ? AND date <= ?",
+    )
+    .bind(start)
+    .bind(end)
+    .fetch_all(db)
+    .await?;
+    for (id, source_id, memo) in candidates {
+        let Some(source_id) = source_id else { continue };
+        let memo = memo.unwrap_or_default();
+        let same_item = account_names
+            .keys()
+            .any(|acct| memo.starts_with(&account_memo_prefix(acct)));
+        if same_item && !returned.contains(source_id.as_str()) {
+            sqlx::query("DELETE FROM imported_transactions WHERE id = ? AND status = 'pending'")
+                .bind(id)
+                .execute(db)
+                .await?;
+            result.transactions_removed += 1;
+        }
+    }
 
-    tracing::info!(
-        imported,
-        skipped,
-        total = resp.total_transactions,
-        "Plaid sync complete"
-    );
-
-    Ok(Json(SyncResponse {
-        transactions_imported: imported,
-        transactions_skipped: skipped,
-    }))
+    Ok(result)
 }
 
 // ---------------------------------------------------------------------------
@@ -337,11 +410,140 @@ mod tests {
     #[test]
     fn sync_response_serializes() {
         let resp = SyncResponse {
-            transactions_imported: 15,
+            import_batch_id: "plaid-1".to_string(),
+            transactions_queued: 15,
             transactions_skipped: 3,
+            ..Default::default()
         };
         let json = serde_json::to_string(&resp).unwrap();
-        assert!(json.contains("\"transactions_imported\":15"));
+        assert!(json.contains("\"transactions_queued\":15"));
         assert!(json.contains("\"transactions_skipped\":3"));
+    }
+
+    fn ptx(id: &str, amount: f64, date: &str, pending: bool) -> PlaidTransaction {
+        serde_json::from_value(serde_json::json!({
+            "transaction_id": id,
+            "name": "Some Merchant",
+            "amount": amount,
+            "date": date,
+            "category": null,
+            "account_id": "acc_1",
+            "pending": pending,
+            "iso_currency_code": "USD",
+            "merchant_name": null
+        }))
+        .unwrap()
+    }
+
+    fn accounts() -> Vec<PlaidAccount> {
+        serde_json::from_value(serde_json::json!([{
+            "account_id": "acc_1",
+            "name": "Business Checking",
+            "type": "depository",
+            "subtype": "checking",
+            "balances": {"available": null, "current": null, "limit": null, "iso_currency_code": "USD"}
+        }]))
+        .unwrap()
+    }
+
+    async fn queue_rows(db: &aequi_storage::DbPool) -> Vec<(String, i64, String, Option<String>)> {
+        sqlx::query_as(
+            "SELECT source_id, amount_cents, status, memo FROM imported_transactions ORDER BY source_id",
+        )
+        .fetch_all(db)
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn sync_queues_for_review_instead_of_posting() {
+        let state = crate::routes::tests::test_state(None).await;
+        let db = &state.db;
+        let txs = vec![
+            ptx("t_out", 42.50, "2026-03-02", false), // card purchase / transfer out
+            ptx("t_in", -1000.00, "2026-03-03", false), // deposit
+            ptx("t_pending", 5.00, "2026-03-04", true),
+        ];
+        let r = queue_plaid_transactions(db, &accounts(), &txs, "2026-03-01", "2026-03-31")
+            .await
+            .unwrap();
+        assert_eq!(r.transactions_queued, 2);
+        assert_eq!(r.transactions_skipped, 1);
+
+        // Nothing reached the ledger.
+        let (n,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM transactions")
+            .fetch_one(db)
+            .await
+            .unwrap();
+        assert_eq!(n, 0);
+
+        let rows = queue_rows(db).await;
+        assert_eq!(rows.len(), 2);
+        // Money out is negative in the queue (Plaid reports it positive).
+        assert_eq!((rows[0].0.as_str(), rows[0].1), ("t_in", 100_000));
+        assert_eq!((rows[1].0.as_str(), rows[1].1), ("t_out", -4_250));
+        assert!(rows.iter().all(|r| r.2 == "pending"));
+        assert!(rows[1].3.as_deref().unwrap().contains("Business Checking"));
+        assert!(rows[1].3.as_deref().unwrap().contains("acc_1"));
+
+        // Re-syncing the same data queues nothing new.
+        let again = queue_plaid_transactions(db, &accounts(), &txs, "2026-03-01", "2026-03-31")
+            .await
+            .unwrap();
+        assert_eq!(again.transactions_queued, 0);
+        assert_eq!(queue_rows(db).await.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn sync_updates_modified_and_drops_removed_pending_entries() {
+        let state = crate::routes::tests::test_state(None).await;
+        let db = &state.db;
+        let first = vec![
+            ptx("a", 10.00, "2026-03-02", false),
+            ptx("b", 20.00, "2026-03-03", false),
+            ptx("c", 30.00, "2026-03-04", false),
+        ];
+        queue_plaid_transactions(db, &accounts(), &first, "2026-03-01", "2026-03-31")
+            .await
+            .unwrap();
+
+        // A user already reviewed "c": later syncs must leave it alone.
+        sqlx::query(
+            "UPDATE imported_transactions SET status = 'categorized' WHERE source_id = 'c'",
+        )
+        .execute(db)
+        .await
+        .unwrap();
+
+        // Plaid now reports "a" with a new amount and no longer returns "b" or "c".
+        let second = vec![ptx("a", 12.00, "2026-03-02", false)];
+        let r = queue_plaid_transactions(db, &accounts(), &second, "2026-03-01", "2026-03-31")
+            .await
+            .unwrap();
+        assert_eq!(r.transactions_updated, 1);
+        assert_eq!(r.transactions_removed, 1);
+
+        let rows = queue_rows(db).await;
+        let ids: Vec<_> = rows.iter().map(|r| (r.0.as_str(), r.1)).collect();
+        assert_eq!(ids, vec![("a", -1_200), ("c", -3_000)]);
+    }
+
+    #[tokio::test]
+    async fn sync_skips_transactions_already_posted_by_old_versions() {
+        let state = crate::routes::tests::test_state(None).await;
+        let db = &state.db;
+        sqlx::query(
+            "INSERT INTO transactions (date, description, memo, balanced_total_cents) \
+             VALUES ('2026-03-02', 'x', 'Plaid: legacy', 100)",
+        )
+        .execute(db)
+        .await
+        .unwrap();
+        let txs = vec![ptx("legacy", 1.00, "2026-03-02", false)];
+        let r = queue_plaid_transactions(db, &accounts(), &txs, "2026-03-01", "2026-03-31")
+            .await
+            .unwrap();
+        assert_eq!(r.transactions_queued, 0);
+        assert_eq!(r.transactions_skipped, 1);
     }
 }

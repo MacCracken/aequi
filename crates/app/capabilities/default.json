@@ -1,6 +1,6 @@
 {
   "identifier": "default",
-  "description": "Desktop capability — grants core IPC, filesystem access, and native file dialogs for receipt intake.",
+  "description": "Desktop capability — grants core IPC, native file dialogs for receipt intake, and writing camera captures to $APPDATA/captures (ingest_receipt deletes them once stored).",
   "platforms": ["macOS", "windows", "linux"],
   "windows": ["main"],
   "permissions": [
@@ -9,13 +9,17 @@
     "core:window:allow-minimize",
     "core:window:allow-maximize",
     "dialog:allow-open",
-    "fs:read-files",
-    "fs:write-files",
-    "shell:allow-spawn",
-    "shell:allow-stdin-write",
     {
-      "identifier": "shell:allow-execute",
-      "allow": [{ "name": "binaries/aequi-mcp", "sidecar": true }]
+      "identifier": "fs:allow-mkdir",
+      "allow": [{ "path": "$APPDATA/captures" }, { "path": "$APPDATA/captures/**" }]
+    },
+    {
+      "identifier": "fs:allow-write-file",
+      "allow": [{ "path": "$APPDATA/captures" }, { "path": "$APPDATA/captures/**" }]
+    },
+    {
+      "identifier": "fs:allow-remove",
+      "allow": [{ "path": "$APPDATA/captures/**" }]
     }
   ]
 }

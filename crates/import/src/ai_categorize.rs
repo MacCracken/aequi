@@ -1,7 +1,15 @@
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
+
+use crate::util::truncate_on_char_boundary;
+
+/// Largest response body accepted from the categorization endpoint.
+const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
+/// Longest model-provided reasoning kept, in bytes.
+const MAX_REASONING_BYTES: usize = 1000;
 
 /// Configuration for the AI categorization endpoint.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct AiCategorizationConfig {
     /// MCP server endpoint URL (e.g. `http://localhost:8061`)
     pub endpoint: String,
@@ -14,6 +22,17 @@ pub struct AiCategorizationConfig {
 
 fn default_threshold() -> f64 {
     0.7
+}
+
+// Redact the API key in Debug output
+impl std::fmt::Debug for AiCategorizationConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AiCategorizationConfig")
+            .field("endpoint", &self.endpoint)
+            .field("api_key", &self.api_key.as_ref().map(|_| "[REDACTED]"))
+            .field("min_confidence", &self.min_confidence)
+            .finish()
+    }
 }
 
 impl AiCategorizationConfig {
@@ -75,6 +94,68 @@ pub fn filter_by_confidence(
         .collect()
 }
 
+/// Keep only suggestions that are usable as-is: the account code must be one
+/// of the accounts offered (the model's account name is replaced by ours), the
+/// confidence must be a number in `[0, 1]` and at least `min_confidence`, and
+/// each account appears once. Results are ordered by confidence, highest first.
+fn validate_suggestions(
+    suggestions: Vec<AiSuggestion>,
+    accounts: &[(String, String, String)],
+    min_confidence: f64,
+) -> Vec<AiSuggestion> {
+    let mut valid: Vec<AiSuggestion> = Vec::new();
+    for mut s in suggestions {
+        if !(0.0..=1.0).contains(&s.confidence) {
+            continue;
+        }
+        let code = s.account_code.trim();
+        let Some((code, name, _)) = accounts.iter().find(|(c, _, _)| c == code) else {
+            continue;
+        };
+        s.account_code = code.clone();
+        s.account_name = name.clone();
+        if let Some(reasoning) = s.reasoning.as_mut() {
+            truncate_on_char_boundary(reasoning, MAX_REASONING_BYTES);
+        }
+        match valid.iter_mut().find(|v| v.account_code == s.account_code) {
+            Some(existing) if existing.confidence >= s.confidence => {}
+            Some(existing) => *existing = s,
+            None => valid.push(s),
+        }
+    }
+    valid.sort_by(|a, b| b.confidence.total_cmp(&a.confidence));
+    filter_by_confidence(valid, min_confidence)
+}
+
+fn http_client() -> Result<reqwest::Client, AiCategorizeError> {
+    reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .connect_timeout(Duration::from_secs(10))
+        .build()
+        .map_err(|e| AiCategorizeError::RequestFailed(e.without_url().to_string()))
+}
+
+/// Read a response body, refusing anything larger than `limit` bytes.
+async fn read_body_limited(
+    mut resp: reqwest::Response,
+    limit: usize,
+) -> Result<Vec<u8>, AiCategorizeError> {
+    let mut body = Vec::new();
+    while let Some(chunk) = resp
+        .chunk()
+        .await
+        .map_err(|e| AiCategorizeError::RequestFailed(e.without_url().to_string()))?
+    {
+        if body.len() + chunk.len() > limit {
+            return Err(AiCategorizeError::InvalidResponse(format!(
+                "response larger than {limit} bytes"
+            )));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
 /// Suggest a category for a transaction by calling the configured MCP endpoint.
 pub async fn suggest_category(
     config: &AiCategorizationConfig,
@@ -83,6 +164,28 @@ pub async fn suggest_category(
     date: &str,
     memo: Option<&str>,
     accounts: &[(String, String, String)], // (code, name, account_type)
+) -> Result<Vec<AiSuggestion>, AiCategorizeError> {
+    let client = http_client()?;
+    suggest_category_with(
+        &client,
+        config,
+        description,
+        amount_cents,
+        date,
+        memo,
+        accounts,
+    )
+    .await
+}
+
+async fn suggest_category_with(
+    client: &reqwest::Client,
+    config: &AiCategorizationConfig,
+    description: &str,
+    amount_cents: i64,
+    date: &str,
+    memo: Option<&str>,
+    accounts: &[(String, String, String)],
 ) -> Result<Vec<AiSuggestion>, AiCategorizeError> {
     let request = CategorizationRequest {
         description: description.to_string(),
@@ -99,11 +202,6 @@ pub async fn suggest_category(
             .collect(),
     };
 
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-        .map_err(|e| AiCategorizeError::RequestFailed(e.to_string()))?;
-
     let mut req = client
         .post(format!(
             "{}/categorize",
@@ -115,27 +213,31 @@ pub async fn suggest_category(
         req = req.bearer_auth(key);
     }
 
+    // Errors drop the URL: a configured endpoint may embed credentials.
     let resp = req
         .send()
         .await
-        .map_err(|e| AiCategorizeError::RequestFailed(e.to_string()))?;
+        .map_err(|e| AiCategorizeError::RequestFailed(e.without_url().to_string()))?;
 
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let mut body = resp.text().await.unwrap_or_else(|_| "no body".to_string());
-        body.truncate(500);
+    let status = resp.status();
+    let body = read_body_limited(resp, MAX_RESPONSE_BYTES).await;
+
+    if !status.is_success() {
+        let mut text = body
+            .map(|b| String::from_utf8_lossy(&b).into_owned())
+            .unwrap_or_else(|_| "no body".to_string());
+        truncate_on_char_boundary(&mut text, 500);
         return Err(AiCategorizeError::RequestFailed(format!(
-            "{status}: {body}"
+            "{status}: {text}"
         )));
     }
 
-    let response: CategorizationResponse = resp
-        .json()
-        .await
+    let response: CategorizationResponse = serde_json::from_slice(&body?)
         .map_err(|e| AiCategorizeError::InvalidResponse(e.to_string()))?;
 
-    Ok(filter_by_confidence(
+    Ok(validate_suggestions(
         response.suggestions,
+        accounts,
         config.min_confidence,
     ))
 }
@@ -146,9 +248,27 @@ pub async fn suggest_categories_batch(
     transactions: &[(String, i64, String, Option<String>)],
     accounts: &[(String, String, String)],
 ) -> Vec<Result<Vec<AiSuggestion>, AiCategorizeError>> {
+    let client = match http_client() {
+        Ok(client) => client,
+        Err(e) => {
+            return transactions
+                .iter()
+                .map(|_| Err(AiCategorizeError::RequestFailed(e.to_string())))
+                .collect();
+        }
+    };
     let mut results = Vec::with_capacity(transactions.len());
     for (desc, amount, date, memo) in transactions {
-        let result = suggest_category(config, desc, *amount, date, memo.as_deref(), accounts).await;
+        let result = suggest_category_with(
+            &client,
+            config,
+            desc,
+            *amount,
+            date,
+            memo.as_deref(),
+            accounts,
+        )
+        .await;
         results.push(result);
     }
     results
@@ -432,6 +552,76 @@ mod tests {
             err2.to_string(),
             "AI categorization response invalid: missing field"
         );
+    }
+
+    fn accounts() -> Vec<(String, String, String)> {
+        vec![
+            ("5020".into(), "Meals".into(), "Expense".into()),
+            ("5110".into(), "Software".into(), "Expense".into()),
+        ]
+    }
+
+    fn suggestion(code: &str, name: &str, confidence: f64) -> AiSuggestion {
+        AiSuggestion {
+            account_code: code.into(),
+            account_name: name.into(),
+            confidence,
+            reasoning: None,
+        }
+    }
+
+    #[test]
+    fn validate_drops_unknown_accounts_and_bad_confidence() {
+        let suggestions = vec![
+            suggestion("9999", "Made Up", 0.99),
+            suggestion("5020", "Meals", 1.5),
+            suggestion("5020", "Meals", f64::NAN),
+            suggestion("5020", "Meals", -0.1),
+            suggestion(" 5110 ", "Anything The Model Said", 0.8),
+        ];
+        let valid = validate_suggestions(suggestions, &accounts(), 0.7);
+        assert_eq!(valid.len(), 1);
+        assert_eq!(valid[0].account_code, "5110");
+        // Our account name, not the model's.
+        assert_eq!(valid[0].account_name, "Software");
+    }
+
+    #[test]
+    fn validate_dedupes_sorts_and_applies_threshold() {
+        let suggestions = vec![
+            suggestion("5110", "Software", 0.75),
+            suggestion("5020", "Meals", 0.6),
+            suggestion("5020", "Meals", 0.9),
+            suggestion("5110", "Software", 0.71),
+        ];
+        let valid = validate_suggestions(suggestions, &accounts(), 0.7);
+        let codes: Vec<_> = valid
+            .iter()
+            .map(|s| (s.account_code.as_str(), s.confidence))
+            .collect();
+        assert_eq!(codes, [("5020", 0.9), ("5110", 0.75)]);
+    }
+
+    #[test]
+    fn validate_truncates_long_reasoning_on_char_boundary() {
+        let mut s = suggestion("5020", "Meals", 0.9);
+        s.reasoning = Some("é".repeat(2000));
+        let valid = validate_suggestions(vec![s], &accounts(), 0.0);
+        let reasoning = valid[0].reasoning.as_ref().unwrap();
+        assert!(reasoning.len() <= MAX_REASONING_BYTES);
+        assert!(reasoning.chars().all(|c| c == 'é'));
+    }
+
+    #[test]
+    fn config_debug_redacts_api_key() {
+        let config = AiCategorizationConfig {
+            endpoint: "http://localhost:8061".into(),
+            api_key: Some("super-secret-key".into()),
+            min_confidence: 0.7,
+        };
+        let debug = format!("{config:?}");
+        assert!(!debug.contains("super-secret-key"));
+        assert!(debug.contains("[REDACTED]"));
     }
 
     #[test]

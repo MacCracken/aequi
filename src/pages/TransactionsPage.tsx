@@ -1,12 +1,13 @@
-import { useEffect, useState, useMemo } from "react";
+import { useEffect, useState, useMemo, useRef, useCallback } from "react";
 import {
   getTransactions,
   getAccounts,
   createTransaction,
+  errorMessage,
   type TransactionOutput,
   type Account,
 } from "../lib/api";
-import { formatDate } from "../lib/format";
+import { formatCents, formatDate, parseDollarsToCents, todayLocal } from "../lib/format";
 import { TableSkeleton } from "../components/Skeleton";
 import { useToast } from "../components/Toast";
 
@@ -22,24 +23,36 @@ export function TransactionsPage() {
   const [dateTo, setDateTo] = useState("");
   const [page, setPage] = useState(0);
   const { toast } = useToast();
+  // Only the latest request may update state (date filters can change faster
+  // than responses arrive); bumped on unmount so late responses are dropped.
+  const requestIdRef = useRef(0);
 
-  function refresh() {
+  const refresh = useCallback(() => {
+    const id = ++requestIdRef.current;
     setLoading(true);
+    // Each bound is optional on its own; never send "" for an empty field.
     const start = dateFrom || undefined;
     const end = dateTo || undefined;
     Promise.all([getTransactions(start, end), getAccounts()])
       .then(([txs, accts]) => {
+        if (id !== requestIdRef.current) return;
         setTransactions(txs);
         setAccounts(accts);
         setPage(0);
       })
-      .catch((e) => toast("error", String(e)))
-      .finally(() => setLoading(false));
-  }
+      .catch((e) => {
+        if (id === requestIdRef.current) toast("error", errorMessage(e));
+      })
+      .finally(() => {
+        if (id === requestIdRef.current) setLoading(false);
+      });
+  }, [dateFrom, dateTo, toast]);
 
   useEffect(() => {
     refresh();
-  }, [dateFrom, dateTo]);
+    const ref = requestIdRef;
+    return () => { ref.current++; };
+  }, [refresh]);
 
   const filtered = useMemo(() => {
     if (!search) return transactions;
@@ -173,6 +186,20 @@ export function TransactionsPage() {
   );
 }
 
+interface LineDraft {
+  key: number;
+  account_code: string;
+  /** Raw text as typed; parsed to cents only for totals and submit. */
+  debitText: string;
+  creditText: string;
+}
+
+let nextLineKey = 0;
+
+function emptyLine(): LineDraft {
+  return { key: ++nextLineKey, account_code: "", debitText: "", creditText: "" };
+}
+
 function TransactionForm({
   accounts,
   onCreated,
@@ -182,64 +209,102 @@ function TransactionForm({
   onCreated: () => void;
   onError: (msg: string) => void;
 }) {
-  const [date, setDate] = useState(new Date().toISOString().split("T")[0]);
+  const [date, setDate] = useState(todayLocal);
   const [description, setDescription] = useState("");
-  const [lines, setLines] = useState([
-    { account_code: "", debit_cents: 0, credit_cents: 0, memo: "" },
-    { account_code: "", debit_cents: 0, credit_cents: 0, memo: "" },
-  ]);
+  const [lines, setLines] = useState<LineDraft[]>(() => [emptyLine(), emptyLine()]);
   const [submitting, setSubmitting] = useState(false);
+  const submittingRef = useRef(false);
 
-  function updateLine(idx: number, field: string, value: string | number) {
-    setLines((prev) =>
-      prev.map((l, i) => (i === idx ? { ...l, [field]: value } : l))
-    );
+  const parsed = useMemo(
+    () =>
+      lines.map((l) => ({
+        debit: parseDollarsToCents(l.debitText),
+        credit: parseDollarsToCents(l.creditText),
+      })),
+    [lines]
+  );
+  const totalDebits = parsed.reduce((sum, p) => sum + (p.debit ?? 0), 0);
+  const totalCredits = parsed.reduce((sum, p) => sum + (p.credit ?? 0), 0);
+  const hasInvalidAmount = parsed.some((p) => p.debit === null || p.credit === null);
+  const balanced = !hasInvalidAmount && totalDebits > 0 && totalDebits === totalCredits;
+
+  function updateLine(idx: number, patch: Partial<Omit<LineDraft, "key">>) {
+    setLines((prev) => prev.map((l, i) => (i === idx ? { ...l, ...patch } : l)));
   }
 
   function addLine() {
-    setLines((prev) => [
-      ...prev,
-      { account_code: "", debit_cents: 0, credit_cents: 0, memo: "" },
-    ]);
+    setLines((prev) => [...prev, emptyLine()]);
   }
 
   function removeLine(idx: number) {
-    if (lines.length <= 2) return;
-    setLines((prev) => prev.filter((_, i) => i !== idx));
+    setLines((prev) => (prev.length <= 2 ? prev : prev.filter((_, i) => i !== idx)));
+  }
+
+  /** Validated line payloads, or an error message for the user. */
+  function buildLines():
+    | { ok: true; lines: { account_code: string; debit_cents: number; credit_cents: number }[] }
+    | { ok: false; error: string } {
+    const out: { account_code: string; debit_cents: number; credit_cents: number }[] = [];
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      const { debit, credit } = parsed[i];
+      const n = i + 1;
+      if (debit === null || credit === null) {
+        return { ok: false, error: `Line ${n}: enter amounts like 1234.56 (at most two decimal places)` };
+      }
+      if (debit === 0 && credit === 0) continue; // blank line (account alone is ignored)
+      if (!line.account_code) {
+        return { ok: false, error: `Line ${n}: select an account` };
+      }
+      if (debit > 0 && credit > 0) {
+        return { ok: false, error: `Line ${n}: enter either a debit or a credit, not both` };
+      }
+      out.push({ account_code: line.account_code, debit_cents: debit, credit_cents: credit });
+    }
+    if (out.length < 2) {
+      return { ok: false, error: "At least two lines with amounts are required" };
+    }
+    if (totalDebits !== totalCredits) {
+      return {
+        ok: false,
+        error: `Debits (${formatCents(totalDebits)}) must equal credits (${formatCents(totalCredits)})`,
+      };
+    }
+    return { ok: true, lines: out };
   }
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
+    if (submittingRef.current) return;
     if (!description.trim()) {
       onError("Description is required");
       return;
     }
-    const filledLines = lines.filter(
-      (l) => l.account_code && (l.debit_cents > 0 || l.credit_cents > 0)
-    );
-    if (filledLines.length < 2) {
-      onError("At least two lines with amounts are required");
+    const built = buildLines();
+    if (!built.ok) {
+      onError(built.error);
       return;
     }
 
+    submittingRef.current = true;
     setSubmitting(true);
     try {
       await createTransaction({
         date,
         description: description.trim(),
-        lines: filledLines.map((l) => ({
-          account_code: l.account_code,
-          debit_cents: l.debit_cents,
-          credit_cents: l.credit_cents,
-        })),
+        lines: built.lines,
       });
       onCreated();
     } catch (err) {
-      onError(String(err));
+      onError(errorMessage(err));
     } finally {
+      submittingRef.current = false;
       setSubmitting(false);
     }
   }
+
+  const amountClass =
+    "w-28 px-2 py-1.5 text-sm text-right font-mono border rounded-md bg-bg focus:outline-none";
 
   return (
     <form onSubmit={handleSubmit} className="bg-surface rounded-lg border border-border p-4 space-y-4">
@@ -271,7 +336,7 @@ function TransactionForm({
 
       <div className="space-y-2">
         <div className="flex items-center justify-between">
-          <label className="text-xs text-text-muted font-medium">Lines</label>
+          <span className="text-xs text-text-muted font-medium">Lines</span>
           <button
             type="button"
             onClick={addLine}
@@ -280,59 +345,75 @@ function TransactionForm({
             + Add line
           </button>
         </div>
-        {lines.map((line, idx) => (
-          <div key={idx} className="flex gap-2 items-center">
-            <label htmlFor={`line-${idx}-account`} className="sr-only">Line {idx + 1} account</label>
-            <select
-              id={`line-${idx}-account`}
-              value={line.account_code}
-              onChange={(e) => updateLine(idx, "account_code", e.target.value)}
-              className="flex-1 px-2 py-1.5 text-sm border border-border rounded-md bg-bg focus:outline-none focus:border-primary"
-            >
-              <option value="">Select account</option>
-              {accounts.map((a) => (
-                <option key={a.code} value={a.code}>
-                  {a.code} — {a.name}
-                </option>
-              ))}
-            </select>
-            <label htmlFor={`line-${idx}-debit`} className="sr-only">Line {idx + 1} debit</label>
-            <input
-              id={`line-${idx}-debit`}
-              type="number"
-              step="0.01"
-              min="0"
-              placeholder="Debit"
-              value={line.debit_cents ? (line.debit_cents / 100).toFixed(2) : ""}
-              onChange={(e) =>
-                { const v = Number(e.target.value); if (!isNaN(v)) updateLine(idx, "debit_cents", Math.round(v * 100)); }
-              }
-              className="w-24 px-2 py-1.5 text-sm border border-border rounded-md bg-bg focus:outline-none focus:border-primary"
-            />
-            <label htmlFor={`line-${idx}-credit`} className="sr-only">Line {idx + 1} credit</label>
-            <input
-              id={`line-${idx}-credit`}
-              type="number"
-              step="0.01"
-              min="0"
-              placeholder="Credit"
-              value={line.credit_cents ? (line.credit_cents / 100).toFixed(2) : ""}
-              onChange={(e) =>
-                { const v = Number(e.target.value); if (!isNaN(v)) updateLine(idx, "credit_cents", Math.round(v * 100)); }
-              }
-              className="w-24 px-2 py-1.5 text-sm border border-border rounded-md bg-bg focus:outline-none focus:border-primary"
-            />
-            {lines.length > 2 && (
-              <button
-                type="button"
-                onClick={() => removeLine(idx)}
-                className="text-danger text-sm hover:underline"
+        {lines.map((line, idx) => {
+          const debitInvalid = parsed[idx].debit === null;
+          const creditInvalid = parsed[idx].credit === null;
+          return (
+            <div key={line.key} className="flex gap-2 items-center">
+              <label htmlFor={`line-${line.key}-account`} className="sr-only">Line {idx + 1} account</label>
+              <select
+                id={`line-${line.key}-account`}
+                value={line.account_code}
+                onChange={(e) => updateLine(idx, { account_code: e.target.value })}
+                className="flex-1 px-2 py-1.5 text-sm border border-border rounded-md bg-bg focus:outline-none focus:border-primary"
               >
-                X
-              </button>
-            )}
-          </div>
-        ))}
+                <option value="">Select account</option>
+                {accounts.map((a) => (
+                  <option key={a.code} value={a.code}>
+                    {a.code} — {a.name}
+                  </option>
+                ))}
+              </select>
+              <label htmlFor={`line-${line.key}-debit`} className="sr-only">Line {idx + 1} debit</label>
+              <input
+                id={`line-${line.key}-debit`}
+                type="text"
+                inputMode="decimal"
+                autoComplete="off"
+                placeholder="Debit"
+                value={line.debitText}
+                onChange={(e) => updateLine(idx, { debitText: e.target.value })}
+                aria-invalid={debitInvalid || undefined}
+                className={`${amountClass} ${debitInvalid ? "border-danger" : "border-border focus:border-primary"}`}
+              />
+              <label htmlFor={`line-${line.key}-credit`} className="sr-only">Line {idx + 1} credit</label>
+              <input
+                id={`line-${line.key}-credit`}
+                type="text"
+                inputMode="decimal"
+                autoComplete="off"
+                placeholder="Credit"
+                value={line.creditText}
+                onChange={(e) => updateLine(idx, { creditText: e.target.value })}
+                aria-invalid={creditInvalid || undefined}
+                className={`${amountClass} ${creditInvalid ? "border-danger" : "border-border focus:border-primary"}`}
+              />
+              {lines.length > 2 && (
+                <button
+                  type="button"
+                  onClick={() => removeLine(idx)}
+                  aria-label={`Remove line ${idx + 1}`}
+                  className="text-danger text-sm hover:underline"
+                >
+                  X
+                </button>
+              )}
+            </div>
+          );
+        })}
+        <div className="flex justify-end gap-4 text-xs font-mono" aria-live="polite">
+          <span>Debits {formatCents(totalDebits)}</span>
+          <span>Credits {formatCents(totalCredits)}</span>
+          {hasInvalidAmount ? (
+            <span className="text-danger">Invalid amount</span>
+          ) : balanced ? (
+            <span className="text-success">Balanced</span>
+          ) : totalDebits !== totalCredits ? (
+            <span className="text-danger">
+              Off by {formatCents(Math.abs(totalDebits - totalCredits))}
+            </span>
+          ) : null}
+        </div>
       </div>
 
       <button

@@ -1,8 +1,9 @@
-import { useEffect, useState, useMemo } from "react";
+import { useEffect, useState, useMemo, useRef, useCallback } from "react";
 import {
   getContacts,
   createContact,
   updateContact,
+  errorMessage,
   type ContactRecord,
   type ContactInput,
 } from "../lib/api";
@@ -17,18 +18,29 @@ export function ContactsPage() {
   const [search, setSearch] = useState("");
   const [typeFilter, setTypeFilter] = useState<string>("");
   const { toast } = useToast();
+  // Only the latest request may update state; bumped on unmount.
+  const requestIdRef = useRef(0);
 
-  function refresh() {
+  const refresh = useCallback(() => {
+    const id = ++requestIdRef.current;
     setLoading(true);
     getContacts()
-      .then(setContacts)
-      .catch((e) => toast("error", String(e)))
-      .finally(() => setLoading(false));
-  }
+      .then((c) => {
+        if (id === requestIdRef.current) setContacts(c);
+      })
+      .catch((e) => {
+        if (id === requestIdRef.current) toast("error", errorMessage(e));
+      })
+      .finally(() => {
+        if (id === requestIdRef.current) setLoading(false);
+      });
+  }, [toast]);
 
   useEffect(() => {
     refresh();
-  }, []);
+    const ref = requestIdRef;
+    return () => { ref.current++; };
+  }, [refresh]);
 
   const filtered = useMemo(() => {
     let result = contacts;
@@ -179,13 +191,16 @@ function ContactForm({
   const [taxId, setTaxId] = useState(initial?.tax_id ?? "");
   const [notes, setNotes] = useState(initial?.notes ?? "");
   const [submitting, setSubmitting] = useState(false);
+  const submittingRef = useRef(false);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
+    if (submittingRef.current) return;
     if (!name.trim()) {
       onError("Name is required");
       return;
     }
+    submittingRef.current = true;
     setSubmitting(true);
     try {
       const data: ContactInput = {
@@ -205,8 +220,9 @@ function ContactForm({
       }
       onSaved();
     } catch (err) {
-      onError(String(err));
+      onError(errorMessage(err));
     } finally {
+      submittingRef.current = false;
       setSubmitting(false);
     }
   }

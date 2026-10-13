@@ -2,6 +2,35 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Changed
+- **Toolchain:** Rust edition 2024 (MSRV 1.94, resolver 3); Docker builder `rust:1.99-slim-bookworm`.
+- **Rust dependencies** updated to latest, including sqlx 0.9, reqwest 0.13, toml 1.1, sha2 0.11, notify 8, tower-http 0.7, directories 6, jsonwebtoken 11 (`aws_lc_rs` backend), typst 0.15 / typst-as-lib 0.17.
+- **Frontend dependencies** updated to latest: TypeScript 7, Vite 8, @vitejs/plugin-react 6, Tailwind 4.3, React 19.3, react-router 7.18, @tauri-apps/* 2.12 (`npm audit`: 0 vulnerabilities).
+- **Tax engine** projects the full year: year-to-date profit is annualized over the IRS installment periods, the standard deduction, $400 SE floor and 0.9% Additional Medicare Tax are applied, and the quarterly payment is a quarter of the projected annual tax. 2026 rules updated to the published figures (brackets and $16,100 standard deduction per Rev. Proc. 2025-32, $184,500 wage base, 72.5¢ mileage); rule files are validated on load.
+- **Schedule C mappings** corrected (Product Sales → line 1, Insurance → 15, Equipment → 13, Mileage/Vehicle → 9, Utilities → 25, Bank Fees → 27); migration V003 re-tags existing default accounts.
+- 1099-NEC threshold is $2,000 for payments from 2026 ($600 before).
+- Money rounds half away from zero.
+- **Server:** refuses to start without `AEQUI_API_KEY`/`AEQUI_OIDC_CONFIG` unless bound to loopback or `AEQUI_INSECURE_NO_AUTH=1`; invalid config env vars are startup errors; OIDC supports subject/email allowlists; graceful shutdown on SIGTERM.
+- **Plaid sync** queues transactions for review instead of posting guessed categories to the ledger.
+- **MCP server:** enforces the Settings page's enable/read-only toggles on every call; SSE transport binds 127.0.0.1 and requires `AEQUI_MCP_TOKEN`; defaults to the desktop app's ledger instead of creating `./aequi.db`.
+- The desktop app no longer spawns the MCP sidecar (it exited immediately) and drops the unused shell plugin and permissions; devtools are debug-only.
+
+### Fixed
+- Invoice PDFs rendered with no text (no fonts were loaded); user text can no longer inject Typst markup.
+- Transaction validation rejects negative, zero, two-sided and out-of-range lines (previously possible via MCP and the API, and could crash the MCP server).
+- Profit & loss in the app and server ignored the date range; one-sided date filters returned everything.
+- Tax payments recorded before an estimate were silently dropped, and a second payment overwrote the first; prior-year safe harbor summed four annual projections.
+- Recording a payment never marked invoices Paid (so they stayed overdue forever), and re-sending an invoice reopened it; payments are validated and overpayments rejected.
+- Stripe webhooks: replay-protection bypass, duplicate events double-booked, partial refunds reversed the full charge.
+- Exports contained no transactions; QIF lost amounts' signs and accounts; Beancount output could fail to parse.
+- Errors displayed as "[object Object]"; receipt capture and receipt image preview never worked; amount fields could not be typed into; default dates used UTC.
+- Migrations are applied atomically and use a stable checksum (existing databases are re-stamped); backups are written atomically; restore stages and validates archives, rejects Windows path traversal and removes stale WAL files.
+- Import parsers: XML/QFX OFX amounts imported as 0, decimal commas read 100×, CSV debit/credit sign and date-fallback errors, duplicate auto-matches, Wave parenthesized negatives, rule files that could never load.
+- Receipt watch folder missed moved-in files and partial writes and dropped events under load; OCR total/tax extraction picked subtotals and rates.
+- MCP JSON-RPC conformance (notifications, error ids, `ping`), non-atomic transaction writes, strict argument validation, and receipt files copied into attachments.
+
 ## [2026.3.18] - 2026-03-18
 
 ### Added

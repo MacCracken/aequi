@@ -1,117 +1,160 @@
 use anyhow::Result;
-use serde_json::json;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use serde_json::{Value, json};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 
 use crate::audit;
 use crate::permissions::Permissions;
-use crate::protocol::{JsonRpcRequest, JsonRpcResponse};
+use crate::protocol::{
+    INTERNAL_ERROR, INVALID_PARAMS, JsonRpcRequest, JsonRpcResponse, METHOD_NOT_FOUND,
+    parse_message,
+};
 use crate::tools::ToolRegistry;
 
+pub const PROTOCOL_VERSION: &str = "2024-11-05";
+
+/// Transport-independent MCP request handling, shared by stdio and SSE.
+pub struct McpServer {
+    db: aequi_storage::DbPool,
+    permissions: Permissions,
+    registry: ToolRegistry,
+}
+
+impl McpServer {
+    pub fn new(db: aequi_storage::DbPool, permissions: Permissions) -> Self {
+        McpServer {
+            db,
+            permissions,
+            registry: ToolRegistry::new(),
+        }
+    }
+
+    /// Handle one raw JSON-RPC message. Returns `None` when nothing may be
+    /// sent back, i.e. for notifications.
+    pub async fn handle_message(&self, bytes: &[u8]) -> Option<JsonRpcResponse> {
+        match parse_message(bytes) {
+            Ok(req) => self.handle_request(&req).await,
+            Err(error_response) => Some(error_response),
+        }
+    }
+
+    pub async fn handle_request(&self, req: &JsonRpcRequest) -> Option<JsonRpcResponse> {
+        let Some(id) = req.id.clone() else {
+            // Notifications (notifications/initialized, notifications/cancelled,
+            // ...) need no action here and must never be answered.
+            tracing::debug!("ignoring notification {}", req.method);
+            return None;
+        };
+
+        Some(match req.method.as_str() {
+            "initialize" => JsonRpcResponse::success(
+                id,
+                json!({
+                    "protocolVersion": PROTOCOL_VERSION,
+                    "capabilities": {
+                        "tools": { "listChanged": false },
+                    },
+                    "serverInfo": {
+                        "name": "aequi-mcp",
+                        "version": env!("CARGO_PKG_VERSION")
+                    }
+                }),
+            ),
+            "ping" => JsonRpcResponse::success(id, json!({})),
+            "tools/list" => {
+                let tools: Vec<_> = self
+                    .registry
+                    .list_definitions()
+                    .iter()
+                    .map(|t| {
+                        json!({
+                            "name": t.name,
+                            "description": t.description,
+                            "inputSchema": t.input_schema
+                        })
+                    })
+                    .collect();
+                JsonRpcResponse::success(id, json!({ "tools": tools }))
+            }
+            "tools/call" => self.call_tool(id, &req.params).await,
+            _ => JsonRpcResponse::error(
+                id,
+                METHOD_NOT_FOUND,
+                format!("Method not found: {}", req.method),
+            ),
+        })
+    }
+
+    async fn call_tool(&self, id: Value, params: &Value) -> JsonRpcResponse {
+        let Some(tool_name) = params.get("name").and_then(Value::as_str) else {
+            return JsonRpcResponse::error(
+                id,
+                INVALID_PARAMS,
+                "Invalid params: tools/call requires a string \"name\"".to_string(),
+            );
+        };
+        let arguments = params.get("arguments").cloned().unwrap_or(Value::Null);
+
+        let input_str = arguments.to_string();
+        let result = self
+            .registry
+            .call(tool_name, arguments, &self.db, &self.permissions)
+            .await;
+
+        let outcome = if result.is_error() {
+            "error"
+        } else {
+            "success"
+        };
+        audit::log_tool_call(&self.db, tool_name, &input_str, outcome).await;
+
+        match serde_json::to_value(&result) {
+            Ok(value) => JsonRpcResponse::success(id, value),
+            Err(e) => JsonRpcResponse::error(
+                id,
+                INTERNAL_ERROR,
+                format!("Failed to serialize tool result: {e}"),
+            ),
+        }
+    }
+}
+
 pub async fn run_stdio_server(db: aequi_storage::DbPool, permissions: Permissions) -> Result<()> {
-    let stdin = tokio::io::stdin();
-    let mut stdout = tokio::io::stdout();
-    let mut reader = BufReader::new(stdin);
+    let server = McpServer::new(db, permissions);
+    serve_lines(
+        &server,
+        BufReader::new(tokio::io::stdin()),
+        tokio::io::stdout(),
+    )
+    .await
+}
 
-    let registry = ToolRegistry::new();
-
-    let mut line = String::new();
+/// Newline-delimited JSON-RPC over a byte stream. Only protocol messages are
+/// written to `writer`; logging goes to stderr. A malformed line (including
+/// invalid UTF-8) gets a parse error and the loop keeps going.
+pub async fn serve_lines<R, W>(server: &McpServer, mut reader: R, mut writer: W) -> Result<()>
+where
+    R: AsyncBufRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    let mut buf = Vec::new();
     loop {
-        line.clear();
-        let n = reader.read_line(&mut line).await?;
-        if n == 0 {
+        buf.clear();
+        if reader.read_until(b'\n', &mut buf).await? == 0 {
             break; // EOF
         }
 
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
+        let line = buf.trim_ascii();
+        if line.is_empty() {
             continue;
         }
 
-        let request: JsonRpcRequest = match serde_json::from_str(trimmed) {
-            Ok(r) => r,
-            Err(e) => {
-                let resp = JsonRpcResponse::error(None, -32700, format!("Parse error: {e}"));
-                let out = serde_json::to_string(&resp)? + "\n";
-                stdout.write_all(out.as_bytes()).await?;
-                stdout.flush().await?;
-                continue;
-            }
-        };
-
-        let response = handle_request(&request, &registry, &db, &permissions).await;
-        let out = serde_json::to_string(&response)? + "\n";
-        stdout.write_all(out.as_bytes()).await?;
-        stdout.flush().await?;
+        if let Some(response) = server.handle_message(line).await {
+            let mut out = serde_json::to_vec(&response)?;
+            out.push(b'\n');
+            writer.write_all(&out).await?;
+            writer.flush().await?;
+        }
     }
 
     Ok(())
-}
-
-async fn handle_request(
-    req: &JsonRpcRequest,
-    registry: &ToolRegistry,
-    db: &aequi_storage::DbPool,
-    permissions: &Permissions,
-) -> JsonRpcResponse {
-    match req.method.as_str() {
-        "initialize" => JsonRpcResponse::success(
-            req.id.clone(),
-            json!({
-                "protocolVersion": "2024-11-05",
-                "capabilities": {
-                    "tools": { "listChanged": false },
-                },
-                "serverInfo": {
-                    "name": "aequi-mcp",
-                    "version": env!("CARGO_PKG_VERSION")
-                }
-            }),
-        ),
-        "notifications/initialized" => {
-            // No response needed for notifications
-            JsonRpcResponse::success(req.id.clone(), json!({}))
-        }
-        "tools/list" => {
-            let tools: Vec<_> = registry
-                .list_definitions()
-                .iter()
-                .map(|t| {
-                    json!({
-                        "name": t.name,
-                        "description": t.description,
-                        "inputSchema": t.input_schema
-                    })
-                })
-                .collect();
-            JsonRpcResponse::success(req.id.clone(), json!({ "tools": tools }))
-        }
-        "tools/call" => {
-            let tool_name = req
-                .params
-                .get("name")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let arguments = req.params.get("arguments").cloned().unwrap_or(json!({}));
-
-            let input_str = serde_json::to_string(&arguments).unwrap_or_default();
-            let result = registry.call(tool_name, arguments, db, permissions).await;
-
-            let outcome = if result.is_error.unwrap_or(false) {
-                "error"
-            } else {
-                "success"
-            };
-            audit::log_tool_call(db, tool_name, &input_str, outcome).await;
-
-            JsonRpcResponse::success(
-                req.id.clone(),
-                serde_json::to_value(&result).unwrap_or(json!({})),
-            )
-        }
-        _ => JsonRpcResponse::error(
-            req.id.clone(),
-            -32601,
-            format!("Method not found: {}", req.method),
-        ),
-    }
 }

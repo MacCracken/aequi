@@ -69,7 +69,12 @@ mod tests {
         let base = std::path::PathBuf::from("/data/attachments");
         let hash = "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890ab";
         let path = attachment_path(&base, hash, "jpg");
-        assert_eq!(path, std::path::PathBuf::from("/data/attachments/ab/abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890ab.jpg"));
+        assert_eq!(
+            path,
+            std::path::PathBuf::from(
+                "/data/attachments/ab/abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890ab.jpg"
+            )
+        );
     }
 
     #[test]

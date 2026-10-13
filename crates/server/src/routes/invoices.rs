@@ -3,7 +3,6 @@ use std::sync::Arc;
 use axum::extract::{Path, State};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use rust_decimal::Decimal;
 use serde::Deserialize;
 
 use crate::error::ApiError;
@@ -40,6 +39,17 @@ async fn create_invoice(
     State(state): State<Arc<ServerState>>,
     Json(input): Json<CreateInvoice>,
 ) -> Result<Json<aequi_storage::InvoiceRecord>, ApiError> {
+    if aequi_storage::get_contact_by_id(&state.db, input.contact_id)
+        .await?
+        .is_none()
+    {
+        return Err(ApiError::BadRequest(format!(
+            "Contact {} not found",
+            input.contact_id
+        )));
+    }
+
+    // Storage validates the dates (YYYY-MM-DD, due >= issue) -> 400.
     let id = aequi_storage::insert_invoice(
         &state.db,
         &input.invoice_number,
@@ -119,6 +129,8 @@ async fn record_payment(
     Path(invoice_id): Path<i64>,
     Json(input): Json<RecordPayment>,
 ) -> Result<Json<aequi_storage::PaymentRecord>, ApiError> {
+    // Storage validates amount/date, rejects Void/Paid invoices and
+    // overpayments (-> 400), and advances the invoice status itself.
     let id = aequi_storage::insert_payment(
         &state.db,
         invoice_id,
@@ -127,7 +139,11 @@ async fn record_payment(
         input.method.as_deref(),
         None,
     )
-    .await?;
+    .await
+    .map_err(|e| match e {
+        sqlx::Error::RowNotFound => ApiError::NotFound(format!("Invoice {invoice_id} not found")),
+        other => other.into(),
+    })?;
 
     let payments = aequi_storage::get_payments_for_invoice(&state.db, invoice_id).await?;
     let record = payments
@@ -142,52 +158,6 @@ async fn record_payment(
 #[derive(Deserialize)]
 struct SendInvoiceRequest {
     subject: Option<String>,
-}
-
-/// Reconstruct a domain Invoice from storage records.
-fn records_to_invoice(
-    rec: &aequi_storage::InvoiceRecord,
-    lines: &[aequi_storage::InvoiceLineRecord],
-    tax_lines: &[aequi_storage::InvoiceTaxLineRecord],
-) -> aequi_core::Invoice {
-    use aequi_core::*;
-    use chrono::NaiveDate;
-
-    let discount = match (rec.discount_type.as_deref(), rec.discount_value) {
-        (Some("Percentage"), Some(bps)) => Some(Discount::Percentage(Decimal::new(bps, 2))),
-        (Some("Flat"), Some(cents)) => Some(Discount::Flat(Money::from_cents(cents))),
-        _ => None,
-    };
-
-    Invoice {
-        id: Some(InvoiceId(rec.id)),
-        invoice_number: rec.invoice_number.clone(),
-        contact_id: ContactId(rec.contact_id),
-        status: InvoiceStatus::Draft, // status not needed for rendering
-        issue_date: NaiveDate::parse_from_str(&rec.issue_date, "%Y-%m-%d")
-            .unwrap_or_else(|_| chrono::Utc::now().date_naive()),
-        due_date: NaiveDate::parse_from_str(&rec.due_date, "%Y-%m-%d")
-            .unwrap_or_else(|_| chrono::Utc::now().date_naive()),
-        lines: lines
-            .iter()
-            .map(|l| InvoiceLine {
-                description: l.description.clone(),
-                quantity: Decimal::new(l.quantity_hundredths, 2),
-                unit_rate: Money::from_cents(l.unit_rate_cents),
-                taxable: l.taxable,
-            })
-            .collect(),
-        discount,
-        tax_lines: tax_lines
-            .iter()
-            .map(|t| TaxLine {
-                label: t.label.clone(),
-                rate: Decimal::new(t.rate_bps, 4),
-            })
-            .collect(),
-        notes: rec.notes.clone(),
-        terms: rec.terms.clone(),
-    }
 }
 
 fn record_to_contact(rec: &aequi_storage::ContactRecord) -> aequi_core::Contact {
@@ -225,10 +195,15 @@ async fn send_invoice(
     let rec = aequi_storage::get_invoice_by_id(&state.db, id)
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("Invoice {id} not found")))?;
+    if rec.status_type == "Void" {
+        return Err(ApiError::BadRequest(format!(
+            "Invoice {id} is void and cannot be sent"
+        )));
+    }
 
     let lines = aequi_storage::get_invoice_lines(&state.db, id).await?;
     let tax_lines = aequi_storage::get_invoice_tax_lines(&state.db, id).await?;
-    let invoice = records_to_invoice(&rec, &lines, &tax_lines);
+    let invoice = aequi_storage::invoice_from_records(&rec, &lines, &tax_lines)?;
 
     let contact_rec = aequi_storage::get_contact_by_id(&state.db, rec.contact_id)
         .await?
@@ -238,13 +213,16 @@ async fn send_invoice(
     let result =
         aequi_email::send_invoice(email_config, &invoice, &contact, input.subject.as_deref())
             .await
-            .map_err(|e| ApiError::Internal(e.to_string()))?;
+            .map_err(|e| match e {
+                aequi_email::DeliveryError::NoRecipientEmail
+                | aequi_email::DeliveryError::MessageBuild(_) => {
+                    ApiError::BadRequest(e.to_string())
+                }
+                other => ApiError::Internal(other.to_string()),
+            })?;
 
-    // Update invoice status to Sent
-    let sent_data = serde_json::json!({ "sent_at": chrono::Utc::now().to_rfc3339() });
-    let _ =
-        aequi_storage::update_invoice_status(&state.db, id, "Sent", Some(&sent_data.to_string()))
-            .await;
+    // Draft -> Sent; re-sends leave Sent/Viewed/paid states alone.
+    aequi_storage::mark_invoice_sent(&state.db, id, &chrono::Utc::now().to_rfc3339()).await?;
 
     Ok(Json(result))
 }

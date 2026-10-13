@@ -4,8 +4,16 @@ use crate::Money;
 
 use super::payment::Payment;
 
-/// The IRS 1099-NEC reporting threshold: $600.
-const NEC_THRESHOLD_CENTS: i64 = 60000;
+/// The IRS 1099-NEC reporting threshold for payments made in `year`: $600
+/// through 2025, $2,000 from 2026 (P.L. 119-21). The 2026 figure is indexed
+/// for inflation from 2027; update this when the IRS publishes those amounts.
+pub fn nec_threshold(year: u16) -> Money {
+    if year >= 2026 {
+        Money::from_cents(200_000)
+    } else {
+        Money::from_cents(60_000)
+    }
+}
 
 /// Sum all payments within a calendar year.
 pub fn compute_ytd_payments(payments: &[Payment], year: u16) -> Money {
@@ -16,9 +24,9 @@ pub fn compute_ytd_payments(payments: &[Payment], year: u16) -> Money {
         .fold(Money::zero(), |a, b| a + b)
 }
 
-/// Returns true if the YTD amount meets or exceeds the $600 1099-NEC threshold.
-pub fn check_1099_threshold(ytd_amount: Money) -> bool {
-    ytd_amount.to_cents() >= NEC_THRESHOLD_CENTS
+/// Returns true if the YTD amount for `year` meets or exceeds the 1099-NEC threshold.
+pub fn check_1099_threshold(ytd_amount: Money, year: u16) -> bool {
+    ytd_amount >= nec_threshold(year)
 }
 
 #[cfg(test)]
@@ -57,22 +65,18 @@ mod tests {
     }
 
     #[test]
-    fn threshold_at_600() {
-        assert!(check_1099_threshold(Money::from_cents(60000)));
+    fn threshold_is_600_through_2025() {
+        assert!(check_1099_threshold(Money::from_cents(60000), 2025));
+        assert!(!check_1099_threshold(Money::from_cents(59999), 2025));
+        assert!(check_1099_threshold(Money::from_cents(100000), 2025));
+        assert!(!check_1099_threshold(Money::zero(), 2025));
     }
 
     #[test]
-    fn threshold_below_600() {
-        assert!(!check_1099_threshold(Money::from_cents(59999)));
-    }
-
-    #[test]
-    fn threshold_above_600() {
-        assert!(check_1099_threshold(Money::from_cents(100000)));
-    }
-
-    #[test]
-    fn threshold_zero() {
-        assert!(!check_1099_threshold(Money::zero()));
+    fn threshold_is_2000_from_2026() {
+        assert!(!check_1099_threshold(Money::from_cents(150000), 2026));
+        assert!(!check_1099_threshold(Money::from_cents(199999), 2026));
+        assert!(check_1099_threshold(Money::from_cents(200000), 2026));
+        assert!(check_1099_threshold(Money::from_cents(200000), 2027));
     }
 }

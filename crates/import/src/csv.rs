@@ -1,20 +1,27 @@
-use chrono::NaiveDate;
-use rust_decimal::prelude::ToPrimitive;
-use rust_decimal::Decimal;
+use chrono::{Datelike, NaiveDate};
 use serde::{Deserialize, Serialize};
 use std::io::Read;
-use std::str::FromStr;
 use thiserror::Error;
+
+use crate::util::parse_amount_cents;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CsvColumnMapping {
     pub date_column: Option<usize>,
     pub description_column: Option<usize>,
+    /// Single signed amount column. Takes precedence over debit/credit columns.
     pub amount_column: Option<usize>,
+    /// Money-out column (withdrawals). Imported as a negative amount.
     pub debit_column: Option<usize>,
+    /// Money-in column (deposits). Imported as a positive amount.
     pub credit_column: Option<usize>,
     pub memo_column: Option<usize>,
+    /// chrono format applied to every row; rows that do not match are errors.
     pub date_format: String,
+    /// Flip the sign of `amount_column` for banks that export money out as
+    /// positive. Ignored for debit/credit columns, whose direction is fixed.
+    #[serde(default)]
+    pub invert_sign: bool,
 }
 
 impl Default for CsvColumnMapping {
@@ -27,6 +34,7 @@ impl Default for CsvColumnMapping {
             credit_column: None,
             memo_column: None,
             date_format: "%Y-%m-%d".to_string(),
+            invert_sign: false,
         }
     }
 }
@@ -56,9 +64,12 @@ impl Default for CsvImportProfile {
 pub struct CsvTransaction {
     pub date: NaiveDate,
     pub description: String,
+    /// Signed cents: negative = money out of the account, positive = money in.
     pub amount: i64,
     pub memo: Option<String>,
+    /// Magnitude read from the debit column, when the profile uses one.
     pub debit: Option<i64>,
+    /// Magnitude read from the credit column, when the profile uses one.
     pub credit: Option<i64>,
 }
 
@@ -76,6 +87,8 @@ pub enum CsvError {
     InvalidAmount(String),
     #[error("No data rows")]
     NoDataRows,
+    #[error("Too many rows (max {0})")]
+    TooManyRows(usize),
 }
 
 pub struct CsvImporter;
@@ -89,25 +102,39 @@ impl CsvImporter {
         const MAX_CSV_RECORDS: usize = 100_000;
         let mapping = &profile.mapping;
 
-        for result in reader.records() {
-            if transactions.len() >= MAX_CSV_RECORDS {
-                break; // Safety limit
+        let date_col = mapping
+            .date_column
+            .ok_or_else(|| CsvError::MissingColumn("date_column".to_string()))?;
+        let amount_source = match (
+            mapping.amount_column,
+            mapping.debit_column,
+            mapping.credit_column,
+        ) {
+            (Some(col), _, _) => AmountSource::Single(col),
+            (None, Some(debit), Some(credit)) => AmountSource::DebitCredit { debit, credit },
+            _ => {
+                return Err(CsvError::MissingColumn(
+                    "amount_column (or both debit_column and credit_column)".to_string(),
+                ));
             }
+        };
 
+        for (index, result) in reader.records().enumerate() {
             let record = result?;
 
-            if record.is_empty() {
+            if record.iter().all(|field| field.trim().is_empty()) {
                 continue;
             }
+            if transactions.len() >= MAX_CSV_RECORDS {
+                return Err(CsvError::TooManyRows(MAX_CSV_RECORDS));
+            }
+            let row = record.position().map_or(index as u64 + 1, |p| p.line());
 
-            let date = if let Some(col) = mapping.date_column {
-                let field = record
-                    .get(col)
-                    .ok_or_else(|| CsvError::MissingColumn(format!("date_column {}", col)))?;
-                parse_date(field, &mapping.date_format)?
-            } else {
-                continue;
-            };
+            let date_field = record.get(date_col).ok_or_else(|| {
+                CsvError::MissingColumn(format!("row {row}: date_column {date_col}"))
+            })?;
+            let date = parse_date(date_field, &mapping.date_format)
+                .map_err(|reason| CsvError::InvalidDate(format!("row {row}: {reason}")))?;
 
             let description = if let Some(col) = mapping.description_column {
                 record.get(col).unwrap_or_default().to_string()
@@ -115,31 +142,45 @@ impl CsvImporter {
                 String::new()
             };
 
-            let (amount, debit, credit) = if let Some(col) = mapping.amount_column {
-                let field = record.get(col).unwrap_or_default();
-                let amt = parse_amount(field)?;
-                (amt, None, None)
-            } else if let (Some(d_col), Some(c_col)) = (mapping.debit_column, mapping.credit_column)
-            {
-                let d = record
-                    .get(d_col)
-                    .filter(|s| !s.trim().is_empty())
-                    .map(parse_amount)
-                    .transpose()?;
-                let c = record
-                    .get(c_col)
-                    .filter(|s| !s.trim().is_empty())
-                    .map(parse_amount)
-                    .transpose()?;
-                let amt = match (d, c) {
-                    (Some(d), None) => d,
-                    (None, Some(c)) => -c,
-                    (None, None) => 0,
-                    _ => 0,
-                };
-                (amt, d, c)
-            } else {
-                continue;
+            let invalid_amount =
+                |field: &str| CsvError::InvalidAmount(format!("row {row}: '{}'", field.trim()));
+
+            let (amount, debit, credit) = match amount_source {
+                AmountSource::Single(col) => {
+                    let field = record.get(col).ok_or_else(|| {
+                        CsvError::MissingColumn(format!("row {row}: amount_column {col}"))
+                    })?;
+                    let amt = parse_amount(field).map_err(|_| invalid_amount(field))?;
+                    let amt = if mapping.invert_sign {
+                        amt.checked_neg().ok_or_else(|| invalid_amount(field))?
+                    } else {
+                        amt
+                    };
+                    (amt, None, None)
+                }
+                AmountSource::DebitCredit { debit, credit } => {
+                    // The column, not the sign, says which way the money moved:
+                    // some banks write withdrawals as "-50.00" in the debit column.
+                    let magnitude = |col: usize| -> Result<Option<i64>, CsvError> {
+                        match record.get(col).filter(|s| !s.trim().is_empty()) {
+                            Some(field) => parse_amount(field)
+                                .ok()
+                                .and_then(i64::checked_abs)
+                                .map(Some)
+                                .ok_or_else(|| invalid_amount(field)),
+                            None => Ok(None),
+                        }
+                    };
+                    let d = magnitude(debit)?;
+                    let c = magnitude(credit)?;
+                    if d.is_none() && c.is_none() {
+                        return Err(CsvError::InvalidAmount(format!(
+                            "row {row}: both debit and credit columns are empty"
+                        )));
+                    }
+                    // Banks that fill the unused column with "0.00" still net correctly.
+                    (c.unwrap_or(0) - d.unwrap_or(0), d, c)
+                }
             };
 
             let memo = mapping
@@ -177,41 +218,31 @@ impl CsvImporter {
     }
 }
 
-fn parse_date(s: &str, format: &str) -> Result<NaiveDate, CsvError> {
+#[derive(Clone, Copy)]
+enum AmountSource {
+    Single(usize),
+    DebitCredit { debit: usize, credit: usize },
+}
+
+/// Parse with the profile's format only. Falling back to other formats per
+/// row would silently mix DD/MM and MM/DD within one file, so a mismatch is
+/// reported instead. Years before 1900 are rejected because chrono's `%Y`
+/// accepts one to four digits ("01/15/24" → year 24).
+fn parse_date(s: &str, format: &str) -> Result<NaiveDate, String> {
     let s = s.trim();
-
-    if let Ok(date) = NaiveDate::parse_from_str(s, format) {
-        return Ok(date);
+    let date = NaiveDate::parse_from_str(s, format)
+        .map_err(|_| format!("'{s}' does not match date format '{format}'"))?;
+    if !(1900..=9999).contains(&date.year()) {
+        return Err(format!(
+            "'{s}' parsed as year {} with format '{format}' (use %y for two-digit years)",
+            date.year()
+        ));
     }
-
-    for fmt in &[
-        "%m/%d/%Y", "%d/%m/%Y", "%Y/%m/%d", "%m-%d-%Y", "%d-%m-%Y", "%Y-%m-%d",
-    ] {
-        if let Ok(date) = NaiveDate::parse_from_str(s, fmt) {
-            return Ok(date);
-        }
-    }
-
-    Err(CsvError::InvalidDate(s.to_string()))
+    Ok(date)
 }
 
 fn parse_amount(s: &str) -> Result<i64, CsvError> {
-    let s = s.trim();
-    let (negative, s) = if s.starts_with('(') && s.ends_with(')') {
-        (true, &s[1..s.len() - 1])
-    } else {
-        (false, s)
-    };
-    let s = s.replace([',', '$', ' '], "");
-    let mut dec = Decimal::from_str(&s).map_err(|_| CsvError::InvalidAmount(s.to_string()))?;
-    if negative {
-        dec = -dec;
-    }
-    let cents = (dec * Decimal::from(100))
-        .round()
-        .to_i64()
-        .ok_or_else(|| CsvError::InvalidAmount(s.to_string()))?;
-    Ok(cents)
+    parse_amount_cents(s).ok_or_else(|| CsvError::InvalidAmount(s.trim().to_string()))
 }
 
 pub fn parse<R: Read>(
@@ -290,6 +321,12 @@ mod tests {
     fn parse_amount_invalid() {
         assert!(parse_amount("not_a_number").is_err());
         assert!(parse_amount("").is_err());
+        assert!(parse_amount("12abc").is_err());
+    }
+
+    #[test]
+    fn parse_amount_decimal_comma() {
+        assert_eq!(parse_amount("-49,99").unwrap(), -4999);
     }
 
     // ── parse_date ────────────────────────────────────────────────────────────
@@ -302,7 +339,24 @@ mod tests {
 
     #[test]
     fn parse_date_us_slash() {
-        let d = parse_date("01/15/2024", "%Y-%m-%d").unwrap(); // fallback
+        let d = parse_date("01/15/2024", "%m/%d/%Y").unwrap();
+        assert_eq!(d, NaiveDate::from_ymd_opt(2024, 1, 15).unwrap());
+    }
+
+    #[test]
+    fn parse_date_no_silent_fallback_to_other_formats() {
+        // Used to fall back to %m/%d/%Y; a mismatch must now be reported.
+        assert!(parse_date("01/15/2024", "%Y-%m-%d").is_err());
+        // ...and must not reinterpret a DD/MM date under an MM/DD profile.
+        assert!(parse_date("15/01/2024", "%m/%d/%Y").is_err());
+    }
+
+    #[test]
+    fn parse_date_rejects_two_digit_year_under_four_digit_format() {
+        // chrono's %Y accepts "24" as year 0024.
+        let err = parse_date("01/15/24", "%m/%d/%Y").unwrap_err();
+        assert!(err.contains("year 24"), "{err}");
+        let d = parse_date("01/15/24", "%m/%d/%y").unwrap();
         assert_eq!(d, NaiveDate::from_ymd_opt(2024, 1, 15).unwrap());
     }
 
@@ -327,6 +381,7 @@ mod tests {
                 credit_column: None,
                 memo_column: None,
                 date_format: "%Y-%m-%d".to_string(),
+                invert_sign: false,
             },
         }
     }
@@ -355,15 +410,127 @@ mod tests {
                 credit_column: Some(3),
                 memo_column: None,
                 date_format: "%Y-%m-%d".to_string(),
+                invert_sign: false,
             },
             ..default_profile()
         };
         let txs = import_csv(data.as_ref(), &profile).unwrap();
         assert_eq!(txs.len(), 2);
-        // Credit of 100 → amount = -100 (inflow from bank perspective)
-        assert_eq!(txs[0].amount, -10000);
-        // Debit of 50 → amount = 50
-        assert_eq!(txs[1].amount, 5000);
+        // Credit (deposit) of 100 → money in → positive
+        assert_eq!(txs[0].amount, 10000);
+        assert_eq!(txs[0].credit, Some(10000));
+        assert_eq!(txs[0].debit, None);
+        // Debit (withdrawal) of 50 → money out → negative
+        assert_eq!(txs[1].amount, -5000);
+        assert_eq!(txs[1].debit, Some(5000));
+    }
+
+    fn debit_credit_profile() -> CsvImportProfile {
+        CsvImportProfile {
+            mapping: CsvColumnMapping {
+                date_column: Some(0),
+                description_column: Some(1),
+                debit_column: Some(2),
+                credit_column: Some(3),
+                ..CsvColumnMapping::default()
+            },
+            ..default_profile()
+        }
+    }
+
+    #[test]
+    fn import_csv_debit_credit_zero_in_unused_column() {
+        // Banks that write "0.00" in the unused column used to import as 0.
+        let data = b"date,description,debit,credit\n\
+            2024-01-15,PAYMENT,0.00,100.00\n\
+            2024-01-16,CHARGE,50.00,0.00\n";
+        let txs = import_csv(data.as_ref(), &debit_credit_profile()).unwrap();
+        assert_eq!(txs[0].amount, 10000);
+        assert_eq!(txs[1].amount, -5000);
+    }
+
+    #[test]
+    fn import_csv_debit_column_with_negative_sign() {
+        // The column decides direction, whatever sign the bank wrote.
+        let data = b"date,description,debit,credit\n2024-01-16,CHARGE,-50.00,\n";
+        let txs = import_csv(data.as_ref(), &debit_credit_profile()).unwrap();
+        assert_eq!(txs[0].amount, -5000);
+        assert_eq!(txs[0].debit, Some(5000));
+    }
+
+    #[test]
+    fn import_csv_debit_credit_both_empty_errors() {
+        let data = b"date,description,debit,credit\n2024-01-16,NOTHING,,\n";
+        let err = import_csv(data.as_ref(), &debit_credit_profile()).unwrap_err();
+        assert!(matches!(err, CsvError::InvalidAmount(ref m) if m.contains("row 2")));
+    }
+
+    #[test]
+    fn import_csv_single_and_split_columns_agree_on_sign() {
+        let single =
+            b"date,description,amount\n2024-01-16,CHARGE,-50.00\n2024-01-17,REFUND,20.00\n";
+        let split =
+            b"date,description,debit,credit\n2024-01-16,CHARGE,50.00,\n2024-01-17,REFUND,,20.00\n";
+        let a = import_csv(single.as_ref(), &default_profile()).unwrap();
+        let b = import_csv(split.as_ref(), &debit_credit_profile()).unwrap();
+        assert_eq!(
+            a.iter().map(|t| t.amount).collect::<Vec<_>>(),
+            b.iter().map(|t| t.amount).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn import_csv_invert_sign() {
+        let data = b"date,description,amount\n2024-01-16,CHARGE,50.00\n2024-01-17,REFUND,-20.00\n";
+        let mut profile = default_profile();
+        profile.mapping.invert_sign = true;
+        let txs = import_csv(data.as_ref(), &profile).unwrap();
+        assert_eq!(txs[0].amount, -5000);
+        assert_eq!(txs[1].amount, 2000);
+    }
+
+    #[test]
+    fn invert_sign_defaults_to_false_when_absent() {
+        let json = r#"{"date_column":0,"description_column":1,"amount_column":2,
+            "debit_column":null,"credit_column":null,"memo_column":null,"date_format":"%Y-%m-%d"}"#;
+        let mapping: CsvColumnMapping = serde_json::from_str(json).unwrap();
+        assert!(!mapping.invert_sign);
+    }
+
+    #[test]
+    fn import_csv_bad_date_reports_row() {
+        let data = b"date,description,amount\n2024-01-15,A,1.00\n01/16/2024,B,2.00\n";
+        let err = import_csv(data.as_ref(), &default_profile()).unwrap_err();
+        assert!(
+            matches!(err, CsvError::InvalidDate(ref m) if m.contains("row 3")),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn import_csv_missing_mapping_columns_error() {
+        let data = b"date,description,amount\n2024-01-15,A,1.00\n";
+        let mut profile = default_profile();
+        profile.mapping.amount_column = None;
+        profile.mapping.debit_column = Some(2);
+        assert!(matches!(
+            import_csv(data.as_ref(), &profile),
+            Err(CsvError::MissingColumn(_))
+        ));
+
+        let mut profile = default_profile();
+        profile.mapping.date_column = None;
+        assert!(matches!(
+            import_csv(data.as_ref(), &profile),
+            Err(CsvError::MissingColumn(_))
+        ));
+    }
+
+    #[test]
+    fn import_csv_skips_blank_rows() {
+        let data = b"date,description,amount\n2024-01-15,A,1.00\n,,\n";
+        let txs = import_csv(data.as_ref(), &default_profile()).unwrap();
+        assert_eq!(txs.len(), 1);
     }
 
     #[test]

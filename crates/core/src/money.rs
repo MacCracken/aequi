@@ -1,5 +1,5 @@
-use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
+use rust_decimal::prelude::ToPrimitive;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::ops::{Add, Mul, Sub};
@@ -12,12 +12,31 @@ impl Money {
         Money(Decimal::from(cents) / Decimal::from(100))
     }
 
+    /// Convert to integer cents.
+    ///
+    /// Panics if the amount does not fit in an `i64` number of cents. Amounts
+    /// that pass `ValidatedTransaction::validate` always fit; use
+    /// [`Money::checked_to_cents`] for anything that has not been validated.
     pub fn to_cents(self) -> i64 {
-        (self.0 * Decimal::from(100)).to_i64().unwrap()
+        self.checked_to_cents()
+            .expect("Money amount out of i64 cents range")
     }
 
+    /// Convert to integer cents, or `None` if the amount does not fit in an `i64`.
+    pub fn checked_to_cents(self) -> Option<i64> {
+        self.0.checked_mul(Decimal::from(100))?.to_i64()
+    }
+
+    /// Build from a decimal, rounding to whole cents (half away from zero, the
+    /// usual commercial convention for invoice and sales-tax amounts).
     pub fn from_decimal(decimal: Decimal) -> Self {
-        Money(decimal.round_dp(2))
+        Money(
+            decimal.round_dp_with_strategy(2, rust_decimal::RoundingStrategy::MidpointAwayFromZero),
+        )
+    }
+
+    pub fn is_negative(self) -> bool {
+        self.0.is_sign_negative() && !self.0.is_zero()
     }
 
     pub fn zero() -> Self {
@@ -132,11 +151,22 @@ mod tests {
     fn from_decimal_rounds_to_two_dp() {
         use rust_decimal::Decimal;
         use std::str::FromStr;
+        // Half-cent midpoints round away from zero (not banker's rounding).
         let m = Money::from_decimal(Decimal::from_str("10.125").unwrap());
-        // rust_decimal default rounding is MidpointNearestEven (banker's rounding)
-        assert_eq!(m.to_cents(), 1012);
+        assert_eq!(m.to_cents(), 1013);
         let m = Money::from_decimal(Decimal::from_str("10.135").unwrap());
         assert_eq!(m.to_cents(), 1014);
+        let m = Money::from_decimal(Decimal::from_str("-10.125").unwrap());
+        assert_eq!(m.to_cents(), -1013);
+        let m = Money::from_decimal(Decimal::from_str("10.124").unwrap());
+        assert_eq!(m.to_cents(), 1012);
+    }
+
+    #[test]
+    fn checked_to_cents_overflow() {
+        let huge = Money::from_cents(i64::MAX) + Money::from_cents(i64::MAX);
+        assert_eq!(huge.checked_to_cents(), None);
+        assert_eq!(Money::from_cents(-42).checked_to_cents(), Some(-42));
     }
 
     #[test]

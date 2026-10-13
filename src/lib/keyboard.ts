@@ -1,6 +1,12 @@
 import { useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 
+function isEditableTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  const tag = target.tagName;
+  return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || target.isContentEditable;
+}
+
 /** Global keyboard shortcuts (Ctrl+0..7 for nav, Ctrl+/ for help). */
 export function useKeyboardShortcuts() {
   const navigate = useNavigate();
@@ -18,17 +24,16 @@ export function useKeyboardShortcuts() {
     ];
 
     function handler(e: KeyboardEvent) {
-      // Ignore when typing in an input/textarea
-      const tag = (e.target as HTMLElement)?.tagName;
-      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+      // Ignore while typing in a form field or editable region, during IME
+      // composition, and for AltGr (Ctrl+Alt) character input.
+      if (isEditableTarget(e.target) || e.isComposing || e.altKey) return;
 
       const ctrl = e.ctrlKey || e.metaKey;
 
       // Ctrl+0..7 navigate to pages
-      if (ctrl && e.key >= "0" && e.key <= "7") {
+      if (ctrl && /^[0-7]$/.test(e.key)) {
         e.preventDefault();
-        const idx = parseInt(e.key);
-        navigate(routes[idx]);
+        navigate(routes[Number(e.key)]);
         return;
       }
 

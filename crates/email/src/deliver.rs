@@ -1,8 +1,8 @@
 use aequi_core::{Contact, Invoice};
 use aequi_pdf::{render_invoice_pdf, render_invoice_text};
-use lettre::message::{header::ContentType, Attachment, MultiPart, SinglePart};
+use lettre::message::{Attachment, Mailbox, MultiPart, SinglePart, header::ContentType};
 use lettre::transport::smtp::authentication::Credentials;
-use lettre::{AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor};
+use lettre::{Address, AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor};
 use serde::Serialize;
 
 use crate::config::EmailConfig;
@@ -42,17 +42,19 @@ pub async fn send_invoice(
         .as_deref()
         .ok_or(DeliveryError::NoRecipientEmail)?;
 
-    let text_body = render_invoice_text(invoice, contact);
-    let pdf_bytes = render_invoice_pdf(invoice, contact).map_err(DeliveryError::PdfError)?;
-
     let default_subject = format!("Invoice {}", invoice.invoice_number);
     let subject = subject.unwrap_or(&default_subject);
+    let (from_name, from_email) = config.from_address();
 
     // Reject CRLF in header-sensitive fields to prevent email header injection
+    // (lettre refuses them too, but the Resend API path never goes through lettre).
     for (field, value) in [
         ("subject", subject),
-        ("contact name", &contact.name),
-        ("invoice number", &invoice.invoice_number),
+        ("contact name", contact.name.as_str()),
+        ("invoice number", invoice.invoice_number.as_str()),
+        ("recipient email", recipient_email),
+        ("sender name", from_name),
+        ("sender email", from_email),
     ] {
         if value.contains('\r') || value.contains('\n') {
             return Err(DeliveryError::MessageBuild(format!(
@@ -61,15 +63,24 @@ pub async fn send_invoice(
         }
     }
 
+    let from = mailbox(from_name, from_email, "sender")?;
+    let to = mailbox(&contact.name, recipient_email, "recipient")?;
+
+    let text_body = render_invoice_text(invoice, contact);
+    // Typst layout is CPU-bound; keep it off the async worker threads.
+    let pdf_bytes = {
+        let (invoice, contact) = (invoice.clone(), contact.clone());
+        tokio::task::spawn_blocking(move || render_invoice_pdf(&invoice, &contact))
+            .await
+            .map_err(|e| DeliveryError::PdfError(format!("render task failed: {e}")))?
+            .map_err(DeliveryError::PdfError)?
+    };
+
     let filename = format!("{}.pdf", invoice.invoice_number);
 
-    let (from_name, from_email) = config.from_address();
-
     let parts = EmailParts {
-        from_name,
-        from_email,
-        to_email: recipient_email,
-        to_name: &contact.name,
+        from,
+        to,
         subject,
         text_body: &text_body,
         pdf_bytes: &pdf_bytes,
@@ -77,11 +88,11 @@ pub async fn send_invoice(
     };
 
     let backend_name = match config {
-        EmailConfig::Smtp { ref smtp, .. } => {
+        EmailConfig::Smtp { smtp, .. } => {
             send_smtp(&parts, smtp).await?;
             "smtp"
         }
-        EmailConfig::Resend { ref api_key, .. } => {
+        EmailConfig::Resend { api_key, .. } => {
             send_resend(&parts, api_key).await?;
             "resend"
         }
@@ -94,42 +105,68 @@ pub async fn send_invoice(
     })
 }
 
+/// Build a mailbox from a display name and address. The name is kept as data
+/// (lettre quotes/encodes it), so "Acme, Inc." or quotes in a name are fine.
+fn mailbox(name: &str, email: &str, role: &str) -> Result<Mailbox, DeliveryError> {
+    let address: Address = email
+        .trim()
+        .parse()
+        .map_err(|e| DeliveryError::MessageBuild(format!("invalid {role} address: {e}")))?;
+    let name = name.trim();
+    Ok(Mailbox::new(
+        (!name.is_empty()).then(|| name.to_string()),
+        address,
+    ))
+}
+
+/// RFC 5322 form of a mailbox (`"Acme, Inc." <billing@acme.test>`), for APIs
+/// that take the header value as a string.
+fn mailbox_header(mailbox: &Mailbox) -> Result<String, DeliveryError> {
+    use std::fmt::Write;
+    let mut out = String::new();
+    write!(out, "{mailbox}")
+        .map_err(|_| DeliveryError::MessageBuild("unencodable mailbox".to_string()))?;
+    Ok(out)
+}
+
+/// Truncate to at most `max_bytes` without splitting a UTF-8 character.
+fn truncate_on_char_boundary(s: &mut String, max_bytes: usize) {
+    let end = s.floor_char_boundary(max_bytes);
+    s.truncate(end);
+}
+
 struct EmailParts<'a> {
-    from_name: &'a str,
-    from_email: &'a str,
-    to_email: &'a str,
-    to_name: &'a str,
+    from: Mailbox,
+    to: Mailbox,
     subject: &'a str,
     text_body: &'a str,
     pdf_bytes: &'a [u8],
     filename: &'a str,
 }
 
-async fn send_smtp(
-    parts: &EmailParts<'_>,
-    smtp: &crate::config::SmtpConfig,
-) -> Result<(), DeliveryError> {
+fn build_smtp_message(parts: &EmailParts<'_>) -> Result<Message, DeliveryError> {
     let pdf_attachment = Attachment::new(parts.filename.to_string()).body(
         parts.pdf_bytes.to_vec(),
         ContentType::parse("application/pdf").unwrap(),
     );
 
-    let email = Message::builder()
-        .from(
-            format!("{} <{}>", parts.from_name, parts.from_email)
-                .parse()
-                .map_err(|e| DeliveryError::MessageBuild(format!("invalid from address: {e}")))?,
-        )
-        .to(format!("{} <{}>", parts.to_name, parts.to_email)
-            .parse()
-            .map_err(|e| DeliveryError::MessageBuild(format!("invalid to address: {e}")))?)
+    Message::builder()
+        .from(parts.from.clone())
+        .to(parts.to.clone())
         .subject(parts.subject)
         .multipart(
             MultiPart::mixed()
                 .singlepart(SinglePart::plain(parts.text_body.to_string()))
                 .singlepart(pdf_attachment),
         )
-        .map_err(|e| DeliveryError::MessageBuild(e.to_string()))?;
+        .map_err(|e| DeliveryError::MessageBuild(e.to_string()))
+}
+
+async fn send_smtp(
+    parts: &EmailParts<'_>,
+    smtp: &crate::config::SmtpConfig,
+) -> Result<(), DeliveryError> {
+    let email = build_smtp_message(parts)?;
 
     let creds = Credentials::new(smtp.username.clone(), smtp.password.clone());
 
@@ -152,7 +189,7 @@ async fn send_smtp(
         .await
         .map_err(|e| DeliveryError::Smtp(e.to_string()))?;
 
-    tracing::info!("Invoice sent via SMTP to {}", parts.to_email);
+    tracing::info!("Invoice sent via SMTP to {}", parts.to.email);
     Ok(())
 }
 
@@ -162,8 +199,8 @@ async fn send_resend(parts: &EmailParts<'_>, api_key: &str) -> Result<(), Delive
     let encoded = base64_encode(parts.pdf_bytes);
 
     let body = json!({
-        "from": format!("{} <{}>", parts.from_name, parts.from_email),
-        "to": [parts.to_email],
+        "from": mailbox_header(&parts.from)?,
+        "to": [parts.to.email.to_string()],
         "subject": parts.subject,
         "text": parts.text_body,
         "attachments": [{
@@ -188,11 +225,11 @@ async fn send_resend(parts: &EmailParts<'_>, api_key: &str) -> Result<(), Delive
     if !resp.status().is_success() {
         let status = resp.status();
         let mut text = resp.text().await.unwrap_or_else(|_| "no body".to_string());
-        text.truncate(500); // avoid leaking verbose error bodies
+        truncate_on_char_boundary(&mut text, 500); // avoid leaking verbose error bodies
         return Err(DeliveryError::Resend(format!("{status}: {text}")));
     }
 
-    tracing::info!("Invoice sent via Resend API to {}", parts.to_email);
+    tracing::info!("Invoice sent via Resend API to {}", parts.to.email);
     Ok(())
 }
 
@@ -517,6 +554,97 @@ mod tests {
         }
     }
 
+    fn parts<'a>(from: Mailbox, to: Mailbox, pdf: &'a [u8]) -> EmailParts<'a> {
+        EmailParts {
+            from,
+            to,
+            subject: "Invoice INV-1",
+            text_body: "body",
+            pdf_bytes: pdf,
+            filename: "INV-1.pdf",
+        }
+    }
+
+    #[test]
+    fn display_names_with_specials_are_quoted() {
+        let from = mailbox("Acme, Inc.", "billing@acme.test", "sender").unwrap();
+        assert_eq!(
+            mailbox_header(&from).unwrap(),
+            r#""Acme, Inc." <billing@acme.test>"#
+        );
+        let quoted = mailbox(r#"Bob "The Builder" <x>"#, "bob@x.test", "recipient").unwrap();
+        assert_eq!(
+            mailbox_header(&quoted).unwrap(),
+            r#""Bob \"The Builder\" <x>" <bob@x.test>"#
+        );
+        let bare = mailbox("", "a@b.test", "sender").unwrap();
+        assert_eq!(mailbox_header(&bare).unwrap(), "a@b.test");
+    }
+
+    #[test]
+    fn smtp_message_builds_with_comma_in_names() {
+        let from = mailbox("Acme, Inc.", "billing@acme.test", "sender").unwrap();
+        let to = mailbox("Doe, Jane", "jane@client.test", "recipient").unwrap();
+        let msg = build_smtp_message(&parts(from, to, b"%PDF-")).unwrap();
+        let raw = String::from_utf8(msg.formatted()).unwrap();
+        // lettre RFC 2047-encodes display names containing specials.
+        let from = format!(
+            "From: =?utf-8?b?{}?= <billing@acme.test>",
+            base64_encode(b"Acme, Inc.")
+        );
+        let to = format!(
+            "To: =?utf-8?b?{}?= <jane@client.test>",
+            base64_encode(b"Doe, Jane")
+        );
+        assert!(raw.contains(&from), "{raw}");
+        assert!(raw.contains(&to), "{raw}");
+    }
+
+    #[test]
+    fn invalid_recipient_address_rejected() {
+        assert!(matches!(
+            mailbox("X", "not an address", "recipient"),
+            Err(DeliveryError::MessageBuild(_))
+        ));
+    }
+
+    #[test]
+    fn crlf_in_recipient_email_rejected() {
+        let invoice = sample_invoice();
+        let mut contact = Contact::new("Acme Corp", ContactType::Client);
+        contact.email = Some("a@b.test\r\nBcc: evil@x.test".into());
+        let config = EmailConfig::Resend {
+            from_name: "Test".into(),
+            from_email: "test@example.com".into(),
+            api_key: "re_fake".into(),
+        };
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let result = rt.block_on(send_invoice(&config, &invoice, &contact, None));
+        assert!(
+            matches!(result, Err(DeliveryError::MessageBuild(ref m)) if m.contains("recipient email"))
+        );
+    }
+
+    #[test]
+    fn truncate_respects_char_boundaries() {
+        // Byte 500 falls inside a two-byte 'é'; String::truncate would panic.
+        let mut s = format!("a{}", "é".repeat(300));
+        truncate_on_char_boundary(&mut s, 500);
+        assert_eq!(s.len(), 499);
+        let mut short = "short".to_string();
+        truncate_on_char_boundary(&mut short, 500);
+        assert_eq!(short, "short");
+    }
+
+    #[test]
+    fn config_rejects_unknown_fields() {
+        // The old .env.example used "from"; a typo must fail, not be ignored.
+        let json = r#"{"backend":"resend","api_key":"re_x","from":"a@b.test"}"#;
+        assert!(serde_json::from_str::<EmailConfig>(json).is_err());
+        let json = r#"{"backend":"resend","api_key":"re_x","from_name":"A","from_email":"a@b.test","form":"x"}"#;
+        assert!(serde_json::from_str::<EmailConfig>(json).is_err());
+    }
+
     #[test]
     fn base64_longer_input() {
         // "Man" is the classic base64 test vector
@@ -531,9 +659,11 @@ mod tests {
         let encoded = base64_encode(&data);
         // Should be valid base64 (length multiple of 4, only valid chars)
         assert_eq!(encoded.len() % 4, 0);
-        assert!(encoded
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '='));
+        assert!(
+            encoded
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '=')
+        );
     }
 
     #[test]

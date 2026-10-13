@@ -1,6 +1,6 @@
 use chrono::NaiveDate;
 
-use crate::util::levenshtein_distance;
+use crate::util::similarity;
 
 #[derive(Debug, Clone)]
 pub struct MatchableTransaction {
@@ -52,69 +52,108 @@ impl AutoMatchEngine {
         }
     }
 
+    /// Match imported transactions against existing ledger transactions.
+    ///
+    /// Each existing transaction is matched at most once, so two identical
+    /// same-day charges cannot both be absorbed by a single ledger entry.
+    /// Pairs are assigned greedily, best confidence first; ties go to the
+    /// closer amount, then the closer date, then the earliest imported and
+    /// earliest existing transaction, so the outcome is deterministic.
+    /// Results are returned in the order of `imported`.
     pub fn find_matches(
         &self,
         imported: &[MatchableTransaction],
         existing: &[MatchableTransaction],
     ) -> Vec<MatchResult> {
-        imported
-            .iter()
-            .map(|imp| self.find_best_match(imp, existing))
-            .collect()
-    }
+        let tolerance = self.amount_tolerance_cents.max(0);
 
-    fn find_best_match(
-        &self,
-        imp: &MatchableTransaction,
-        existing: &[MatchableTransaction],
-    ) -> MatchResult {
-        let best = existing
-            .iter()
-            .filter_map(|exp| self.score_pair(imp, exp))
-            .max_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal));
+        // Sort existing by amount so each import only scores candidates whose
+        // amount is within tolerance.
+        let mut by_amount: Vec<usize> = (0..existing.len()).collect();
+        by_amount.sort_by_key(|&i| (existing[i].amount_cents, i));
 
-        match best {
-            Some((tx_id, match_type, confidence, diff)) => MatchResult {
-                imported_tx_id: imp.id,
-                matched_tx_id: Some(tx_id),
-                match_type,
-                confidence,
-                difference_cents: diff,
-            },
-            None => MatchResult {
+        let mut candidates = Vec::new();
+        for (imp_idx, imp) in imported.iter().enumerate() {
+            let lo = imp.amount_cents.saturating_sub(tolerance);
+            let hi = imp.amount_cents.saturating_add(tolerance);
+            let start = by_amount.partition_point(|&i| existing[i].amount_cents < lo);
+            for &exp_idx in by_amount[start..]
+                .iter()
+                .take_while(|&&i| existing[i].amount_cents <= hi)
+            {
+                if let Some(scored) = self.score_pair(imp, &existing[exp_idx]) {
+                    candidates.push((imp_idx, exp_idx, scored));
+                }
+            }
+        }
+
+        candidates.sort_by(|(ai, ae, a), (bi, be, b)| {
+            b.confidence
+                .total_cmp(&a.confidence)
+                .then(a.difference_cents.cmp(&b.difference_cents))
+                .then(a.date_diff_days.cmp(&b.date_diff_days))
+                .then(ai.cmp(bi))
+                .then(ae.cmp(be))
+        });
+
+        let mut results: Vec<MatchResult> = imported
+            .iter()
+            .map(|imp| MatchResult {
                 imported_tx_id: imp.id,
                 matched_tx_id: None,
                 match_type: MatchType::None,
                 confidence: 0.0,
                 difference_cents: 0,
-            },
+            })
+            .collect();
+        let mut imported_done = vec![false; imported.len()];
+        let mut existing_used = vec![false; existing.len()];
+
+        for (imp_idx, exp_idx, scored) in candidates {
+            if imported_done[imp_idx] || existing_used[exp_idx] {
+                continue;
+            }
+            imported_done[imp_idx] = true;
+            existing_used[exp_idx] = true;
+            let result = &mut results[imp_idx];
+            result.matched_tx_id = Some(existing[exp_idx].id);
+            result.match_type = scored.match_type;
+            result.confidence = scored.confidence;
+            result.difference_cents = scored.difference_cents;
         }
+
+        results
     }
 
-    /// Returns `Some((tx_id, match_type, confidence, diff_cents))` if the pair
-    /// clears the amount tolerance and fuzzy threshold, else `None`.
-    fn score_pair(
-        &self,
-        imp: &MatchableTransaction,
-        exp: &MatchableTransaction,
-    ) -> Option<(i64, MatchType, f32, i64)> {
-        let diff_cents = (imp.amount_cents - exp.amount_cents).abs();
-        if diff_cents > self.amount_tolerance_cents {
+    /// Scores a pair if it clears the amount tolerance, date window and fuzzy
+    /// threshold, else `None`.
+    fn score_pair(&self, imp: &MatchableTransaction, exp: &MatchableTransaction) -> Option<Scored> {
+        let diff = imp.amount_cents.abs_diff(exp.amount_cents);
+        if diff > self.amount_tolerance_cents.max(0).unsigned_abs() {
             return None;
         }
 
-        let date_diff = (imp.date - exp.date).num_days().unsigned_abs() as i32;
-        if date_diff > self.date_window_days {
+        let window = u64::from(self.date_window_days.max(0).unsigned_abs());
+        let date_diff = (imp.date - exp.date).num_days().unsigned_abs();
+        if date_diff > window {
             return None;
         }
 
-        // Perfect hit — no further computation needed.
-        if date_diff == 0 && diff_cents == 0 {
-            return Some((exp.id, MatchType::Exact, 1.0, 0));
-        }
-
-        let date_score = 1.0 - (date_diff as f32 / (self.date_window_days + 1) as f32);
         let desc_score = description_similarity(&imp.description, &exp.description);
+        let difference_cents = i64::try_from(diff).unwrap_or(i64::MAX);
+
+        // Same day and same amount always matches (bank and ledger wording
+        // often differ), but the description still ranks competing candidates.
+        if date_diff == 0 && diff == 0 {
+            return Some(Scored {
+                match_type: MatchType::Exact,
+                confidence: 1.0 - 0.1 * (1.0 - desc_score),
+                difference_cents,
+                date_diff_days: date_diff,
+            });
+        }
+
+        let date_score = 1.0 - (date_diff as f32 / (window + 1) as f32);
         let confidence = (date_score + desc_score) / 2.0;
 
         if confidence >= self.fuzzy_threshold {
@@ -123,11 +162,23 @@ impl AutoMatchEngine {
             } else {
                 MatchType::Fuzzy { score: confidence }
             };
-            Some((exp.id, match_type, confidence, diff_cents))
+            Some(Scored {
+                match_type,
+                confidence,
+                difference_cents,
+                date_diff_days: date_diff,
+            })
         } else {
             None
         }
     }
+}
+
+struct Scored {
+    match_type: MatchType,
+    confidence: f32,
+    difference_cents: i64,
+    date_diff_days: u64,
 }
 
 /// Normalises a description to lowercase alphanumeric words and computes
@@ -140,12 +191,7 @@ fn description_similarity(s1: &str, s2: &str) -> f32 {
         return 1.0;
     }
 
-    let max_len = a.len().max(b.len());
-    if max_len == 0 {
-        return 1.0;
-    }
-
-    1.0 - (levenshtein_distance(&a, &b) as f32 / max_len as f32)
+    similarity(&a, &b)
 }
 
 fn normalize(s: &str) -> String {
@@ -250,6 +296,121 @@ mod tests {
         ];
         let results = engine.find_matches(&imported, &existing);
         assert_eq!(results[0].matched_tx_id, Some(101));
+    }
+
+    #[test]
+    fn one_existing_cannot_absorb_two_identical_imports() {
+        // Two real same-day $5 charges; the ledger has only one of them.
+        let engine = AutoMatchEngine::default();
+        let imported = vec![
+            tx(1, (2024, 1, 15), "STARBUCKS", -500),
+            tx(2, (2024, 1, 15), "STARBUCKS", -500),
+        ];
+        let existing = vec![tx(100, (2024, 1, 15), "STARBUCKS", -500)];
+        let results = engine.find_matches(&imported, &existing);
+        assert_eq!(results[0].matched_tx_id, Some(100));
+        assert_eq!(results[1].matched_tx_id, None);
+        assert_eq!(results[1].match_type, MatchType::None);
+    }
+
+    #[test]
+    fn assignment_is_global_not_first_come() {
+        // Import 1 is processed first but its best partner is 101; it must not
+        // steal 100, which is import 2's only exact-description partner.
+        let engine = AutoMatchEngine::default();
+        let imported = vec![
+            tx(1, (2024, 1, 15), "UBER TRIP", 500),
+            tx(2, (2024, 1, 15), "STARBUCKS", 500),
+        ];
+        let existing = vec![
+            tx(100, (2024, 1, 15), "STARBUCKS", 500),
+            tx(101, (2024, 1, 15), "UBER TRIP", 500),
+        ];
+        let results = engine.find_matches(&imported, &existing);
+        assert_eq!(results[0].matched_tx_id, Some(101));
+        assert_eq!(results[1].matched_tx_id, Some(100));
+    }
+
+    #[test]
+    fn second_import_falls_back_to_next_candidate() {
+        let engine = AutoMatchEngine::default();
+        let imported = vec![
+            tx(1, (2024, 1, 15), "STARBUCKS", 500),
+            tx(2, (2024, 1, 15), "STARBUCKS", 500),
+        ];
+        let existing = vec![
+            tx(100, (2024, 1, 15), "STARBUCKS", 500),
+            tx(101, (2024, 1, 16), "STARBUCKS", 500),
+        ];
+        let results = engine.find_matches(&imported, &existing);
+        assert_eq!(results[0].matched_tx_id, Some(100));
+        assert_eq!(results[0].match_type, MatchType::Exact);
+        assert_eq!(results[1].matched_tx_id, Some(101));
+        assert!(matches!(results[1].match_type, MatchType::Fuzzy { .. }));
+    }
+
+    #[test]
+    fn exact_tier_uses_description_as_tie_breaker() {
+        let engine = AutoMatchEngine::default();
+        let imported = vec![tx(1, (2024, 1, 15), "AMAZON", 1000)];
+        // Wrong description listed last so a "last max wins" bug would pick it.
+        let existing = vec![
+            tx(100, (2024, 1, 15), "AMAZON", 1000),
+            tx(101, (2024, 1, 15), "TOTALLY DIFFERENT", 1000),
+        ];
+        let results = engine.find_matches(&imported, &existing);
+        assert_eq!(results[0].matched_tx_id, Some(100));
+        assert_eq!(results[0].confidence, 1.0);
+
+        // An exact date/amount hit with unrelated wording is still a match,
+        // but with lower confidence.
+        let only_bad = vec![tx(101, (2024, 1, 15), "TOTALLY DIFFERENT", 1000)];
+        let results = engine.find_matches(&imported, &only_bad);
+        assert_eq!(results[0].matched_tx_id, Some(101));
+        assert_eq!(results[0].match_type, MatchType::Exact);
+        assert!(results[0].confidence < 1.0 && results[0].confidence >= 0.9);
+    }
+
+    #[test]
+    fn equal_candidates_resolve_to_first() {
+        let engine = AutoMatchEngine::default();
+        let imported = vec![tx(1, (2024, 1, 15), "AMAZON", 1000)];
+        let existing = vec![
+            tx(100, (2024, 1, 15), "AMAZON", 1000),
+            tx(101, (2024, 1, 15), "AMAZON", 1000),
+            tx(102, (2024, 1, 15), "AMAZON", 1000),
+        ];
+        let results = engine.find_matches(&imported, &existing);
+        assert_eq!(results[0].matched_tx_id, Some(100));
+    }
+
+    #[test]
+    fn results_follow_imported_order() {
+        let engine = AutoMatchEngine::default();
+        let imported = vec![
+            tx(3, (2024, 1, 20), "NOTHING", 7),
+            tx(1, (2024, 1, 15), "AMAZON", 1000),
+        ];
+        let existing = vec![tx(100, (2024, 1, 15), "AMAZON", 1000)];
+        let results = engine.find_matches(&imported, &existing);
+        assert_eq!(results[0].imported_tx_id, 3);
+        assert_eq!(results[0].matched_tx_id, None);
+        assert_eq!(results[1].imported_tx_id, 1);
+        assert_eq!(results[1].matched_tx_id, Some(100));
+    }
+
+    #[test]
+    fn amount_tolerance_window_is_respected() {
+        let engine = AutoMatchEngine::new(3, 0.7, 5);
+        let imported = vec![tx(1, (2024, 1, 15), "AMAZON", 1000)];
+        let existing = vec![
+            tx(100, (2024, 1, 15), "AMAZON", 1006),
+            tx(101, (2024, 1, 15), "AMAZON", 995),
+        ];
+        let results = engine.find_matches(&imported, &existing);
+        assert_eq!(results[0].matched_tx_id, Some(101));
+        assert_eq!(results[0].difference_cents, 5);
+        assert_eq!(results[0].match_type, MatchType::DateAndAmount);
     }
 
     #[test]

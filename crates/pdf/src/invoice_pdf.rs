@@ -41,18 +41,8 @@ pub fn render_invoice_text(invoice: &Invoice, contact: &Contact) -> String {
     out.push_str(&"-".repeat(76));
     out.push('\n');
 
-    out.push_str(&format!("{:>64} {:>12}\n", "Subtotal:", invoice.subtotal()));
-
-    let discount = invoice.discount_amount();
-    if !discount.is_zero() {
-        out.push_str(&format!("{:>64} {:>12}\n", "Discount:", discount));
-    }
-
-    let tax = invoice.tax_amount();
-    if !tax.is_zero() {
-        for tl in &invoice.tax_lines {
-            out.push_str(&format!("{:>64} {:>12}\n", format!("{}:", tl.label), tax));
-        }
+    for (label, amount) in crate::typst_pdf::totals_rows(invoice) {
+        out.push_str(&format!("{label:>64} {amount:>12}\n"));
     }
 
     out.push_str(&format!("{:>64} {:>12}\n", "TOTAL:", invoice.total()));
@@ -102,5 +92,49 @@ mod tests {
         assert!(text.contains("Consulting"));
         assert!(text.contains("Net 30"));
         assert!(text.contains("$1500.00"));
+    }
+
+    #[test]
+    fn tax_lines_show_rate_as_percent_and_own_amount() {
+        let contact = Contact::new("Acme Corp", ContactType::Client);
+        let invoice = Invoice {
+            id: None,
+            invoice_number: "INV-003".to_string(),
+            contact_id: ContactId(1),
+            status: InvoiceStatus::Draft,
+            issue_date: NaiveDate::from_ymd_opt(2026, 3, 1).unwrap(),
+            due_date: NaiveDate::from_ymd_opt(2026, 3, 31).unwrap(),
+            lines: vec![InvoiceLine {
+                description: "Widgets".to_string(),
+                quantity: Decimal::from(1),
+                unit_rate: Money::from_cents(100_000),
+                taxable: true,
+            }],
+            discount: Some(Discount::Percentage(Decimal::new(1, 1))), // 10%
+            tax_lines: vec![
+                TaxLine {
+                    label: "State".to_string(),
+                    rate: Decimal::new(6, 2), // 6%
+                },
+                TaxLine {
+                    label: "County".to_string(),
+                    rate: Decimal::new(225, 4), // 2.25%
+                },
+            ],
+            notes: None,
+            terms: None,
+        };
+
+        let text = render_invoice_text(&invoice, &contact);
+        assert!(text.contains("Discount (10%):"), "{text}");
+        // Taxable $900.00 after discount: 6% = $54.00, 2.25% = $20.25.
+        assert!(text.contains("State (6%):"), "{text}");
+        assert!(text.contains("$54.00"), "{text}");
+        assert!(text.contains("County (2.25%):"), "{text}");
+        assert!(text.contains("$20.25"), "{text}");
+        assert!(
+            !text.contains("$74.25"),
+            "total tax printed on a tax line: {text}"
+        );
     }
 }

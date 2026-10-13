@@ -5,4 +5,7 @@ pub struct ServerState {
     pub oidc: Option<crate::oidc::JwksCache>,
     pub stripe_webhook_secret: Option<String>,
     pub plaid_config: Option<aequi_import::plaid::PlaidConfig>,
+    /// Serializes Plaid syncs so two concurrent requests can't queue the same
+    /// bank transaction twice.
+    pub plaid_sync_lock: tokio::sync::Mutex<()>,
 }

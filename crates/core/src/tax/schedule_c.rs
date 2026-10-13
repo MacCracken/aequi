@@ -12,6 +12,10 @@ pub enum ScheduleCLine {
     Line6,
     /// Line 8: Advertising
     Line8,
+    /// Line 9: Car and truck expenses
+    Line9,
+    /// Line 13: Depreciation and section 179 expense deduction
+    Line13,
     /// Line 14: Employee benefit programs
     Line14,
     /// Line 15: Insurance (other than health)
@@ -24,6 +28,8 @@ pub enum ScheduleCLine {
     Line24a,
     /// Line 24b: Deductible meals
     Line24b,
+    /// Line 25: Utilities
+    Line25,
     /// Line 27: Other expenses
     Line27,
     /// Line 30: Business use of home
@@ -44,12 +50,15 @@ impl ScheduleCLine {
             "line_2" => Some(Self::Line2),
             "line_6" => Some(Self::Line6),
             "line_8" => Some(Self::Line8),
+            "line_9" => Some(Self::Line9),
+            "line_13" => Some(Self::Line13),
             "line_14" => Some(Self::Line14),
             "line_15" => Some(Self::Line15),
             "line_17" => Some(Self::Line17),
             "line_18" => Some(Self::Line18),
             "line_24a" => Some(Self::Line24a),
             "line_24b" => Some(Self::Line24b),
+            "line_25" => Some(Self::Line25),
             "line_27" => Some(Self::Line27),
             "line_30" => Some(Self::Line30),
             _ => None,
@@ -63,12 +72,15 @@ impl ScheduleCLine {
             Self::Line2 => "Line 2 — Returns and allowances",
             Self::Line6 => "Line 6 — Other income",
             Self::Line8 => "Line 8 — Advertising",
+            Self::Line9 => "Line 9 — Car and truck expenses",
+            Self::Line13 => "Line 13 — Depreciation and section 179 expense",
             Self::Line14 => "Line 14 — Employee benefit programs",
             Self::Line15 => "Line 15 — Insurance",
             Self::Line17 => "Line 17 — Legal and professional services",
             Self::Line18 => "Line 18 — Office expense",
             Self::Line24a => "Line 24a — Travel",
             Self::Line24b => "Line 24b — Deductible meals",
+            Self::Line25 => "Line 25 — Utilities",
             Self::Line27 => "Line 27 — Other expenses",
             Self::Line30 => "Line 30 — Business use of home",
         }
@@ -87,8 +99,8 @@ mod tests {
     #[test]
     fn from_tag_roundtrip() {
         let tags = [
-            "line_1", "line_2", "line_6", "line_8", "line_14", "line_15", "line_17", "line_18",
-            "line_24a", "line_24b", "line_27", "line_30",
+            "line_1", "line_2", "line_6", "line_8", "line_9", "line_13", "line_14", "line_15",
+            "line_17", "line_18", "line_24a", "line_24b", "line_25", "line_27", "line_30",
         ];
         for tag in tags {
             assert!(

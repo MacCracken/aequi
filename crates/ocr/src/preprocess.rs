@@ -1,26 +1,57 @@
-use image::{DynamicImage, GrayImage, ImageBuffer, Luma};
+use image::{DynamicImage, GrayImage, ImageBuffer, ImageError, ImageReader, Limits, Luma};
 use std::io::Cursor;
 use std::path::Path;
 use thiserror::Error;
+
+/// Decode limits: a small compressed file can declare enormous dimensions and
+/// exhaust memory when decoded (a decompression bomb). 100 MP is far beyond
+/// any phone camera or scanner page.
+const MAX_PIXELS: u64 = 100_000_000;
+const MAX_DIMENSION: u32 = 20_000;
+const MAX_DECODE_ALLOC: u64 = 512 * 1024 * 1024;
 
 #[derive(Debug, Error)]
 pub enum PreprocessError {
     #[error("Failed to load image: {0}")]
     Load(#[from] image::ImageError),
+    #[error("Image is too large ({width}x{height} pixels, max {MAX_PIXELS})")]
+    TooLarge { width: u32, height: u32 },
     #[error("Failed to encode processed image: {0}")]
     Encode(String),
 }
 
 /// Load an image file, apply normalization, and return PNG bytes ready for OCR.
 pub fn prepare_for_ocr(path: &Path) -> Result<Vec<u8>, PreprocessError> {
-    let img = image::open(path)?;
-    encode_as_png(normalize(img))
+    let data = std::fs::read(path).map_err(ImageError::IoError)?;
+    prepare_for_ocr_from_bytes(&data)
 }
 
 /// Process raw image bytes (JPEG / PNG / WEBP / …) and return normalized PNG bytes.
 pub fn prepare_for_ocr_from_bytes(data: &[u8]) -> Result<Vec<u8>, PreprocessError> {
-    let img = image::load_from_memory(data)?;
-    encode_as_png(normalize(img))
+    encode_as_png(normalize(decode_limited(data)?))
+}
+
+/// Decode an image whose format is detected from its content, enforcing the
+/// size limits above. Only the header is parsed before the pixel-count check.
+fn decode_limited(data: &[u8]) -> Result<DynamicImage, PreprocessError> {
+    let reader = || {
+        ImageReader::new(Cursor::new(data))
+            .with_guessed_format()
+            .map_err(ImageError::IoError)
+    };
+
+    let (width, height) = reader()?.into_dimensions()?;
+    if u64::from(width) * u64::from(height) > MAX_PIXELS {
+        return Err(PreprocessError::TooLarge { width, height });
+    }
+
+    let mut limits = Limits::default();
+    limits.max_image_width = Some(MAX_DIMENSION);
+    limits.max_image_height = Some(MAX_DIMENSION);
+    limits.max_alloc = Some(MAX_DECODE_ALLOC);
+    let mut reader = reader()?;
+    reader.limits(limits);
+    Ok(reader.decode()?)
 }
 
 /// Grayscale + contrast stretch.
@@ -111,6 +142,34 @@ mod tests {
         let result = prepare_for_ocr_from_bytes(&png_bytes).unwrap();
         // PNG magic bytes: 0x89 0x50 0x4E 0x47
         assert_eq!(&result[..4], b"\x89PNG");
+    }
+
+    #[test]
+    fn rejects_non_image_bytes() {
+        let err = prepare_for_ocr_from_bytes(b"%PDF-1.7\n%binary").unwrap_err();
+        assert!(matches!(err, PreprocessError::Load(_)), "{err}");
+    }
+
+    #[test]
+    fn rejects_decompression_bomb_before_decoding() {
+        // A 22-byte PGM header claiming 400 megapixels.
+        let err = prepare_for_ocr_from_bytes(b"P5\n20000 20000\n255\n\0\0\0").unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PreprocessError::TooLarge {
+                    width: 20000,
+                    height: 20000
+                }
+            ),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn rejects_oversized_dimension() {
+        let err = prepare_for_ocr_from_bytes(b"P5\n30000 1\n255\n\0\0\0").unwrap_err();
+        assert!(matches!(err, PreprocessError::Load(_)), "{err}");
     }
 
     #[test]

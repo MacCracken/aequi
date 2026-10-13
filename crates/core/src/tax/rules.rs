@@ -13,6 +13,8 @@ pub enum TaxRulesError {
     InvalidYear(u16),
     #[error("Missing required field: {0}")]
     MissingField(String),
+    #[error("Invalid tax rules: {0}")]
+    Invalid(String),
 }
 
 /// Tax rules loaded from a TOML file (e.g., `rules/tax/us/2026.toml`).
@@ -20,6 +22,7 @@ pub enum TaxRulesError {
 pub struct TaxRules {
     pub year: YearField,
     pub se_tax: SeTaxRules,
+    pub standard_deduction: StandardDeduction,
     pub income_brackets: IncomeBrackets,
     pub mileage: MileageRules,
     pub meals_deduction_cap: MealsDeductionCap,
@@ -39,6 +42,33 @@ pub struct SeTaxRules {
     pub ss_wage_base: i64,
     pub net_earnings_factor: Decimal,
     pub deductible_fraction: Decimal,
+    /// No SE tax is owed when net earnings from self-employment are below this.
+    #[serde(default = "default_min_net_earnings")]
+    pub min_net_earnings: Decimal,
+    /// Additional Medicare Tax rate on SE earnings above the threshold.
+    #[serde(default = "default_additional_medicare_rate")]
+    pub additional_medicare_rate: Decimal,
+    #[serde(default = "default_additional_medicare_threshold")]
+    pub additional_medicare_threshold: Decimal,
+}
+
+// Statutory values that are not inflation-indexed, so older rule files that
+// predate these fields still compute correctly.
+fn default_min_net_earnings() -> Decimal {
+    Decimal::from(400)
+}
+
+fn default_additional_medicare_rate() -> Decimal {
+    Decimal::new(9, 3)
+}
+
+fn default_additional_medicare_threshold() -> Decimal {
+    Decimal::from(200_000)
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct StandardDeduction {
+    pub single: Decimal,
 }
 
 impl SeTaxRules {
@@ -62,9 +92,10 @@ pub struct Bracket {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct MileageRules {
-    pub business_cents_per_mile: i64,
-    pub medical_cents_per_mile: i64,
-    pub charity_cents_per_mile: i64,
+    // Decimal: IRS rates can include half cents (e.g. 72.5¢ for 2026).
+    pub business_cents_per_mile: Decimal,
+    pub medical_cents_per_mile: Decimal,
+    pub charity_cents_per_mile: Decimal,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -94,6 +125,7 @@ impl QuarterlyDueDates {
             crate::Quarter::Q3 => &self.q3,
             crate::Quarter::Q4 => &self.q4,
         };
+        // Validated in `TaxRules::from_toml`.
         NaiveDate::from_str(s).unwrap_or_else(|_| panic!("Invalid due date in tax rules: {s}"))
     }
 }
@@ -110,7 +142,49 @@ impl TaxRules {
                 "income_brackets.single".to_string(),
             ));
         }
+        rules.validate()?;
         Ok(rules)
+    }
+
+    /// Structural checks that would otherwise surface later as a panic
+    /// (unparseable due dates) or as silently wrong tax (gapped brackets).
+    fn validate(&self) -> Result<(), TaxRulesError> {
+        let invalid = |msg: String| Err(TaxRulesError::Invalid(msg));
+
+        let d = &self.quarterly_due_dates;
+        for (name, s) in [("q1", &d.q1), ("q2", &d.q2), ("q3", &d.q3), ("q4", &d.q4)] {
+            if NaiveDate::from_str(s).is_err() {
+                return invalid(format!(
+                    "quarterly_due_dates.{name} is not a YYYY-MM-DD date: {s}"
+                ));
+            }
+        }
+
+        let mut expected_floor = Decimal::ZERO;
+        for (i, b) in self.income_brackets.single.iter().enumerate() {
+            if b.floor != expected_floor {
+                return invalid(format!(
+                    "income bracket {} starts at {} but the previous bracket ends at {expected_floor}",
+                    i + 1,
+                    b.floor
+                ));
+            }
+            if b.ceiling <= b.floor {
+                return invalid(format!("income bracket {} has ceiling <= floor", i + 1));
+            }
+            if b.rate < Decimal::ZERO || b.rate > Decimal::ONE {
+                return invalid(format!(
+                    "income bracket {} rate must be between 0 and 1",
+                    i + 1
+                ));
+            }
+            expected_floor = b.ceiling;
+        }
+
+        if self.standard_deduction.single < Decimal::ZERO {
+            return invalid("standard_deduction.single must not be negative".into());
+        }
+        Ok(())
     }
 
     /// Compute income tax for a given taxable income using progressive brackets.
@@ -145,7 +219,12 @@ mod tests {
     fn parse_tax_rules() {
         let rules = TaxRules::from_toml(sample_toml()).unwrap();
         assert_eq!(rules.year.value, 2026);
-        assert_eq!(rules.se_tax.ss_wage_base, 176100);
+        assert_eq!(rules.se_tax.ss_wage_base, 184500);
+        assert_eq!(rules.standard_deduction.single, Decimal::from(16_100));
+        assert_eq!(
+            rules.mileage.business_cents_per_mile,
+            Decimal::from_str("72.5").unwrap()
+        );
         assert!(!rules.income_brackets.single.is_empty());
     }
 
@@ -180,13 +259,40 @@ mod tests {
         let tax = rules.compute_income_tax(Decimal::from(10_000));
         assert_eq!(tax, Decimal::from(1_000));
 
-        // $50,000 → spans first two brackets
-        // 11925 * 0.10 = 1192.50
-        // (48475 - 11925) * 0.12 = 4386.00
-        // (50000 - 48475) * 0.22 = 335.50
-        // Total: 5914.00
-        let tax = rules.compute_income_tax(Decimal::from(50_000));
-        assert_eq!(tax, Decimal::from_str("5914.00").unwrap());
+        // $60,000 → spans the first three 2026 brackets
+        // 12400 * 0.10 = 1240.00
+        // (50400 - 12400) * 0.12 = 4560.00
+        // (60000 - 50400) * 0.22 = 2112.00
+        // Total: 7912.00
+        let tax = rules.compute_income_tax(Decimal::from(60_000));
+        assert_eq!(tax, Decimal::from_str("7912.00").unwrap());
+    }
+
+    #[test]
+    fn invalid_due_date_rejected() {
+        let toml = sample_toml().replace("q2 = \"2026-06-15\"", "q2 = \"June 15\"");
+        assert!(matches!(
+            TaxRules::from_toml(&toml),
+            Err(TaxRulesError::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn gapped_brackets_rejected() {
+        let toml = sample_toml().replace(
+            "floor = 12400\nceiling = 50400",
+            "floor = 13000\nceiling = 50400",
+        );
+        assert!(matches!(
+            TaxRules::from_toml(&toml),
+            Err(TaxRulesError::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn missing_standard_deduction_rejected() {
+        let toml = sample_toml().replace("[standard_deduction]\nsingle = 16100", "");
+        assert!(TaxRules::from_toml(&toml).is_err());
     }
 
     #[test]

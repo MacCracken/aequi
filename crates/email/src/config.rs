@@ -3,6 +3,7 @@ use std::fmt;
 
 /// SMTP connection settings for lettre.
 #[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SmtpConfig {
     pub host: String,
     pub port: u16,
@@ -32,7 +33,7 @@ impl fmt::Debug for SmtpConfig {
 
 /// Email delivery configuration — either SMTP or Resend API.
 #[derive(Clone, Deserialize)]
-#[serde(tag = "backend")]
+#[serde(tag = "backend", deny_unknown_fields)]
 pub enum EmailConfig {
     /// Send via SMTP (lettre).
     #[serde(rename = "smtp")]

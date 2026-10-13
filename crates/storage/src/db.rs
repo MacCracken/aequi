@@ -1,40 +1,68 @@
 use aequi_core::{
-    Account, AccountId, AccountType, FiscalYear, LedgerSnapshot, Money, ScheduleCLine,
-    DEFAULT_ACCOUNTS,
+    Account, AccountId, AccountType, DEFAULT_ACCOUNTS, FiscalYear, LedgerSnapshot, Money,
+    ScheduleCLine,
 };
-use sqlx::{sqlite::SqlitePoolOptions, Pool, Sqlite};
+use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
+use sqlx::{Pool, Sqlite};
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::str::FromStr;
+use std::time::Duration;
 
 pub type DbPool = Pool<Sqlite>;
 
 pub async fn create_db(path: &Path) -> Result<DbPool, sqlx::Error> {
+    // Build options from the path directly (not a `sqlite:` URL) so paths
+    // containing `?` or `%` aren't misparsed. ":memory:" keeps sqlx's shared
+    // in-memory handling so every pooled connection sees the same database.
+    let base = if path.as_os_str() == ":memory:" {
+        SqliteConnectOptions::from_str("sqlite::memory:")?
+    } else {
+        SqliteConnectOptions::new()
+            .filename(path)
+            .create_if_missing(true)
+    };
+
+    // Connection options apply to every pooled connection; a `PRAGMA` run
+    // through the pool would only reach whichever connection executed it.
+    let options = base
+        .journal_mode(SqliteJournalMode::Wal)
+        .synchronous(SqliteSynchronous::Normal)
+        .foreign_keys(true)
+        .busy_timeout(Duration::from_secs(5))
+        .pragma("cache_size", "-32000");
+
     // WAL mode supports concurrent readers + one writer.
     // 4 connections allows parallel reads without serializing everything.
     let pool = SqlitePoolOptions::new()
         .max_connections(4)
-        .connect(&format!("sqlite:{}?mode=rwc", path.display()))
-        .await?;
-
-    sqlx::query("PRAGMA journal_mode = WAL")
-        .execute(&pool)
-        .await?;
-    sqlx::query("PRAGMA foreign_keys = ON")
-        .execute(&pool)
-        .await?;
-    sqlx::query("PRAGMA synchronous = NORMAL")
-        .execute(&pool)
-        .await?;
-    sqlx::query("PRAGMA busy_timeout = 5000")
-        .execute(&pool)
-        .await?;
-    sqlx::query("PRAGMA cache_size = -32000")
-        .execute(&pool)
+        .connect_with(options)
         .await?;
 
     crate::migrate::run_migrations(&pool).await?;
 
     Ok(pool)
+}
+
+/// Reject anything that isn't a real `YYYY-MM-DD` date. Dates are stored as
+/// TEXT and compared lexicographically, so "3/15/2026" or "2026-3-5" would
+/// silently fall outside every date range.
+pub fn validate_date(field: &str, value: &str) -> Result<(), sqlx::Error> {
+    match chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d") {
+        Ok(d) if d.format("%Y-%m-%d").to_string() == value => Ok(()),
+        _ => Err(sqlx::Error::InvalidArgument(format!(
+            "{field} must be a date in YYYY-MM-DD format, got {value:?}"
+        ))),
+    }
+}
+
+/// Map an UPDATE/DELETE that touched no rows to `RowNotFound`.
+fn require_rows(result: sqlx::sqlite::SqliteQueryResult) -> Result<(), sqlx::Error> {
+    if result.rows_affected() == 0 {
+        Err(sqlx::Error::RowNotFound)
+    } else {
+        Ok(())
+    }
 }
 
 pub async fn seed_default_accounts(pool: &DbPool) -> Result<(), sqlx::Error> {
@@ -91,6 +119,70 @@ pub async fn get_all_accounts(pool: &DbPool) -> Result<Vec<Account>, sqlx::Error
     .await?;
 
     Ok(rows.into_iter().map(row_to_account).collect())
+}
+
+/// All accounts, including archived ones (which historical transactions may
+/// still post to). Use this for exports and reports over past periods.
+pub async fn get_all_accounts_including_archived(
+    pool: &DbPool,
+) -> Result<Vec<Account>, sqlx::Error> {
+    let rows = sqlx::query_as::<_, AccountRow>(
+        "SELECT id, code, name, account_type, is_archetype, is_archived, schedule_c_line FROM accounts ORDER BY code"
+    )
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows.into_iter().map(row_to_account).collect())
+}
+
+/// Load every ledger transaction with its lines, oldest first, for export.
+///
+/// Rows are returned as stored rather than re-validated, so data written
+/// before stricter validation existed still exports.
+pub async fn load_ledger_transactions(
+    pool: &DbPool,
+) -> Result<Vec<aequi_core::ValidatedTransaction>, sqlx::Error> {
+    use aequi_core::{TransactionLine, ValidatedTransaction};
+
+    let headers = sqlx::query_as::<_, (i64, String, String, Option<String>, i64)>(
+        "SELECT id, date, description, memo, balanced_total_cents FROM transactions ORDER BY date, id",
+    )
+    .fetch_all(pool)
+    .await?;
+    let lines = sqlx::query_as::<_, (i64, i64, i64, i64, Option<String>)>(
+        "SELECT transaction_id, account_id, debit_cents, credit_cents, memo FROM transaction_lines ORDER BY transaction_id, id",
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let mut lines_by_tx: std::collections::HashMap<i64, Vec<TransactionLine>> =
+        std::collections::HashMap::new();
+    for (tx_id, account_id, debit, credit, memo) in lines {
+        lines_by_tx.entry(tx_id).or_default().push(TransactionLine {
+            account_id: AccountId(account_id),
+            debit: Money::from_cents(debit),
+            credit: Money::from_cents(credit),
+            memo,
+        });
+    }
+
+    headers
+        .into_iter()
+        .map(|(id, date, description, memo, total)| {
+            let date = chrono::NaiveDate::parse_from_str(&date, "%Y-%m-%d").map_err(|_| {
+                sqlx::Error::Protocol(format!("transaction {id} has an invalid date: {date:?}"))
+            })?;
+            Ok(ValidatedTransaction {
+                id: Some(id),
+                date,
+                description,
+                lines: lines_by_tx.remove(&id).unwrap_or_default(),
+                memo,
+                balanced_total: Money::from_cents(total),
+                created_at: None,
+            })
+        })
+        .collect()
 }
 
 pub async fn get_account_by_code(
@@ -239,6 +331,7 @@ pub async fn insert_imported_transaction(
     pool: &DbPool,
     tx: &ImportedTransaction,
 ) -> Result<i64, sqlx::Error> {
+    validate_date("date", &tx.date)?;
     let result = sqlx::query(
         r#"INSERT INTO imported_transactions 
            (source_type, source_id, import_batch_id, date, description, 
@@ -280,7 +373,7 @@ pub async fn mark_imported_transaction_matched(
     id: i64,
     transaction_id: i64,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query(
+    let result = sqlx::query(
         "UPDATE imported_transactions SET matched_transaction_id = ?, status = 'matched' WHERE id = ?"
     )
     .bind(transaction_id)
@@ -288,7 +381,7 @@ pub async fn mark_imported_transaction_matched(
     .execute(pool)
     .await?;
 
-    Ok(())
+    require_rows(result)
 }
 
 pub async fn mark_imported_transaction_categorized(
@@ -296,7 +389,7 @@ pub async fn mark_imported_transaction_categorized(
     id: i64,
     rule_id: i64,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query(
+    let result = sqlx::query(
         "UPDATE imported_transactions SET category_rule_id = ?, status = 'categorized' WHERE id = ?"
     )
     .bind(rule_id)
@@ -304,7 +397,7 @@ pub async fn mark_imported_transaction_categorized(
     .execute(pool)
     .await?;
 
-    Ok(())
+    require_rows(result)
 }
 
 pub async fn get_imported_transactions_for_review(
@@ -339,6 +432,8 @@ pub async fn create_reconciliation_session(
     end_date: &str,
     statement_balance_cents: i64,
 ) -> Result<i64, sqlx::Error> {
+    validate_date("start_date", start_date)?;
+    validate_date("end_date", end_date)?;
     let result = sqlx::query(
         r#"INSERT INTO reconciliation_sessions 
            (account_id, start_date, end_date, statement_balance_cents)
@@ -372,12 +467,12 @@ pub async fn complete_reconciliation_session(
     pool: &DbPool,
     session_id: i64,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query("UPDATE reconciliation_sessions SET is_completed = 1 WHERE id = ?")
+    let result = sqlx::query("UPDATE reconciliation_sessions SET is_completed = 1 WHERE id = ?")
         .bind(session_id)
         .execute(pool)
         .await?;
 
-    Ok(())
+    require_rows(result)
 }
 
 #[derive(Debug, Clone, serde::Serialize, sqlx::FromRow)]
@@ -422,7 +517,7 @@ pub async fn resolve_reconciliation_item(
     item_id: i64,
     resolution_notes: &str,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query(
+    let result = sqlx::query(
         "UPDATE reconciliation_items SET is_resolved = 1, resolution_notes = ? WHERE id = ?",
     )
     .bind(resolution_notes)
@@ -430,7 +525,7 @@ pub async fn resolve_reconciliation_item(
     .execute(pool)
     .await?;
 
-    Ok(())
+    require_rows(result)
 }
 
 pub async fn get_reconciliation_items(
@@ -498,6 +593,9 @@ pub async fn insert_receipt(
     payment_method: Option<&str>,
     confidence: f64,
 ) -> Result<i64, sqlx::Error> {
+    // OCR dates are best-effort: store NULL rather than an unparseable string
+    // that would sort and filter incorrectly.
+    let receipt_date = receipt_date.filter(|d| validate_date("receipt_date", d).is_ok());
     // Silently ignore exact duplicates (same file imported twice).
     let result = sqlx::query(
         r#"INSERT OR IGNORE INTO receipts
@@ -556,12 +654,13 @@ pub async fn update_receipt_status(
     id: i64,
     status: &str,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query("UPDATE receipts SET status = ?, reviewed_at = datetime('now') WHERE id = ?")
-        .bind(status)
-        .bind(id)
-        .execute(pool)
-        .await?;
-    Ok(())
+    let result =
+        sqlx::query("UPDATE receipts SET status = ?, reviewed_at = datetime('now') WHERE id = ?")
+            .bind(status)
+            .bind(id)
+            .execute(pool)
+            .await?;
+    require_rows(result)
 }
 
 pub async fn link_receipt_to_transaction(
@@ -569,14 +668,14 @@ pub async fn link_receipt_to_transaction(
     receipt_id: i64,
     transaction_id: i64,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query(
+    let result = sqlx::query(
         "UPDATE receipts SET transaction_id = ?, status = 'approved', reviewed_at = datetime('now') WHERE id = ?",
     )
     .bind(transaction_id)
     .bind(receipt_id)
     .execute(pool)
     .await?;
-    Ok(())
+    require_rows(result)
 }
 
 pub async fn check_receipt_duplicate(
@@ -592,15 +691,20 @@ pub async fn check_receipt_duplicate(
 
 // ── Tax engine storage ───────────────────────────────────────────────────────
 
-/// Build a LedgerSnapshot for a given fiscal year by aggregating transaction_lines
+/// Build a LedgerSnapshot for a fiscal year by aggregating transaction_lines
 /// grouped by the account's schedule_c_line tag.
+///
+/// Covers Jan 1 through `through` (inclusive), clamped to the year; pass
+/// `year.end_date()` for the whole year.
 pub async fn build_ledger_snapshot(
     pool: &DbPool,
     year: FiscalYear,
+    through: chrono::NaiveDate,
     prior_year_tax: Option<Money>,
 ) -> Result<LedgerSnapshot, sqlx::Error> {
+    let through = through.min(year.end_date());
     let start = year.start_date().to_string();
-    let end = year.end_date().to_string();
+    let end = through.to_string();
 
     // Income: credit_cents - debit_cents (net credit = revenue)
     // Expenses: debit_cents - credit_cents (net debit = cost)
@@ -640,6 +744,7 @@ pub async fn build_ledger_snapshot(
 
     Ok(LedgerSnapshot {
         year,
+        through,
         line_totals,
         prior_year_tax,
     })
@@ -650,6 +755,7 @@ pub struct TaxPeriodRecord {
     pub id: i64,
     pub year: i64,
     pub quarter: i64,
+    /// Projected full-year tax as of the latest estimate for this quarter.
     pub estimated_tax_cents: i64,
     pub se_tax_cents: i64,
     pub income_tax_cents: i64,
@@ -660,6 +766,29 @@ pub struct TaxPeriodRecord {
     pub rules_year: i64,
     pub created_at: String,
     pub updated_at: String,
+    /// This quarter's installment (a quarter of the projected annual tax).
+    pub quarterly_payment_cents: i64,
+}
+
+fn validate_quarter(quarter: u8) -> Result<(), sqlx::Error> {
+    if (1..=4).contains(&quarter) {
+        Ok(())
+    } else {
+        Err(sqlx::Error::InvalidArgument(format!(
+            "quarter must be 1-4, got {quarter}"
+        )))
+    }
+}
+
+/// Statutory estimated-tax due date, used when a payment is recorded for a
+/// quarter that has no stored estimate yet (an estimate overwrites it).
+fn default_due_date(year: u16, quarter: u8) -> String {
+    match quarter {
+        1 => format!("{year}-04-15"),
+        2 => format!("{year}-06-15"),
+        3 => format!("{year}-09-15"),
+        _ => format!("{}-01-15", year + 1),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -668,41 +797,50 @@ pub async fn upsert_tax_period(
     year: u16,
     quarter: u8,
     estimated_tax_cents: i64,
+    quarterly_payment_cents: i64,
     se_tax_cents: i64,
     income_tax_cents: i64,
     net_profit_cents: i64,
     due_date: &str,
     rules_year: u16,
 ) -> Result<i64, sqlx::Error> {
-    let result = sqlx::query(
+    validate_quarter(quarter)?;
+    validate_date("due_date", due_date)?;
+    let (id,): (i64,) = sqlx::query_as(
         r#"INSERT INTO tax_periods
-           (year, quarter, estimated_tax_cents, se_tax_cents, income_tax_cents,
-            net_profit_cents, due_date, rules_year)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+           (year, quarter, estimated_tax_cents, quarterly_payment_cents, se_tax_cents,
+            income_tax_cents, net_profit_cents, due_date, rules_year)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(year, quarter) DO UPDATE SET
              estimated_tax_cents = excluded.estimated_tax_cents,
+             quarterly_payment_cents = excluded.quarterly_payment_cents,
              se_tax_cents = excluded.se_tax_cents,
              income_tax_cents = excluded.income_tax_cents,
              net_profit_cents = excluded.net_profit_cents,
              due_date = excluded.due_date,
              rules_year = excluded.rules_year,
              updated_at = datetime('now')
+           RETURNING id
         "#,
     )
     .bind(year as i64)
     .bind(quarter as i64)
     .bind(estimated_tax_cents)
+    .bind(quarterly_payment_cents)
     .bind(se_tax_cents)
     .bind(income_tax_cents)
     .bind(net_profit_cents)
     .bind(due_date)
     .bind(rules_year as i64)
-    .execute(pool)
+    .fetch_one(pool)
     .await?;
 
-    Ok(result.last_insert_rowid())
+    Ok(id)
 }
 
+/// Record an estimated-tax payment for a quarter. Payments accumulate (two
+/// installments for the same quarter add up), and the period row is created
+/// if no estimate has been stored for it yet.
 pub async fn record_tax_payment(
     pool: &DbPool,
     year: u16,
@@ -710,17 +848,29 @@ pub async fn record_tax_payment(
     payment_cents: i64,
     payment_date: &str,
 ) -> Result<(), sqlx::Error> {
+    validate_quarter(quarter)?;
+    validate_date("payment_date", payment_date)?;
+    if payment_cents <= 0 {
+        return Err(sqlx::Error::InvalidArgument(
+            "payment amount must be positive".into(),
+        ));
+    }
     sqlx::query(
-        r#"UPDATE tax_periods
-           SET payment_recorded_cents = ?,
-               payment_date = ?,
-               updated_at = datetime('now')
-           WHERE year = ? AND quarter = ?"#,
+        r#"INSERT INTO tax_periods
+           (year, quarter, estimated_tax_cents, se_tax_cents, income_tax_cents,
+            net_profit_cents, payment_recorded_cents, payment_date, due_date, rules_year)
+           VALUES (?, ?, 0, 0, 0, 0, ?, ?, ?, ?)
+           ON CONFLICT(year, quarter) DO UPDATE SET
+             payment_recorded_cents = payment_recorded_cents + excluded.payment_recorded_cents,
+             payment_date = MAX(COALESCE(payment_date, ''), excluded.payment_date),
+             updated_at = datetime('now')"#,
     )
-    .bind(payment_cents)
-    .bind(payment_date)
     .bind(year as i64)
     .bind(quarter as i64)
+    .bind(payment_cents)
+    .bind(payment_date)
+    .bind(default_due_date(year, quarter))
+    .bind(year as i64)
     .execute(pool)
     .await?;
     Ok(())
@@ -743,8 +893,12 @@ pub async fn get_prior_year_total_tax(
     pool: &DbPool,
     year: u16,
 ) -> Result<Option<i64>, sqlx::Error> {
+    // Each quarter's row holds the projected *annual* tax, so summing them
+    // would count the year up to four times. The latest quarter's projection
+    // is the most complete.
     let row = sqlx::query_as::<_, (i64,)>(
-        "SELECT COALESCE(SUM(estimated_tax_cents), 0) FROM tax_periods WHERE year = ?",
+        "SELECT estimated_tax_cents FROM tax_periods WHERE year = ? \
+         ORDER BY quarter DESC LIMIT 1",
     )
     .bind((year - 1) as i64)
     .fetch_optional(pool)
@@ -909,6 +1063,13 @@ pub async fn insert_invoice(
     notes: Option<&str>,
     terms: Option<&str>,
 ) -> Result<i64, sqlx::Error> {
+    validate_date("issue_date", issue_date)?;
+    validate_date("due_date", due_date)?;
+    if due_date < issue_date {
+        return Err(sqlx::Error::InvalidArgument(
+            "due_date must not be before issue_date".into(),
+        ));
+    }
     let result = sqlx::query(
         r#"INSERT INTO invoices (invoice_number, contact_id, status_type, status_data,
            issue_date, due_date, discount_type, discount_value, notes, terms)
@@ -930,13 +1091,113 @@ pub async fn insert_invoice(
     Ok(result.last_insert_rowid())
 }
 
+/// Mark an invoice as sent after it has been delivered.
+///
+/// Only a `Draft` moves to `Sent`; re-sending a sent, viewed or partially paid
+/// invoice (e.g. as a reminder) leaves its status alone, so a payment state is
+/// never overwritten. Void invoices can't be sent.
+pub async fn mark_invoice_sent(pool: &DbPool, id: i64, sent_at: &str) -> Result<(), sqlx::Error> {
+    let rec = get_invoice_by_id(pool, id)
+        .await?
+        .ok_or(sqlx::Error::RowNotFound)?;
+    match rec.status_type.as_str() {
+        "Void" => Err(sqlx::Error::InvalidArgument(
+            "cannot send a void invoice".into(),
+        )),
+        "Draft" => {
+            let data = serde_json::json!({ "sent_at": sent_at }).to_string();
+            let result = sqlx::query(
+                "UPDATE invoices SET status_type = 'Sent', status_data = ?, updated_at = datetime('now') \
+                 WHERE id = ? AND status_type = 'Draft'",
+            )
+            .bind(data)
+            .bind(id)
+            .execute(pool)
+            .await?;
+            require_rows(result)
+        }
+        _ => Ok(()),
+    }
+}
+
+/// Reconstruct a domain [`aequi_core::Invoice`] from its stored records.
+///
+/// Storage conventions: line quantities are hundredths; tax rates and
+/// percentage discounts are basis points (1000 = 10%); flat discounts are cents.
+pub fn invoice_from_records(
+    rec: &InvoiceRecord,
+    lines: &[InvoiceLineRecord],
+    tax_lines: &[InvoiceTaxLineRecord],
+) -> Result<aequi_core::Invoice, sqlx::Error> {
+    use aequi_core::{
+        ContactId, Discount, Invoice, InvoiceId, InvoiceLine, InvoiceStatus, TaxLine,
+    };
+    use rust_decimal::Decimal;
+
+    let parse_date = |field: &str, value: &str| {
+        chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d").map_err(|_| {
+            sqlx::Error::Protocol(format!(
+                "invoice {} has an invalid {field}: {value:?}",
+                rec.id
+            ))
+        })
+    };
+    let discount = match (rec.discount_type.as_deref(), rec.discount_value) {
+        (Some("Percentage"), Some(bps)) => Some(Discount::Percentage(Decimal::new(bps, 4))),
+        (Some("Flat"), Some(cents)) => Some(Discount::Flat(Money::from_cents(cents))),
+        _ => None,
+    };
+
+    Ok(Invoice {
+        id: Some(InvoiceId(rec.id)),
+        invoice_number: rec.invoice_number.clone(),
+        contact_id: ContactId(rec.contact_id),
+        // The stored status carries no timestamps the renderers need.
+        status: InvoiceStatus::Draft,
+        issue_date: parse_date("issue_date", &rec.issue_date)?,
+        due_date: parse_date("due_date", &rec.due_date)?,
+        lines: lines
+            .iter()
+            .map(|l| InvoiceLine {
+                description: l.description.clone(),
+                quantity: Decimal::new(l.quantity_hundredths, 2),
+                unit_rate: Money::from_cents(l.unit_rate_cents),
+                taxable: l.taxable,
+            })
+            .collect(),
+        discount,
+        tax_lines: tax_lines
+            .iter()
+            .map(|t| TaxLine {
+                label: t.label.clone(),
+                rate: Decimal::new(t.rate_bps, 4),
+            })
+            .collect(),
+        notes: rec.notes.clone(),
+        terms: rec.terms.clone(),
+    })
+}
+
+/// Load an invoice with its lines and tax lines.
+pub async fn load_invoice(
+    pool: &DbPool,
+    id: i64,
+) -> Result<Option<aequi_core::Invoice>, sqlx::Error> {
+    let Some(rec) = get_invoice_by_id(pool, id).await? else {
+        return Ok(None);
+    };
+    let lines = get_invoice_lines(pool, id).await?;
+    let tax_lines = get_invoice_tax_lines(pool, id).await?;
+    invoice_from_records(&rec, &lines, &tax_lines).map(Some)
+}
+
 pub async fn update_invoice_status(
     pool: &DbPool,
     id: i64,
     status_type: &str,
     status_data: Option<&str>,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query(
+    let result = sqlx::query(
         "UPDATE invoices SET status_type=?, status_data=?, updated_at=datetime('now') WHERE id=?",
     )
     .bind(status_type)
@@ -944,7 +1205,7 @@ pub async fn update_invoice_status(
     .bind(id)
     .execute(pool)
     .await?;
-    Ok(())
+    require_rows(result)
 }
 
 pub async fn get_all_invoices(pool: &DbPool) -> Result<Vec<InvoiceRecord>, sqlx::Error> {
@@ -1052,6 +1313,12 @@ pub struct PaymentRecord {
     pub created_at: String,
 }
 
+/// Record a payment against an invoice and advance its status to
+/// `PartiallyPaid` or `Paid` in the same database transaction.
+///
+/// Rejects non-positive amounts, malformed dates, payments on void or
+/// already-paid invoices, and payments that exceed the invoice total. An
+/// invoice with no line items has no computable total, so any payment settles it.
 pub async fn insert_payment(
     pool: &DbPool,
     invoice_id: i64,
@@ -1060,6 +1327,64 @@ pub async fn insert_payment(
     method: Option<&str>,
     transaction_id: Option<i64>,
 ) -> Result<i64, sqlx::Error> {
+    if amount_cents <= 0 {
+        return Err(sqlx::Error::InvalidArgument(
+            "payment amount must be positive".into(),
+        ));
+    }
+    validate_date("date", date)?;
+
+    let mut db_tx = pool.begin().await?;
+
+    let rec = sqlx::query_as::<_, InvoiceRecord>("SELECT * FROM invoices WHERE id = ?")
+        .bind(invoice_id)
+        .fetch_optional(&mut *db_tx)
+        .await?
+        .ok_or(sqlx::Error::RowNotFound)?;
+    match rec.status_type.as_str() {
+        "Void" => {
+            return Err(sqlx::Error::InvalidArgument(
+                "cannot record a payment on a void invoice".into(),
+            ));
+        }
+        "Paid" => {
+            return Err(sqlx::Error::InvalidArgument(
+                "invoice is already paid".into(),
+            ));
+        }
+        _ => {}
+    }
+
+    let lines = sqlx::query_as::<_, InvoiceLineRecord>(
+        "SELECT * FROM invoice_lines WHERE invoice_id = ? ORDER BY sort_order",
+    )
+    .bind(invoice_id)
+    .fetch_all(&mut *db_tx)
+    .await?;
+    let tax_lines = sqlx::query_as::<_, InvoiceTaxLineRecord>(
+        "SELECT * FROM invoice_tax_lines WHERE invoice_id = ?",
+    )
+    .bind(invoice_id)
+    .fetch_all(&mut *db_tx)
+    .await?;
+    let total_cents = invoice_from_records(&rec, &lines, &tax_lines)?
+        .total()
+        .checked_to_cents()
+        .ok_or_else(|| sqlx::Error::Protocol("invoice total out of range".into()))?;
+
+    let (already_paid,): (i64,) =
+        sqlx::query_as("SELECT COALESCE(SUM(amount_cents), 0) FROM payments WHERE invoice_id = ?")
+            .bind(invoice_id)
+            .fetch_one(&mut *db_tx)
+            .await?;
+    let paid = already_paid + amount_cents;
+    if total_cents > 0 && paid > total_cents {
+        return Err(sqlx::Error::InvalidArgument(format!(
+            "payment exceeds the amount due ({} remaining)",
+            Money::from_cents(total_cents - already_paid)
+        )));
+    }
+
     let result = sqlx::query(
         r#"INSERT INTO payments (invoice_id, amount_cents, date, method, transaction_id)
            VALUES (?, ?, ?, ?, ?)"#,
@@ -1069,9 +1394,29 @@ pub async fn insert_payment(
     .bind(date)
     .bind(method)
     .bind(transaction_id)
-    .execute(pool)
+    .execute(&mut *db_tx)
     .await?;
-    Ok(result.last_insert_rowid())
+    let payment_id = result.last_insert_rowid();
+
+    let (status, data) = if total_cents == 0 || paid >= total_cents {
+        ("Paid", serde_json::json!({ "paid_at": date }))
+    } else {
+        (
+            "PartiallyPaid",
+            serde_json::json!({ "paid_amount_cents": paid, "last_payment_at": date }),
+        )
+    };
+    sqlx::query(
+        "UPDATE invoices SET status_type = ?, status_data = ?, updated_at = datetime('now') WHERE id = ?",
+    )
+    .bind(status)
+    .bind(data.to_string())
+    .bind(invoice_id)
+    .execute(&mut *db_tx)
+    .await?;
+
+    db_tx.commit().await?;
+    Ok(payment_id)
 }
 
 pub async fn get_payments_for_invoice(
@@ -1458,6 +1803,10 @@ mod tests {
         let pool = test_pool().await;
         let contact_id = insert_test_contact(&pool, "Client", false).await;
         let inv_id = insert_test_invoice(&pool, contact_id, "INV-001").await;
+        // One line: 1.00 × $1,000.00
+        insert_invoice_line(&pool, inv_id, "Consulting", 100, 100000, false, 0)
+            .await
+            .unwrap();
 
         // Insert payments
         let p1 = insert_payment(&pool, inv_id, 50000, "2026-03-01", Some("check"), None)
@@ -1468,6 +1817,14 @@ mod tests {
             .unwrap();
         assert!(p1 > 0);
         assert!(p2 > p1);
+        let status = |pool: DbPool| async move {
+            get_invoice_by_id(&pool, inv_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status_type
+        };
+        assert_eq!(status(pool.clone()).await, "PartiallyPaid");
 
         // Get payments for invoice
         let payments = get_payments_for_invoice(&pool, inv_id).await.unwrap();
@@ -1486,6 +1843,107 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(ytd_other, 0);
+
+        // More than the $250.00 still due is rejected and not recorded.
+        assert!(
+            insert_payment(&pool, inv_id, 25001, "2026-04-02", None, None)
+                .await
+                .is_err()
+        );
+        // Paying the balance settles the invoice; it then drops out of aging.
+        insert_payment(&pool, inv_id, 25000, "2026-04-02", None, None)
+            .await
+            .unwrap();
+        assert_eq!(status(pool.clone()).await, "Paid");
+        assert!(
+            get_invoice_aging(&pool)
+                .await
+                .unwrap()
+                .iter()
+                .all(|i| i.id != inv_id)
+        );
+        assert!(
+            insert_payment(&pool, inv_id, 100, "2026-04-03", None, None)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_payment_validation() {
+        let pool = test_pool().await;
+        let contact_id = insert_test_contact(&pool, "Client", false).await;
+        let inv_id = insert_test_invoice(&pool, contact_id, "INV-002").await;
+
+        assert!(
+            insert_payment(&pool, inv_id, 0, "2026-03-01", None, None)
+                .await
+                .is_err()
+        );
+        assert!(
+            insert_payment(&pool, inv_id, -100, "2026-03-01", None, None)
+                .await
+                .is_err()
+        );
+        assert!(
+            insert_payment(&pool, inv_id, 100, "3/1/2026", None, None)
+                .await
+                .is_err()
+        );
+        assert!(matches!(
+            insert_payment(&pool, 999_999, 100, "2026-03-01", None, None).await,
+            Err(sqlx::Error::RowNotFound)
+        ));
+
+        update_invoice_status(&pool, inv_id, "Void", None)
+            .await
+            .unwrap();
+        assert!(
+            insert_payment(&pool, inv_id, 100, "2026-03-01", None, None)
+                .await
+                .is_err()
+        );
+        assert!(
+            mark_invoice_sent(&pool, inv_id, "2026-03-01T00:00:00Z")
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_mark_invoice_sent_keeps_payment_status() {
+        let pool = test_pool().await;
+        let contact_id = insert_test_contact(&pool, "Client", false).await;
+        let inv_id = insert_test_invoice(&pool, contact_id, "INV-003").await;
+
+        mark_invoice_sent(&pool, inv_id, "2026-03-01T00:00:00Z")
+            .await
+            .unwrap();
+        let rec = get_invoice_by_id(&pool, inv_id).await.unwrap().unwrap();
+        assert_eq!(rec.status_type, "Sent");
+
+        // A reminder sent after payment must not reopen the invoice.
+        update_invoice_status(&pool, inv_id, "Paid", None)
+            .await
+            .unwrap();
+        mark_invoice_sent(&pool, inv_id, "2026-04-01T00:00:00Z")
+            .await
+            .unwrap();
+        let rec = get_invoice_by_id(&pool, inv_id).await.unwrap().unwrap();
+        assert_eq!(rec.status_type, "Paid");
+    }
+
+    #[tokio::test]
+    async fn test_updates_on_missing_rows_report_not_found() {
+        let pool = test_pool().await;
+        assert!(matches!(
+            update_receipt_status(&pool, 999_999, "approved").await,
+            Err(sqlx::Error::RowNotFound)
+        ));
+        assert!(matches!(
+            resolve_reconciliation_item(&pool, 999_999, "x").await,
+            Err(sqlx::Error::RowNotFound)
+        ));
     }
 
     #[tokio::test]
@@ -1725,6 +2183,7 @@ mod tests {
             2026,
             1,
             500000,
+            125000,
             200000,
             300000,
             1000000,
@@ -1750,6 +2209,7 @@ mod tests {
             2026,
             1,
             550000,
+            137500,
             210000,
             340000,
             1100000,
@@ -1769,6 +2229,55 @@ mod tests {
         let periods = get_tax_periods(&pool, 2026).await.unwrap();
         assert_eq!(periods[0].payment_recorded_cents, 550000);
         assert_eq!(periods[0].payment_date.as_deref(), Some("2026-04-10"));
+        assert_eq!(periods[0].quarterly_payment_cents, 137500);
+
+        // A second installment for the same quarter adds to the first.
+        record_tax_payment(&pool, 2026, 1, 100000, "2026-04-12")
+            .await
+            .unwrap();
+        let periods = get_tax_periods(&pool, 2026).await.unwrap();
+        assert_eq!(periods[0].payment_recorded_cents, 650000);
+        assert_eq!(periods[0].payment_date.as_deref(), Some("2026-04-12"));
+    }
+
+    #[tokio::test]
+    async fn test_tax_payment_without_estimate_is_kept() {
+        // Regression: payments used to be an UPDATE that matched no row (and
+        // was silently dropped) unless an estimate had been stored first.
+        let pool = test_pool().await;
+        record_tax_payment(&pool, 2026, 2, 250000, "2026-06-10")
+            .await
+            .unwrap();
+        let periods = get_tax_periods(&pool, 2026).await.unwrap();
+        assert_eq!(periods.len(), 1);
+        assert_eq!(periods[0].quarter, 2);
+        assert_eq!(periods[0].payment_recorded_cents, 250000);
+        assert_eq!(periods[0].due_date, "2026-06-15");
+    }
+
+    #[tokio::test]
+    async fn test_tax_payment_validation() {
+        let pool = test_pool().await;
+        assert!(
+            record_tax_payment(&pool, 2026, 5, 100, "2026-06-10")
+                .await
+                .is_err()
+        );
+        assert!(
+            record_tax_payment(&pool, 2026, 1, 100, "06/10/2026")
+                .await
+                .is_err()
+        );
+        assert!(
+            record_tax_payment(&pool, 2026, 1, 0, "2026-06-10")
+                .await
+                .is_err()
+        );
+        assert!(
+            record_tax_payment(&pool, 2026, 1, -5, "2026-06-10")
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
@@ -1785,6 +2294,7 @@ mod tests {
             2025,
             1,
             100000,
+            25000,
             50000,
             50000,
             400000,
@@ -1798,6 +2308,7 @@ mod tests {
             2025,
             2,
             120000,
+            30000,
             60000,
             60000,
             500000,
@@ -1807,8 +2318,9 @@ mod tests {
         .await
         .unwrap();
 
+        // Each row is a full-year projection; use the latest one, never the sum.
         let total = get_prior_year_total_tax(&pool, 2026).await.unwrap();
-        assert_eq!(total, Some(220000)); // 100000 + 120000
+        assert_eq!(total, Some(120000));
     }
 
     // ── 10. Build ledger snapshot ────────────────────────────────────────────
@@ -1817,7 +2329,9 @@ mod tests {
     async fn test_build_ledger_snapshot_empty() {
         let pool = test_pool().await;
         let year = FiscalYear::new(2026);
-        let snap = build_ledger_snapshot(&pool, year, None).await.unwrap();
+        let snap = build_ledger_snapshot(&pool, year, year.end_date(), None)
+            .await
+            .unwrap();
         assert!(snap.line_totals.is_empty());
         assert_eq!(snap.year, year);
         assert!(snap.prior_year_tax.is_none());

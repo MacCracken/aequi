@@ -3,12 +3,22 @@
 //! Creates a compressed tarball containing the SQLite database snapshot
 //! and the attachments directory. Restore extracts to a target location.
 
+use flate2::Compression;
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
-use flate2::Compression;
 use std::fs;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
+
+/// Deletes a file when dropped, so temporary files (including the plaintext
+/// database snapshot) are cleaned up on every exit path.
+struct RemoveOnDrop(PathBuf);
+
+impl Drop for RemoveOnDrop {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
+}
 
 /// Metadata written into the backup archive as `manifest.json`.
 #[derive(serde::Serialize, serde::Deserialize, Debug)]
@@ -42,9 +52,9 @@ pub async fn create_backup(
 
     // Clean up any previous failed snapshot
     let _ = fs::remove_file(&snapshot_path);
+    let _snapshot_guard = RemoveOnDrop(snapshot_path.clone());
 
     // VACUUM INTO creates an atomic, consistent copy.
-    // Canonicalize and validate the path to prevent injection via crafted filenames.
     let canonical = snapshot_path.canonicalize().or_else(|_| {
         // File doesn't exist yet; canonicalize parent and append filename
         let parent = snapshot_path
@@ -54,14 +64,9 @@ pub async fn create_backup(
             .map_err(|e| BackupError::Io(e.to_string()))?;
         Ok::<PathBuf, BackupError>(parent.join(snapshot_path.file_name().unwrap_or_default()))
     })?;
-    let path_str = canonical.to_string_lossy();
-    // Reject paths containing single quotes to prevent SQL injection
-    if path_str.contains('\'') {
-        return Err(BackupError::Io(
-            "Backup path must not contain single quotes".into(),
-        ));
-    }
-    sqlx::query(&format!("VACUUM INTO '{path_str}'"))
+    // Bind the path rather than interpolating it, so no quoting/escaping is needed.
+    sqlx::query("VACUUM INTO ?")
+        .bind(canonical.to_string_lossy().into_owned())
         .execute(pool)
         .await
         .map_err(|e| BackupError::Database(e.to_string()))?;
@@ -82,8 +87,14 @@ pub async fn create_backup(
         attachment_count,
     };
 
-    // Build the tar.gz archive
-    let output_file = fs::File::create(output_path)
+    // Build the tar.gz archive in a temporary file next to the destination and
+    // rename it into place only once it is complete, so a failure never leaves
+    // a truncated archive (or clobbers an existing file) at `output_path`.
+    let mut tmp_name = output_path.file_name().unwrap_or_default().to_os_string();
+    tmp_name.push(".partial");
+    let tmp_path = output_path.with_file_name(tmp_name);
+    let tmp_guard = RemoveOnDrop(tmp_path.clone());
+    let output_file = fs::File::create(&tmp_path)
         .map_err(|e| BackupError::Io(format!("Failed to create backup file: {e}")))?;
     let encoder = GzEncoder::new(output_file, Compression::default());
     let mut archive = tar::Builder::new(encoder);
@@ -112,12 +123,22 @@ pub async fn create_backup(
             .map_err(|e| BackupError::Io(format!("Failed to add attachments: {e}")))?;
     }
 
-    archive
+    // `finish` only writes the tar trailer; the gzip trailer is written by
+    // `GzEncoder::finish`, whose errors `Drop` would swallow.
+    let encoder = archive
+        .into_inner()
+        .map_err(|e| BackupError::Io(format!("Failed to finalize archive: {e}")))?;
+    let output_file = encoder
         .finish()
         .map_err(|e| BackupError::Io(format!("Failed to finalize archive: {e}")))?;
+    output_file
+        .sync_all()
+        .map_err(|e| BackupError::Io(format!("Failed to flush backup file: {e}")))?;
+    drop(output_file);
 
-    // Clean up snapshot
-    let _ = fs::remove_file(&snapshot_path);
+    fs::rename(&tmp_path, output_path)
+        .map_err(|e| BackupError::Io(format!("Failed to write backup file: {e}")))?;
+    std::mem::forget(tmp_guard);
 
     Ok(manifest)
 }
@@ -127,18 +148,85 @@ pub async fn create_backup(
 /// Extracts the database and attachments to `target_dir`.
 /// Returns the path to the restored database file.
 ///
-/// **Warning**: This overwrites existing data in `target_dir`.
+/// The archive is fully extracted and validated in a staging directory first;
+/// existing data in `target_dir` is only replaced once that succeeds. Any
+/// stale `ledger.db-wal`/`-shm` files are removed so SQLite can't replay an
+/// old write-ahead log onto the restored database. The caller must make sure
+/// no connection pool has `target_dir/ledger.db` open.
+///
+/// **Warning**: This overwrites `ledger.db` and `attachments/` in `target_dir`.
 pub fn restore_backup(
     archive_path: &Path,
     target_dir: &Path,
 ) -> Result<RestoreResult, BackupError> {
+    fs::create_dir_all(target_dir)
+        .map_err(|e| BackupError::Io(format!("Failed to create target directory: {e}")))?;
+
+    let staging = target_dir.join(format!(".aequi-restore-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&staging);
+    fs::create_dir_all(&staging)
+        .map_err(|e| BackupError::Io(format!("Failed to create staging directory: {e}")))?;
+
+    let result = extract_and_install(archive_path, &staging, target_dir);
+    let _ = fs::remove_dir_all(&staging);
+    result
+}
+
+fn extract_and_install(
+    archive_path: &Path,
+    staging: &Path,
+    target_dir: &Path,
+) -> Result<RestoreResult, BackupError> {
+    let manifest = extract_archive(archive_path, staging)?;
+
+    let staged_db = staging.join("ledger.db");
+    if !staged_db.is_file() {
+        return Err(BackupError::InvalidArchive(
+            "Archive missing ledger.db".to_string(),
+        ));
+    }
+
+    let db_path = target_dir.join("ledger.db");
+    for suffix in ["-wal", "-shm"] {
+        let mut stale = db_path.clone().into_os_string();
+        stale.push(suffix);
+        match fs::remove_file(PathBuf::from(stale)) {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(BackupError::Io(format!(
+                    "Failed to remove stale {suffix}: {e}"
+                )));
+            }
+        }
+    }
+    fs::rename(&staged_db, &db_path)
+        .map_err(|e| BackupError::Io(format!("Failed to install database: {e}")))?;
+
+    let attachments_dir = target_dir.join("attachments");
+    let staged_attachments = staging.join("attachments");
+    if staged_attachments.is_dir() {
+        if attachments_dir.exists() {
+            fs::remove_dir_all(&attachments_dir)
+                .map_err(|e| BackupError::Io(format!("Failed to replace attachments: {e}")))?;
+        }
+        fs::rename(&staged_attachments, &attachments_dir)
+            .map_err(|e| BackupError::Io(format!("Failed to install attachments: {e}")))?;
+    }
+
+    Ok(RestoreResult {
+        db_path,
+        attachments_dir,
+        manifest,
+    })
+}
+
+/// Extract every entry into `dest`, returning the parsed manifest.
+fn extract_archive(archive_path: &Path, dest: &Path) -> Result<BackupManifest, BackupError> {
     let file = fs::File::open(archive_path)
         .map_err(|e| BackupError::Io(format!("Failed to open backup: {e}")))?;
     let decoder = GzDecoder::new(file);
     let mut archive = tar::Archive::new(decoder);
-
-    fs::create_dir_all(target_dir)
-        .map_err(|e| BackupError::Io(format!("Failed to create target directory: {e}")))?;
 
     let mut manifest: Option<BackupManifest> = None;
 
@@ -153,11 +241,11 @@ pub fn restore_backup(
             .map_err(|e| BackupError::Io(format!("Invalid path in archive: {e}")))?
             .to_path_buf();
 
-        // Security: reject absolute paths, path traversal, and symlinks
-        if path.is_absolute()
-            || path
-                .components()
-                .any(|c| c == std::path::Component::ParentDir)
+        // Security: only plain relative components. `is_absolute` alone is not
+        // enough on Windows, where `\\x` (root, no drive) and `C:x` (drive, no
+        // root) are not "absolute" but `join` still escapes the target with them.
+        if path.as_os_str().is_empty()
+            || !path.components().all(|c| matches!(c, Component::Normal(_)))
         {
             return Err(BackupError::InvalidArchive(
                 "Archive contains path traversal".to_string(),
@@ -178,7 +266,7 @@ pub fn restore_backup(
                     .map_err(|e| BackupError::InvalidArchive(format!("Invalid manifest: {e}")))?,
             );
         } else {
-            let target = target_dir.join(&path);
+            let target = dest.join(&path);
             if let Some(parent) = target.parent() {
                 fs::create_dir_all(parent)
                     .map_err(|e| BackupError::Io(format!("Failed to create dir: {e}")))?;
@@ -189,14 +277,7 @@ pub fn restore_backup(
         }
     }
 
-    let manifest = manifest
-        .ok_or_else(|| BackupError::InvalidArchive("Archive missing manifest.json".to_string()))?;
-
-    Ok(RestoreResult {
-        db_path: target_dir.join("ledger.db"),
-        attachments_dir: target_dir.join("attachments"),
-        manifest,
-    })
+    manifest.ok_or_else(|| BackupError::InvalidArchive("Archive missing manifest.json".to_string()))
 }
 
 /// Result of a successful restore operation.
@@ -354,6 +435,91 @@ mod tests {
 
         let result = restore_backup(&bad_file, &tmp.path().join("out"));
         assert!(result.is_err());
+    }
+
+    /// Build a .tar.gz whose entries have raw (unvalidated) names.
+    fn raw_archive(path: &Path, entries: &[(&str, &[u8])]) {
+        let file = fs::File::create(path).unwrap();
+        let mut builder = tar::Builder::new(GzEncoder::new(file, Compression::default()));
+        for (name, data) in entries {
+            let mut header = tar::Header::new_old();
+            let field = &mut header.as_old_mut().name;
+            field[..name.len()].copy_from_slice(name.as_bytes());
+            header.set_size(data.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder.append(&header, *data).unwrap();
+        }
+        builder.into_inner().unwrap().finish().unwrap();
+    }
+
+    const MANIFEST: &[u8] = br#"{"version":"t","created_at":"t","schema_version":1,"db_size_bytes":0,"attachment_count":0}"#;
+
+    #[test]
+    fn restore_rejects_traversal_and_keeps_existing_data() {
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().join("data");
+        fs::create_dir_all(&target).unwrap();
+        fs::write(target.join("ledger.db"), b"original").unwrap();
+
+        let archive = tmp.path().join("evil.tar.gz");
+        raw_archive(
+            &archive,
+            &[
+                ("manifest.json", MANIFEST),
+                ("ledger.db", b"new"),
+                ("../evil.txt", b"x"),
+            ],
+        );
+        assert!(matches!(
+            restore_backup(&archive, &target),
+            Err(BackupError::InvalidArchive(_))
+        ));
+        assert!(!tmp.path().join("evil.txt").exists());
+        // Validation happens before anything in the target is replaced.
+        assert_eq!(fs::read(target.join("ledger.db")).unwrap(), b"original");
+    }
+
+    #[test]
+    fn restore_removes_stale_wal_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().join("data");
+        fs::create_dir_all(&target).unwrap();
+        fs::write(target.join("ledger.db-wal"), b"stale").unwrap();
+        fs::write(target.join("ledger.db-shm"), b"stale").unwrap();
+
+        let archive = tmp.path().join("ok.tar.gz");
+        raw_archive(
+            &archive,
+            &[("manifest.json", MANIFEST), ("ledger.db", b"restored")],
+        );
+        let result = restore_backup(&archive, &target).unwrap();
+
+        assert_eq!(fs::read(&result.db_path).unwrap(), b"restored");
+        assert!(!target.join("ledger.db-wal").exists());
+        assert!(!target.join("ledger.db-shm").exists());
+        // The staging directory is cleaned up.
+        let leftovers: Vec<_> = fs::read_dir(&target)
+            .unwrap()
+            .flatten()
+            .filter(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with(".aequi-restore")
+            })
+            .collect();
+        assert!(leftovers.is_empty());
+    }
+
+    #[test]
+    fn restore_requires_database() {
+        let tmp = tempfile::tempdir().unwrap();
+        let archive = tmp.path().join("nodb.tar.gz");
+        raw_archive(&archive, &[("manifest.json", MANIFEST)]);
+        assert!(matches!(
+            restore_backup(&archive, &tmp.path().join("data")),
+            Err(BackupError::InvalidArchive(_))
+        ));
     }
 
     #[test]

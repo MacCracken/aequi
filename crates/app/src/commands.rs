@@ -1,13 +1,14 @@
 use aequi_core::{
-    Account, ContactId, Discount, FiscalYear, InvoiceId, InvoiceLine, Money, Quarter, TaxLine,
-    TransactionLine, UnvalidatedTransaction, ValidatedTransaction,
+    Account, ContactId, FiscalYear, Money, Quarter, TransactionLine, UnvalidatedTransaction,
+    ValidatedTransaction,
 };
-use aequi_ocr::{MockRecognizer, ReceiptPipeline};
+use aequi_ocr::{PipelineError, ReceiptPipeline};
+use aequi_storage::DbPool;
 use chrono::{Datelike, NaiveDate};
-use rust_decimal::Decimal;
+use rust_decimal::prelude::ToPrimitive;
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use tauri::State;
 use tokio::sync::Mutex;
@@ -15,7 +16,7 @@ use tokio::sync::Mutex;
 use tauri_plugin_notification::NotificationExt;
 use tauri_plugin_updater::UpdaterExt;
 
-use crate::AppState;
+use crate::{AppState, Recognizer};
 
 #[derive(Debug, Serialize)]
 pub struct CommandError {
@@ -55,29 +56,80 @@ impl CommandError {
 
 impl From<sqlx::Error> for CommandError {
     fn from(e: sqlx::Error) -> Self {
-        CommandError {
-            code: "DATABASE".into(),
-            message: e.to_string(),
+        match e {
+            // Storage reports bad input this way.
+            sqlx::Error::InvalidArgument(msg) => CommandError::validation(msg),
+            sqlx::Error::RowNotFound => CommandError::not_found("Record not found"),
+            sqlx::Error::Database(db) if db.is_unique_violation() => CommandError::validation(
+                format!("A record with this value already exists ({})", db.message()),
+            ),
+            sqlx::Error::Database(db) if db.is_foreign_key_violation() => {
+                CommandError::validation("Referenced record does not exist")
+            }
+            other => {
+                tracing::error!("Database error: {other}");
+                CommandError {
+                    code: "DATABASE".into(),
+                    message: "A database error occurred".into(),
+                }
+            }
         }
     }
 }
 
 impl From<aequi_core::LedgerError> for CommandError {
     fn from(e: aequi_core::LedgerError) -> Self {
-        CommandError {
-            code: "LEDGER".into(),
-            message: e.to_string(),
+        CommandError::validation(e.to_string())
+    }
+}
+
+impl From<PipelineError> for CommandError {
+    fn from(e: PipelineError) -> Self {
+        match e {
+            PipelineError::NotAFile(_) | PipelineError::TooLarge { .. } => {
+                CommandError::validation(e.to_string())
+            }
+            PipelineError::Preprocess(e) => {
+                CommandError::validation(format!("Not a supported image file: {e}"))
+            }
+            PipelineError::Io(ref io)
+                if matches!(
+                    io.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied
+                ) =>
+            {
+                CommandError::validation(format!("Cannot read file: {io}"))
+            }
+            PipelineError::Ocr(_) => CommandError {
+                code: "OCR".into(),
+                message: e.to_string(),
+            },
+            PipelineError::Io(_) | PipelineError::Task(_) => CommandError::internal(e.to_string()),
         }
     }
 }
 
-impl From<aequi_ocr::PipelineError> for CommandError {
-    fn from(e: aequi_ocr::PipelineError) -> Self {
-        CommandError {
-            code: "OCR".into(),
-            message: e.to_string(),
+impl From<aequi_storage::backup::BackupError> for CommandError {
+    fn from(e: aequi_storage::backup::BackupError) -> Self {
+        match e {
+            aequi_storage::backup::BackupError::InvalidArchive(msg) => {
+                CommandError::validation(format!("Invalid backup archive: {msg}"))
+            }
+            other => CommandError::internal(other.to_string()),
         }
     }
+}
+
+/// Convert an amount for output. Every figure derived from validated ledger
+/// data fits, but a corrupt database must not panic the command.
+fn cents(m: Money) -> Result<i64, CommandError> {
+    m.checked_to_cents()
+        .ok_or_else(|| CommandError::internal("Amount out of range"))
+}
+
+/// The user's calendar date ("today" is local, not UTC).
+fn today() -> NaiveDate {
+    chrono::Local::now().date_naive()
 }
 
 #[derive(Debug, Deserialize)]
@@ -110,7 +162,8 @@ pub struct TransactionOutput {
 pub struct ProfitLossEntry {
     pub account_code: String,
     pub account_name: String,
-    pub total: String,
+    /// Net credit (credits minus debits) for the period.
+    pub total_cents: i64,
 }
 
 #[tauri::command]
@@ -159,21 +212,12 @@ pub async fn create_transaction(
                 CommandError::not_found(format!("Account not found: {}", line.account_code))
             })?;
 
-        if line.debit_cents < 0 || line.credit_cents < 0 {
-            return Err(CommandError::validation(
-                "Debit and credit amounts must be non-negative",
-            ));
-        }
-
-        let debit = Money::from_cents(line.debit_cents);
-        let credit = Money::from_cents(line.credit_cents);
-
         lines.push(TransactionLine {
             account_id: account
                 .id
                 .ok_or_else(|| CommandError::internal("Account missing ID"))?,
-            debit,
-            credit,
+            debit: Money::from_cents(line.debit_cents),
+            credit: Money::from_cents(line.credit_cents),
             memo: line.memo,
         });
     }
@@ -185,6 +229,7 @@ pub async fn create_transaction(
         memo: input.memo,
     };
 
+    // Rejects negative, one-sided-and-both, zero and out-of-range lines too.
     let validated = ValidatedTransaction::validate(tx)?;
 
     // Use a SQL transaction for atomicity
@@ -230,38 +275,74 @@ pub async fn create_transaction(
     })
 }
 
+/// Sentinels for an open-ended date range. Dates are stored as YYYY-MM-DD
+/// text, so they compare correctly as strings.
+const MIN_DATE: &str = "0000-01-01";
+const MAX_DATE: &str = "9999-12-31";
+
+/// Validate optional inclusive date bounds. Each bound is independent; an
+/// empty string counts as unset.
+fn date_bounds(
+    start_date: Option<String>,
+    end_date: Option<String>,
+) -> Result<(Option<String>, Option<String>), CommandError> {
+    let check = |field: &str, value: Option<String>| -> Result<Option<String>, CommandError> {
+        match value
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+        {
+            Some(v) => {
+                aequi_storage::validate_date(field, &v)?;
+                Ok(Some(v))
+            }
+            None => Ok(None),
+        }
+    };
+    let start = check("start_date", start_date)?;
+    let end = check("end_date", end_date)?;
+    if let (Some(s), Some(e)) = (&start, &end)
+        && s > e
+    {
+        return Err(CommandError::validation(
+            "start_date must be on or before end_date",
+        ));
+    }
+    Ok((start, end))
+}
+
 #[tauri::command]
 pub async fn get_transactions(
     state: State<'_, Arc<Mutex<AppState>>>,
     start_date: Option<String>,
     end_date: Option<String>,
 ) -> Result<Vec<TransactionOutput>, CommandError> {
+    let (start, end) = date_bounds(start_date, end_date)?;
     let db = {
         let s = state.lock().await;
         s.db.clone()
     };
-    let db = &db;
+    query_transactions(
+        &db,
+        start.as_deref().unwrap_or(MIN_DATE),
+        end.as_deref().unwrap_or(MAX_DATE),
+    )
+    .await
+}
 
-    let query = match (start_date, end_date) {
-        (Some(start), Some(end)) => {
-            sqlx::query_as::<_, (i64, String, String, Option<String>, i64, String)>(
-                "SELECT id, date, description, memo, balanced_total_cents, created_at FROM transactions WHERE date >= ? AND date <= ? ORDER BY date DESC, id DESC"
-            )
-            .bind(start)
-            .bind(end)
-            .fetch_all(db)
-            .await?
-        },
-        _ => {
-            sqlx::query_as::<_, (i64, String, String, Option<String>, i64, String)>(
-                "SELECT id, date, description, memo, balanced_total_cents, created_at FROM transactions ORDER BY date DESC, id DESC"
-            )
-            .fetch_all(db)
-            .await?
-        }
-    };
+async fn query_transactions(
+    db: &DbPool,
+    start: &str,
+    end: &str,
+) -> Result<Vec<TransactionOutput>, CommandError> {
+    let rows = sqlx::query_as::<_, (i64, String, String, Option<String>, i64, String)>(
+        "SELECT id, date, description, memo, balanced_total_cents, created_at FROM transactions WHERE date >= ? AND date <= ? ORDER BY date DESC, id DESC"
+    )
+    .bind(start)
+    .bind(end)
+    .fetch_all(db)
+    .await?;
 
-    Ok(query
+    Ok(rows
         .into_iter()
         .map(|r| TransactionOutput {
             id: r.0,
@@ -274,55 +355,65 @@ pub async fn get_transactions(
         .collect())
 }
 
+/// Income and expense totals for the period. With no bounds at all this is
+/// year-to-date; otherwise each given bound applies and a missing one is open.
 #[tauri::command]
 pub async fn get_profit_loss(
     state: State<'_, Arc<Mutex<AppState>>>,
     start_date: Option<String>,
     end_date: Option<String>,
 ) -> Result<Vec<ProfitLossEntry>, CommandError> {
+    let (start, end) = match date_bounds(start_date, end_date)? {
+        (None, None) => {
+            let now = today();
+            let year_start = NaiveDate::from_ymd_opt(now.year(), 1, 1).unwrap_or(now);
+            (year_start.to_string(), now.to_string())
+        }
+        (start, end) => (
+            start.unwrap_or_else(|| MIN_DATE.into()),
+            end.unwrap_or_else(|| MAX_DATE.into()),
+        ),
+    };
     let db = {
         let s = state.lock().await;
         s.db.clone()
     };
-    let db = &db;
+    query_profit_loss(&db, &start, &end).await
+}
 
-    let (start, end) = match (start_date, end_date) {
-        (Some(s), Some(e)) => (s, e),
-        _ => {
-            let now = chrono::Utc::now().date_naive();
-            let start = NaiveDate::from_ymd_opt(now.year(), 1, 1).unwrap();
-            let end = now;
-            (start.to_string(), end.to_string())
-        }
-    };
-
+async fn query_profit_loss(
+    db: &DbPool,
+    start: &str,
+    end: &str,
+) -> Result<Vec<ProfitLossEntry>, CommandError> {
+    // Filter lines by their transaction's date before the outer join, so only
+    // in-range lines are summed while accounts without activity still appear.
     let rows = sqlx::query(
         r#"
-        SELECT a.code, a.name, 
-            COALESCE(SUM(tl.credit_cents - tl.debit_cents), 0) as total_cents
+        SELECT a.code, a.name, COALESCE(SUM(p.net_cents), 0) AS total_cents
         FROM accounts a
-        LEFT JOIN transaction_lines tl ON a.id = tl.account_id
-        LEFT JOIN transactions t ON tl.transaction_id = t.id 
-            AND t.date >= ? AND t.date <= ?
+        LEFT JOIN (
+            SELECT tl.account_id, tl.credit_cents - tl.debit_cents AS net_cents
+            FROM transaction_lines tl
+            JOIN transactions t ON t.id = tl.transaction_id
+            WHERE t.date >= ? AND t.date <= ?
+        ) p ON p.account_id = a.id
         WHERE a.account_type IN ('Income', 'Expense')
         GROUP BY a.id, a.code, a.name
         ORDER BY a.account_type, a.code
         "#,
     )
-    .bind(&start)
-    .bind(&end)
+    .bind(start)
+    .bind(end)
     .fetch_all(db)
     .await?;
 
     Ok(rows
         .into_iter()
-        .map(|r| {
-            let total_cents: i64 = r.get("total_cents");
-            ProfitLossEntry {
-                account_code: r.get("code"),
-                account_name: r.get("name"),
-                total: Money::from_cents(total_cents).to_string(),
-            }
+        .map(|r| ProfitLossEntry {
+            account_code: r.get("code"),
+            account_name: r.get("name"),
+            total_cents: r.get("total_cents"),
         })
         .collect())
 }
@@ -369,43 +460,27 @@ impl From<aequi_storage::ReceiptRecord> for ReceiptOutput {
     }
 }
 
-/// Ingest a receipt from a file path on disk.
-/// Processes the image through the OCR pipeline and stores the result.
-#[tauri::command]
-pub async fn ingest_receipt(
-    state: State<'_, Arc<Mutex<AppState>>>,
-    file_path: String,
-) -> Result<ReceiptOutput, CommandError> {
-    let path = PathBuf::from(&file_path);
-
-    // Validate file size before processing (50 MB limit)
-    const MAX_RECEIPT_SIZE: u64 = 50 * 1024 * 1024;
-    let meta = tokio::fs::metadata(&path)
-        .await
-        .map_err(|e| CommandError::validation(format!("Cannot read file: {e}")))?;
-    if meta.len() > MAX_RECEIPT_SIZE {
-        return Err(CommandError::validation(format!(
-            "File too large ({:.1} MB, max 50 MB)",
-            meta.len() as f64 / 1_048_576.0
-        )));
-    }
-
-    let (db, attachments_dir) = {
-        let s = state.lock().await;
-        (s.db.clone(), s.attachments_dir.clone())
-    };
-
-    // Use MockRecognizer by default; swap for TesseractRecognizer when the
-    // `tesseract` feature is enabled and Tesseract data is available.
-    let pipeline = ReceiptPipeline::new(MockRecognizer::new(""), attachments_dir);
-    let result = pipeline.process_file(&path).await?;
+/// Run a receipt file through the OCR pipeline and store it. The pipeline
+/// rejects anything that isn't a regular image file of at most 50 MB before
+/// copying it into attachments. Returns the receipt id — the existing one if
+/// the same file (by content hash) was stored before.
+pub(crate) async fn store_receipt(
+    db: &DbPool,
+    pipeline: &ReceiptPipeline<Recognizer>,
+    path: &Path,
+) -> Result<i64, CommandError> {
+    let result = pipeline.process_file(path).await?;
+    let attachment_path = result
+        .attachment_path
+        .to_str()
+        .ok_or_else(|| CommandError::internal("Attachment path is not valid UTF-8"))?;
 
     let e = &result.extracted;
     let id = aequi_storage::insert_receipt(
-        &db,
+        db,
         &result.hash_hex,
-        path.extension().and_then(|x| x.to_str()).unwrap_or("bin"),
-        result.attachment_path.to_str().unwrap_or(""),
+        &result.file_ext,
+        attachment_path,
         Some(&result.ocr_text),
         e.vendor.as_ref().map(|f| f.value.as_str()),
         e.date.as_ref().map(|f| f.value.to_string()).as_deref(),
@@ -418,13 +493,50 @@ pub async fn ingest_receipt(
             .as_deref(),
         e.confidence as f64,
     )
-    .await
-    .map_err(|e| CommandError::internal(e.to_string()))?;
+    .await?;
+    Ok(id)
+}
+
+/// Whether `path` resolves to an entry inside `dir` (symlinks resolved).
+async fn is_inside_dir(path: &Path, dir: &Path) -> bool {
+    match (
+        tokio::fs::canonicalize(path).await,
+        tokio::fs::canonicalize(dir).await,
+    ) {
+        (Ok(path), Ok(dir)) => path != dir && path.starts_with(dir),
+        _ => false,
+    }
+}
+
+/// Ingest a receipt from a file path on disk (picked in a file dialog, or a
+/// camera capture the frontend wrote to `$APPDATA/captures`).
+/// Processes the image through the OCR pipeline and stores the result; a
+/// capture file is deleted once it has been stored.
+#[tauri::command]
+pub async fn ingest_receipt(
+    state: State<'_, Arc<Mutex<AppState>>>,
+    file_path: String,
+) -> Result<ReceiptOutput, CommandError> {
+    let path = PathBuf::from(&file_path);
+
+    let (db, pipeline, captures_dir) = {
+        let s = state.lock().await;
+        (
+            s.db.clone(),
+            Arc::clone(&s.pipeline),
+            s.captures_dir.clone(),
+        )
+    };
+
+    let is_capture = is_inside_dir(&path, &captures_dir).await;
+    let id = store_receipt(&db, &pipeline, &path).await?;
+    if is_capture && let Err(e) = tokio::fs::remove_file(&path).await {
+        tracing::warn!("Failed to remove capture file {}: {e}", path.display());
+    }
 
     let record = aequi_storage::get_receipt_by_id(&db, id)
-        .await
-        .map_err(|e| CommandError::internal(e.to_string()))?
-        .ok_or(CommandError::internal("Receipt not found after insert"))?;
+        .await?
+        .ok_or_else(|| CommandError::internal("Receipt not found after insert"))?;
 
     Ok(record.into())
 }
@@ -438,9 +550,7 @@ pub async fn get_pending_receipts(
         let s = state.lock().await;
         s.db.clone()
     };
-    let records = aequi_storage::get_receipts_pending_review(&db)
-        .await
-        .map_err(|e| CommandError::internal(e.to_string()))?;
+    let records = aequi_storage::get_receipts_pending_review(&db).await?;
     Ok(records.into_iter().map(ReceiptOutput::from).collect())
 }
 
@@ -458,8 +568,7 @@ pub async fn approve_receipt(
 
     // Validate receipt exists and is still pending
     let receipt = aequi_storage::get_receipt_by_id(&db, receipt_id)
-        .await
-        .map_err(|e| CommandError::internal(e.to_string()))?
+        .await?
         .ok_or_else(|| CommandError::not_found("Receipt not found"))?;
     if receipt.status != "pending_review" {
         return Err(CommandError::validation(format!(
@@ -473,19 +582,14 @@ pub async fn approve_receipt(
         let exists: Option<(i64,)> = sqlx::query_as("SELECT id FROM transactions WHERE id = ?")
             .bind(tx_id)
             .fetch_optional(&db)
-            .await
-            .map_err(|e| CommandError::internal(e.to_string()))?;
+            .await?;
         if exists.is_none() {
             return Err(CommandError::not_found("Transaction not found"));
         }
 
-        aequi_storage::link_receipt_to_transaction(&db, receipt_id, tx_id)
-            .await
-            .map_err(|e| CommandError::internal(e.to_string()))?;
+        aequi_storage::link_receipt_to_transaction(&db, receipt_id, tx_id).await?;
     } else {
-        aequi_storage::update_receipt_status(&db, receipt_id, "approved")
-            .await
-            .map_err(|e| CommandError::internal(e.to_string()))?;
+        aequi_storage::update_receipt_status(&db, receipt_id, "approved").await?;
     }
     Ok(())
 }
@@ -500,9 +604,7 @@ pub async fn reject_receipt(
         let s = state.lock().await;
         s.db.clone()
     };
-    aequi_storage::update_receipt_status(&db, receipt_id, "rejected")
-        .await
-        .map_err(|e| CommandError::internal(e.to_string()))?;
+    aequi_storage::update_receipt_status(&db, receipt_id, "rejected").await?;
     Ok(())
 }
 
@@ -515,11 +617,20 @@ pub struct QuarterlyEstimateOutput {
     pub ytd_gross_income_cents: i64,
     pub ytd_total_expenses_cents: i64,
     pub ytd_net_profit_cents: i64,
+    /// Factor scaling year-to-date profit to a full year (1 for a full year).
+    pub annualization_factor: f64,
+    /// Projected full-year net profit; the tax figures below project from it.
+    pub annualized_net_profit_cents: i64,
     pub se_tax_cents: i64,
     pub se_tax_deduction_cents: i64,
+    pub additional_medicare_tax_cents: i64,
+    pub standard_deduction_cents: i64,
+    pub taxable_income_cents: i64,
     pub income_tax_cents: i64,
+    /// Projected full-year tax.
     pub total_tax_cents: i64,
     pub safe_harbor_cents: i64,
+    /// This quarter's installment (a quarter of the projected annual tax).
     pub quarterly_payment_cents: i64,
     pub payment_due_date: String,
     pub schedule_c_lines: Vec<ScheduleCLineOutput>,
@@ -531,6 +642,11 @@ pub struct ScheduleCLineOutput {
     pub label: String,
     pub amount_cents: i64,
     pub is_income: bool,
+}
+
+/// The calendar quarter containing `date`.
+fn quarter_of(date: NaiveDate) -> Quarter {
+    Quarter::new((date.month0() / 3 + 1) as u8).unwrap_or(Quarter::Q1)
 }
 
 /// Compute a quarterly tax estimate for the given year and quarter.
@@ -546,23 +662,25 @@ pub async fn estimate_quarterly_tax(
     };
     let db = &db;
 
-    let now = chrono::Utc::now().date_naive();
-    let yr = year.unwrap_or(now.year() as u16);
-    let qtr = quarter
-        .and_then(Quarter::new)
-        .unwrap_or_else(|| Quarter::new(((now.month0() / 3) + 1) as u8).unwrap_or(Quarter::Q1));
+    let today = today();
+    let yr = year.unwrap_or(today.year() as u16);
+    let qtr = match quarter {
+        Some(q) => Quarter::new(q)
+            .ok_or_else(|| CommandError::validation(format!("Quarter must be 1-4, got {q}")))?,
+        None => quarter_of(today),
+    };
 
     let rules = load_tax_rules(yr)?;
     let fy = FiscalYear::new(yr);
 
-    let prior_year_cents = aequi_storage::get_prior_year_total_tax(db, yr)
-        .await
-        .map_err(|e| CommandError::internal(e.to_string()))?;
-    let prior_year_tax = prior_year_cents.map(Money::from_cents);
+    let prior_year_tax = aequi_storage::get_prior_year_total_tax(db, yr)
+        .await?
+        .map(Money::from_cents);
 
-    let snapshot = aequi_storage::build_ledger_snapshot(db, fy, prior_year_tax)
-        .await
-        .map_err(|e| CommandError::internal(e.to_string()))?;
+    // Annualize activity through the end of the installment period, or
+    // through today while the period is still open.
+    let through = aequi_core::estimate_through(fy, qtr, today);
+    let snapshot = aequi_storage::build_ledger_snapshot(db, fy, through, prior_year_tax).await?;
 
     let est = aequi_core::compute_quarterly_estimate(&rules, &snapshot, qtr);
 
@@ -571,42 +689,54 @@ pub async fn estimate_quarterly_tax(
         db,
         yr,
         quarter_to_u8(qtr),
-        est.total_tax_estimate.to_cents(),
-        est.se_tax_amount.to_cents(),
-        est.estimated_income_tax.to_cents(),
-        est.ytd_net_profit.to_cents(),
+        cents(est.total_tax_estimate)?,
+        cents(est.quarterly_payment)?,
+        cents(est.se_tax_amount)?,
+        cents(est.estimated_income_tax)?,
+        cents(est.ytd_net_profit)?,
         &est.payment_due_date.to_string(),
         rules.year.value,
     )
-    .await
-    .map_err(|e| CommandError::internal(e.to_string()))?;
+    .await?;
 
-    let schedule_c_lines: Vec<ScheduleCLineOutput> = est
-        .schedule_c_lines
-        .iter()
-        .map(|(line, amount)| ScheduleCLineOutput {
-            line: format!("{line:?}"),
-            label: line.label().to_string(),
-            amount_cents: amount.to_cents(),
-            is_income: line.is_income(),
-        })
-        .collect();
+    let schedule_c_lines = schedule_c_line_outputs(&est.schedule_c_lines)?;
 
     Ok(QuarterlyEstimateOutput {
         year: est.year,
         quarter: est.quarter.to_string(),
-        ytd_gross_income_cents: est.ytd_gross_income.to_cents(),
-        ytd_total_expenses_cents: est.ytd_total_expenses.to_cents(),
-        ytd_net_profit_cents: est.ytd_net_profit.to_cents(),
-        se_tax_cents: est.se_tax_amount.to_cents(),
-        se_tax_deduction_cents: est.se_tax_deduction.to_cents(),
-        income_tax_cents: est.estimated_income_tax.to_cents(),
-        total_tax_cents: est.total_tax_estimate.to_cents(),
-        safe_harbor_cents: est.safe_harbor_amount.to_cents(),
-        quarterly_payment_cents: est.quarterly_payment.to_cents(),
+        ytd_gross_income_cents: cents(est.ytd_gross_income)?,
+        ytd_total_expenses_cents: cents(est.ytd_total_expenses)?,
+        ytd_net_profit_cents: cents(est.ytd_net_profit)?,
+        annualization_factor: est.annualization_factor.to_f64().unwrap_or(1.0),
+        annualized_net_profit_cents: cents(est.annualized_net_profit)?,
+        se_tax_cents: cents(est.se_tax_amount)?,
+        se_tax_deduction_cents: cents(est.se_tax_deduction)?,
+        additional_medicare_tax_cents: cents(est.additional_medicare_tax)?,
+        standard_deduction_cents: cents(est.standard_deduction)?,
+        taxable_income_cents: cents(est.taxable_income)?,
+        income_tax_cents: cents(est.estimated_income_tax)?,
+        total_tax_cents: cents(est.total_tax_estimate)?,
+        safe_harbor_cents: cents(est.safe_harbor_amount)?,
+        quarterly_payment_cents: cents(est.quarterly_payment)?,
         payment_due_date: est.payment_due_date.to_string(),
         schedule_c_lines,
     })
+}
+
+fn schedule_c_line_outputs(
+    lines: &std::collections::BTreeMap<aequi_core::ScheduleCLine, Money>,
+) -> Result<Vec<ScheduleCLineOutput>, CommandError> {
+    lines
+        .iter()
+        .map(|(line, amount)| {
+            Ok(ScheduleCLineOutput {
+                line: format!("{line:?}"),
+                label: line.label().to_string(),
+                amount_cents: cents(*amount)?,
+                is_income: line.is_income(),
+            })
+        })
+        .collect()
 }
 
 /// Get the Schedule C preview for a given year.
@@ -621,33 +751,20 @@ pub async fn get_schedule_c_preview(
     };
     let db = &db;
 
-    let yr = year.unwrap_or(chrono::Utc::now().date_naive().year() as u16);
+    let yr = year.unwrap_or(today().year() as u16);
     let rules = load_tax_rules(yr)?;
     let fy = FiscalYear::new(yr);
 
-    let snapshot = aequi_storage::build_ledger_snapshot(db, fy, None)
-        .await
-        .map_err(|e| CommandError::internal(e.to_string()))?;
+    let snapshot = aequi_storage::build_ledger_snapshot(db, fy, fy.end_date(), None).await?;
 
     let preview = aequi_core::tax::engine::schedule_c_preview(&rules, &snapshot);
 
-    let lines: Vec<ScheduleCLineOutput> = preview
-        .lines
-        .iter()
-        .map(|(line, amount)| ScheduleCLineOutput {
-            line: format!("{line:?}"),
-            label: line.label().to_string(),
-            amount_cents: amount.to_cents(),
-            is_income: line.is_income(),
-        })
-        .collect();
-
     Ok(ScheduleCPreviewOutput {
         year: preview.year,
-        gross_income_cents: preview.gross_income.to_cents(),
-        total_expenses_cents: preview.total_expenses.to_cents(),
-        net_profit_cents: preview.net_profit.to_cents(),
-        lines,
+        gross_income_cents: cents(preview.gross_income)?,
+        total_expenses_cents: cents(preview.total_expenses)?,
+        net_profit_cents: cents(preview.net_profit)?,
+        lines: schedule_c_line_outputs(&preview.lines)?,
     })
 }
 
@@ -710,9 +827,7 @@ pub async fn get_contacts(
         let s = state.lock().await;
         s.db.clone()
     };
-    let contacts = aequi_storage::get_all_contacts(&db)
-        .await
-        .map_err(|e| CommandError::internal(e.to_string()))?;
+    let contacts = aequi_storage::get_all_contacts(&db).await?;
     Ok(contacts)
 }
 
@@ -753,19 +868,11 @@ pub async fn create_contact(
         input.tax_id.as_deref(),
         input.notes.as_deref(),
     )
-    .await
-    .map_err(|e| CommandError {
-        code: "DATABASE".into(),
-        message: e.to_string(),
-    })?;
+    .await?;
 
     aequi_storage::get_contact_by_id(&db, id)
-        .await
-        .map_err(|e| CommandError {
-            code: "DATABASE".into(),
-            message: e.to_string(),
-        })?
-        .ok_or(CommandError::not_found("Contact not found after insert"))
+        .await?
+        .ok_or_else(|| CommandError::not_found("Contact not found after insert"))
 }
 
 // ── Invoice commands ─────────────────────────────────────────────────────────
@@ -788,9 +895,7 @@ pub async fn get_invoices(
         let s = state.lock().await;
         s.db.clone()
     };
-    aequi_storage::get_all_invoices(&db)
-        .await
-        .map_err(|e| CommandError::internal(e.to_string()))
+    Ok(aequi_storage::get_all_invoices(&db).await?)
 }
 
 #[tauri::command]
@@ -820,12 +925,8 @@ pub async fn create_invoice(
 
     // Verify contact exists
     aequi_storage::get_contact_by_id(&db, input.contact_id)
-        .await
-        .map_err(|e| CommandError {
-            code: "DATABASE".into(),
-            message: e.to_string(),
-        })?
-        .ok_or(CommandError::not_found("Contact not found"))?;
+        .await?
+        .ok_or_else(|| CommandError::not_found("Contact not found"))?;
 
     let id = aequi_storage::insert_invoice(
         &db,
@@ -840,19 +941,11 @@ pub async fn create_invoice(
         input.notes.as_deref(),
         input.terms.as_deref(),
     )
-    .await
-    .map_err(|e| CommandError {
-        code: "DATABASE".into(),
-        message: e.to_string(),
-    })?;
+    .await?;
 
     aequi_storage::get_invoice_by_id(&db, id)
-        .await
-        .map_err(|e| CommandError {
-            code: "DATABASE".into(),
-            message: e.to_string(),
-        })?
-        .ok_or(CommandError::not_found("Invoice not found after insert"))
+        .await?
+        .ok_or_else(|| CommandError::not_found("Invoice not found after insert"))
 }
 
 #[tauri::command]
@@ -863,9 +956,7 @@ pub async fn get_invoice_aging(
         let s = state.lock().await;
         s.db.clone()
     };
-    aequi_storage::get_invoice_aging(&db)
-        .await
-        .map_err(|e| CommandError::internal(e.to_string()))
+    Ok(aequi_storage::get_invoice_aging(&db).await?)
 }
 
 #[derive(Debug, Deserialize)]
@@ -876,6 +967,9 @@ pub struct PaymentInput {
     pub method: Option<String>,
 }
 
+/// Record a payment against an invoice. Storage validates the amount, date
+/// and invoice state (no void/paid invoices, no overpayment) and advances the
+/// invoice to PartiallyPaid / Paid.
 #[tauri::command]
 pub async fn record_invoice_payment(
     state: State<'_, Arc<Mutex<AppState>>>,
@@ -885,7 +979,7 @@ pub async fn record_invoice_payment(
         let s = state.lock().await;
         s.db.clone()
     };
-    aequi_storage::insert_payment(
+    Ok(aequi_storage::insert_payment(
         &db,
         input.invoice_id,
         input.amount_cents,
@@ -893,8 +987,7 @@ pub async fn record_invoice_payment(
         input.method.as_deref(),
         None,
     )
-    .await
-    .map_err(|e| CommandError::internal(e.to_string()))
+    .await?)
 }
 
 #[derive(Debug, Serialize)]
@@ -914,12 +1007,10 @@ pub async fn get_1099_summary(
         let s = state.lock().await;
         s.db.clone()
     };
-    let yr = year.unwrap_or(chrono::Utc::now().date_naive().year() as u16);
+    let yr = year.unwrap_or(today().year() as u16);
 
     // Single JOIN query instead of N+1
-    let rows = aequi_storage::get_contractor_ytd_payments(&db, yr)
-        .await
-        .map_err(|e| CommandError::internal(e.to_string()))?;
+    let rows = aequi_storage::get_contractor_ytd_payments(&db, yr).await?;
 
     let entries = rows
         .into_iter()
@@ -927,7 +1018,7 @@ pub async fn get_1099_summary(
             contact_id: id,
             contact_name: name,
             ytd_cents: ytd,
-            over_threshold: aequi_core::check_1099_threshold(Money::from_cents(ytd)),
+            over_threshold: aequi_core::check_1099_threshold(Money::from_cents(ytd), yr),
         })
         .collect();
     Ok(entries)
@@ -939,49 +1030,6 @@ pub async fn get_1099_summary(
 pub struct SendInvoiceInput {
     pub invoice_id: i64,
     pub subject: Option<String>,
-}
-
-/// Reconstruct a domain Invoice from storage records.
-fn records_to_invoice(
-    rec: &aequi_storage::InvoiceRecord,
-    lines: &[aequi_storage::InvoiceLineRecord],
-    tax_lines: &[aequi_storage::InvoiceTaxLineRecord],
-) -> aequi_core::Invoice {
-    let discount = match (rec.discount_type.as_deref(), rec.discount_value) {
-        (Some("Percentage"), Some(bps)) => Some(Discount::Percentage(Decimal::new(bps, 2))),
-        (Some("Flat"), Some(cents)) => Some(Discount::Flat(Money::from_cents(cents))),
-        _ => None,
-    };
-
-    aequi_core::Invoice {
-        id: Some(InvoiceId(rec.id)),
-        invoice_number: rec.invoice_number.clone(),
-        contact_id: ContactId(rec.contact_id),
-        status: aequi_core::InvoiceStatus::Draft,
-        issue_date: NaiveDate::parse_from_str(&rec.issue_date, "%Y-%m-%d")
-            .unwrap_or_else(|_| chrono::Utc::now().date_naive()),
-        due_date: NaiveDate::parse_from_str(&rec.due_date, "%Y-%m-%d")
-            .unwrap_or_else(|_| chrono::Utc::now().date_naive()),
-        lines: lines
-            .iter()
-            .map(|l| InvoiceLine {
-                description: l.description.clone(),
-                quantity: Decimal::new(l.quantity_hundredths, 2),
-                unit_rate: Money::from_cents(l.unit_rate_cents),
-                taxable: l.taxable,
-            })
-            .collect(),
-        discount,
-        tax_lines: tax_lines
-            .iter()
-            .map(|t| TaxLine {
-                label: t.label.clone(),
-                rate: Decimal::new(t.rate_bps, 4),
-            })
-            .collect(),
-        notes: rec.notes.clone(),
-        terms: rec.terms.clone(),
-    }
 }
 
 fn record_to_contact(rec: &aequi_storage::ContactRecord) -> aequi_core::Contact {
@@ -1016,72 +1064,83 @@ pub async fn send_invoice(
 
     // Load email config from settings
     let config_json = aequi_storage::get_setting(&db, "email_config")
-        .await
-        .map_err(|e| CommandError::internal(e.to_string()))?
-        .ok_or(CommandError::internal(
-            "Email not configured — set email_config in Settings",
-        ))?;
+        .await?
+        .ok_or_else(|| {
+            CommandError::config("Email not configured — set email_config in Settings")
+        })?;
 
     let config: aequi_email::EmailConfig = serde_json::from_str(&config_json)
-        .map_err(|e| CommandError::internal(format!("Invalid email config: {e}")))?;
+        .map_err(|e| CommandError::config(format!("Invalid email config: {e}")))?;
 
     let rec = aequi_storage::get_invoice_by_id(&db, input.invoice_id)
-        .await
-        .map_err(|e| CommandError::internal(e.to_string()))?
-        .ok_or(CommandError::internal("Invoice not found"))?;
+        .await?
+        .ok_or_else(|| CommandError::not_found("Invoice not found"))?;
+    // Check before emailing: storage would refuse to mark it sent afterwards.
+    if rec.status_type == "Void" {
+        return Err(CommandError::validation("Cannot send a void invoice"));
+    }
 
-    let lines = aequi_storage::get_invoice_lines(&db, input.invoice_id)
-        .await
-        .map_err(|e| CommandError::internal(e.to_string()))?;
-    let tax_lines = aequi_storage::get_invoice_tax_lines(&db, input.invoice_id)
-        .await
-        .map_err(|e| CommandError::internal(e.to_string()))?;
-    let invoice = records_to_invoice(&rec, &lines, &tax_lines);
+    let lines = aequi_storage::get_invoice_lines(&db, input.invoice_id).await?;
+    let tax_lines = aequi_storage::get_invoice_tax_lines(&db, input.invoice_id).await?;
+    let invoice = aequi_storage::invoice_from_records(&rec, &lines, &tax_lines)?;
 
     let contact_rec = aequi_storage::get_contact_by_id(&db, rec.contact_id)
-        .await
-        .map_err(|e| CommandError::internal(e.to_string()))?
-        .ok_or(CommandError::internal("Contact not found"))?;
+        .await?
+        .ok_or_else(|| CommandError::not_found("Contact not found"))?;
     let contact = record_to_contact(&contact_rec);
 
     let result = aequi_email::send_invoice(&config, &invoice, &contact, input.subject.as_deref())
         .await
         .map_err(|e| CommandError::internal(e.to_string()))?;
 
-    // Update invoice status to Sent
-    let sent_data = serde_json::json!({ "sent_at": chrono::Utc::now().to_rfc3339() }).to_string();
-    let _ =
-        aequi_storage::update_invoice_status(&db, input.invoice_id, "Sent", Some(&sent_data)).await;
+    // Draft → Sent; a reminder for an already sent or paid invoice keeps its status.
+    aequi_storage::mark_invoice_sent(&db, input.invoice_id, &chrono::Utc::now().to_rfc3339())
+        .await
+        .map_err(|e| {
+            let mut err = CommandError::from(e);
+            err.message = format!(
+                "The invoice was emailed, but updating its status failed: {}",
+                err.message
+            );
+            err
+        })?;
 
     Ok(result)
 }
 
 // ── Export commands ──────────────────────────────────────────────────────────
 
-#[tauri::command]
-pub async fn export_beancount(
-    state: State<'_, Arc<Mutex<AppState>>>,
-) -> Result<String, CommandError> {
+/// Load everything an export needs: all accounts (archived ones may still
+/// carry history) and every ledger transaction.
+async fn load_export_data(
+    state: &State<'_, Arc<Mutex<AppState>>>,
+) -> Result<(Vec<Account>, Vec<ValidatedTransaction>), CommandError> {
     let db = {
         let s = state.lock().await;
         s.db.clone()
     };
-    let accounts = aequi_storage::get_all_accounts(&db)
-        .await
-        .map_err(|e| CommandError::internal(e.to_string()))?;
+    let accounts = aequi_storage::get_all_accounts_including_archived(&db).await?;
+    let transactions = aequi_storage::load_ledger_transactions(&db).await?;
+    Ok((accounts, transactions))
+}
 
-    // For now export with empty transactions — full transaction fetch to be added
+#[tauri::command]
+pub async fn export_beancount(
+    state: State<'_, Arc<Mutex<AppState>>>,
+) -> Result<String, CommandError> {
+    let (accounts, transactions) = load_export_data(&state).await?;
     Ok(aequi_core::export::beancount::export_beancount(
         &accounts,
-        &[],
+        &transactions,
     ))
 }
 
 #[tauri::command]
-pub async fn export_qif(_state: State<'_, Arc<Mutex<AppState>>>) -> Result<String, CommandError> {
+pub async fn export_qif(state: State<'_, Arc<Mutex<AppState>>>) -> Result<String, CommandError> {
+    let (accounts, transactions) = load_export_data(&state).await?;
     Ok(aequi_core::export::qif::export_qif(
-        &[],
-        aequi_core::AccountType::Asset,
+        &accounts,
+        &transactions,
     ))
 }
 
@@ -1096,9 +1155,7 @@ pub async fn get_setting(
         let s = state.lock().await;
         s.db.clone()
     };
-    aequi_storage::get_setting(&db, &key)
-        .await
-        .map_err(|e| CommandError::internal(e.to_string()))
+    Ok(aequi_storage::get_setting(&db, &key).await?)
 }
 
 #[tauri::command]
@@ -1111,9 +1168,7 @@ pub async fn set_setting(
         let s = state.lock().await;
         s.db.clone()
     };
-    aequi_storage::set_setting(&db, &key, &value)
-        .await
-        .map_err(|e| CommandError::internal(e.to_string()))
+    Ok(aequi_storage::set_setting(&db, &key, &value).await?)
 }
 
 // ── Audit log command ───────────────────────────────────────────────────────
@@ -1127,42 +1182,130 @@ pub async fn get_audit_log(
         let s = state.lock().await;
         s.db.clone()
     };
-    aequi_storage::get_audit_log(&db, limit.unwrap_or(100))
-        .await
-        .map_err(|e| CommandError::internal(e.to_string()))
+    Ok(aequi_storage::get_audit_log(&db, limit.unwrap_or(100)).await?)
 }
 
+// ── Backup commands ─────────────────────────────────────────────────────────
+//
+// Not registered with the webview (no UI uses them yet). Before exposing them,
+// pass paths the user picked in a native dialog.
+
+/// Resolve symlinks in the longest existing prefix of an absolute path
+/// without `..` components, so it can be compared with a canonical directory
+/// even when its last components don't exist yet.
+fn resolve_for_comparison(path: &Path) -> Result<PathBuf, CommandError> {
+    if !path.is_absolute() || path.components().any(|c| matches!(c, Component::ParentDir)) {
+        return Err(CommandError::validation(
+            "Path must be absolute and must not contain '..'",
+        ));
+    }
+    let mut missing = Vec::new();
+    let mut existing = path;
+    loop {
+        if let Ok(canonical) = std::fs::canonicalize(existing) {
+            return Ok(missing
+                .iter()
+                .rev()
+                .fold(canonical, |acc: PathBuf, name| acc.join(name)));
+        }
+        match (existing.parent(), existing.file_name()) {
+            (Some(parent), Some(name)) => {
+                missing.push(name.to_os_string());
+                existing = parent;
+            }
+            _ => return Ok(path.to_path_buf()),
+        }
+    }
+}
+
+/// Whether `path` is `dir` or inside it, after resolving symlinks.
+fn is_within(path: &Path, dir: &Path) -> Result<bool, CommandError> {
+    let path = resolve_for_comparison(path)?;
+    let dir = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+    Ok(path.starts_with(dir))
+}
+
+/// Write a backup archive to `output_path`, which must be outside the app
+/// data folder (it holds the live ledger.db). An existing file is replaced
+/// only when `overwrite` is true.
 #[tauri::command]
 pub async fn create_backup(
     state: State<'_, Arc<Mutex<AppState>>>,
     output_path: String,
+    overwrite: Option<bool>,
 ) -> Result<aequi_storage::backup::BackupManifest, CommandError> {
-    let (db, db_path, attachments_dir) = {
+    let (db, db_path, data_dir, attachments_dir) = {
         let s = state.lock().await;
-        (s.db.clone(), s.db_path.clone(), s.attachments_dir.clone())
+        (
+            s.db.clone(),
+            s.db_path.clone(),
+            s.data_dir.clone(),
+            s.attachments_dir.clone(),
+        )
     };
-    let output = std::path::PathBuf::from(&output_path);
-    aequi_storage::backup::create_backup(
-        &db,
-        &db_path,
-        &attachments_dir,
-        &output,
-        env!("CARGO_PKG_VERSION"),
-    )
+    let output = PathBuf::from(&output_path);
+    if output.file_name().is_none() {
+        return Err(CommandError::validation("Backup path must name a file"));
+    }
+    if is_within(&output, &data_dir)? {
+        return Err(CommandError::validation(
+            "Choose a backup location outside the app data folder",
+        ));
+    }
+    match tokio::fs::symlink_metadata(&output).await {
+        Ok(meta) if meta.is_dir() => {
+            return Err(CommandError::validation("Backup path is a directory"));
+        }
+        Ok(_) if !overwrite.unwrap_or(false) => {
+            return Err(CommandError::validation(
+                "A file already exists at the backup path",
+            ));
+        }
+        _ => {}
+    }
+
+    // Archiving and compressing are blocking file I/O; run the whole backup
+    // on a blocking thread.
+    let rt = tokio::runtime::Handle::current();
+    let manifest = tokio::task::spawn_blocking(move || {
+        rt.block_on(aequi_storage::backup::create_backup(
+            &db,
+            &db_path,
+            &attachments_dir,
+            &output,
+            env!("CARGO_PKG_VERSION"),
+        ))
+    })
     .await
-    .map_err(|e| CommandError::internal(e.to_string()))
+    .map_err(|e| CommandError::internal(format!("Backup task failed: {e}")))??;
+    Ok(manifest)
 }
 
+/// Restore a backup archive into `target_dir`. Restoring over the running
+/// app's own data folder is refused: its ledger.db is open.
 #[tauri::command]
 pub async fn restore_backup(
+    state: State<'_, Arc<Mutex<AppState>>>,
     archive_path: String,
     target_dir: String,
 ) -> Result<String, CommandError> {
-    let result = aequi_storage::backup::restore_backup(
-        std::path::Path::new(&archive_path),
-        std::path::Path::new(&target_dir),
-    )
-    .map_err(|e| CommandError::internal(e.to_string()))?;
+    let data_dir = {
+        let s = state.lock().await;
+        s.data_dir.clone()
+    };
+    let target = PathBuf::from(&target_dir);
+    if is_within(&target, &data_dir)? {
+        return Err(CommandError::validation(
+            "Cannot restore into the app's live data folder; choose another folder",
+        ));
+    }
+
+    let archive = PathBuf::from(&archive_path);
+    let result = tokio::task::spawn_blocking(move || {
+        aequi_storage::backup::restore_backup(&archive, &target)
+    })
+    .await
+    .map_err(|e| CommandError::internal(format!("Restore task failed: {e}")))??;
     Ok(result.db_path.to_string_lossy().to_string())
 }
 
@@ -1174,9 +1317,7 @@ pub async fn get_schema_versions(
         let s = state.lock().await;
         s.db.clone()
     };
-    aequi_storage::migrate::get_schema_versions(&db)
-        .await
-        .map_err(|e| CommandError::internal(e.to_string()))
+    Ok(aequi_storage::migrate::get_schema_versions(&db).await?)
 }
 
 // ── Update commands ─────────────────────────────────────────────────────────
@@ -1188,35 +1329,30 @@ pub struct UpdateStatus {
     pub latest_version: Option<String>,
 }
 
+fn update_error(e: tauri_plugin_updater::Error) -> CommandError {
+    tracing::warn!("Update check failed: {e}");
+    CommandError {
+        code: "UPDATE".into(),
+        message: format!("Update check failed: {e}"),
+    }
+}
+
 #[tauri::command]
 pub async fn check_for_updates(app: tauri::AppHandle) -> Result<UpdateStatus, CommandError> {
     let current = app.package_info().version.to_string();
 
-    match app
+    let update = app
         .updater()
-        .map_err(|e: tauri_plugin_updater::Error| CommandError::internal(e.to_string()))?
+        .map_err(update_error)?
         .check()
         .await
-    {
-        Ok(Some(update)) => Ok(UpdateStatus {
-            update_available: true,
-            current_version: current,
-            latest_version: Some(update.version.clone()),
-        }),
-        Ok(None) => Ok(UpdateStatus {
-            update_available: false,
-            current_version: current,
-            latest_version: None,
-        }),
-        Err(e) => {
-            tracing::warn!("Update check failed: {e}");
-            Ok(UpdateStatus {
-                update_available: false,
-                current_version: current,
-                latest_version: None,
-            })
-        }
-    }
+        .map_err(update_error)?;
+
+    Ok(UpdateStatus {
+        update_available: update.is_some(),
+        current_version: current,
+        latest_version: update.map(|u| u.version),
+    })
 }
 
 // ── Notification commands ───────────────────────────────────────────────────
@@ -1230,11 +1366,9 @@ pub async fn check_overdue_invoices(
         let s = state.lock().await;
         s.db.clone()
     };
-    let aging = aequi_storage::get_invoice_aging(&db)
-        .await
-        .map_err(|e| CommandError::internal(e.to_string()))?;
+    let aging = aequi_storage::get_invoice_aging(&db).await?;
 
-    let today = chrono::Utc::now().date_naive();
+    let today = today();
     let overdue: Vec<_> = aging
         .iter()
         .filter(|inv| {
@@ -1253,12 +1387,15 @@ pub async fn check_overdue_invoices(
             format!("{count} invoices are past due")
         };
 
-        let _ = app
+        if let Err(e) = app
             .notification()
             .builder()
             .title("Overdue Invoices")
             .body(&body)
-            .show();
+            .show()
+        {
+            tracing::warn!("Failed to show overdue-invoice notification: {e}");
+        }
     }
 
     Ok(count)
@@ -1277,8 +1414,14 @@ pub struct DashboardSummary {
     pub total_accounts: u32,
     pub total_transactions: u32,
     pub recent_transactions: Vec<TransactionOutput>,
+    /// The current quarter's installment minus payments already recorded for it.
     pub quarterly_tax_due_cents: Option<i64>,
     pub next_tax_due_date: Option<String>,
+}
+
+/// What is still owed for a quarter: its installment less recorded payments.
+fn remaining_quarterly_tax(period: &aequi_storage::TaxPeriodRecord) -> i64 {
+    (period.quarterly_payment_cents - period.payment_recorded_cents).max(0)
 }
 
 #[tauri::command]
@@ -1291,9 +1434,9 @@ pub async fn get_dashboard_summary(
     };
     let db = &db;
 
-    let now = chrono::Utc::now().date_naive();
+    let now = today();
     let year_start = NaiveDate::from_ymd_opt(now.year(), 1, 1)
-        .unwrap()
+        .unwrap_or(now)
         .to_string();
     let today = now.to_string();
 
@@ -1358,10 +1501,9 @@ pub async fn get_dashboard_summary(
         })
         .collect();
 
-    // Current quarter tax estimate
-    let current_quarter = ((now.month0() / 3) + 1) as u8;
-    let yr = now.year() as u16;
-    let tax_periods = aequi_storage::get_tax_periods(db, yr).await?;
+    // Current quarter's estimated tax still to pay
+    let current_quarter = quarter_to_u8(quarter_of(now));
+    let tax_periods = aequi_storage::get_tax_periods(db, now.year() as u16).await?;
     let current_period = tax_periods
         .iter()
         .find(|p| p.quarter == current_quarter as i64);
@@ -1376,7 +1518,7 @@ pub async fn get_dashboard_summary(
         total_accounts: accounts.0 as u32,
         total_transactions: tx_count.0 as u32,
         recent_transactions,
-        quarterly_tax_due_cents: current_period.map(|p| p.estimated_tax_cents),
+        quarterly_tax_due_cents: current_period.map(remaining_quarterly_tax),
         next_tax_due_date: current_period.map(|p| p.due_date.clone()),
     })
 }
@@ -1428,17 +1570,241 @@ pub async fn update_contact(
         input.tax_id.as_deref(),
         input.notes.as_deref(),
     )
-    .await
-    .map_err(|e| CommandError {
-        code: "DATABASE".into(),
-        message: e.to_string(),
-    })?;
+    .await?;
 
     aequi_storage::get_contact_by_id(&db, input.id)
+        .await?
+        .ok_or_else(|| CommandError::not_found("Contact not found"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn test_db() -> DbPool {
+        let db = aequi_storage::create_db(Path::new(":memory:"))
+            .await
+            .unwrap();
+        aequi_storage::seed_default_accounts(&db).await.unwrap();
+        db
+    }
+
+    /// Post a transaction: `lines` are (account code, debit cents, credit cents).
+    async fn post(db: &DbPool, date: &str, lines: &[(&str, i64, i64)]) {
+        let total: i64 = lines.iter().map(|l| l.1).sum();
+        let (id,): (i64,) = sqlx::query_as(
+            "INSERT INTO transactions (date, description, balanced_total_cents) VALUES (?, 'test', ?) RETURNING id",
+        )
+        .bind(date)
+        .bind(total)
+        .fetch_one(db)
         .await
-        .map_err(|e| CommandError {
-            code: "DATABASE".into(),
-            message: e.to_string(),
-        })?
-        .ok_or(CommandError::not_found("Contact not found"))
+        .unwrap();
+        for (code, debit, credit) in lines {
+            sqlx::query(
+                "INSERT INTO transaction_lines (transaction_id, account_id, debit_cents, credit_cents) \
+                 SELECT ?, id, ?, ? FROM accounts WHERE code = ?",
+            )
+            .bind(id)
+            .bind(debit)
+            .bind(credit)
+            .bind(code)
+            .execute(db)
+            .await
+            .unwrap();
+        }
+    }
+
+    fn total_for(entries: &[ProfitLossEntry], code: &str) -> i64 {
+        entries
+            .iter()
+            .find(|e| e.account_code == code)
+            .map(|e| e.total_cents)
+            .unwrap()
+    }
+
+    #[test]
+    fn storage_errors_map_to_command_codes() {
+        let e = CommandError::from(sqlx::Error::InvalidArgument("bad date".into()));
+        assert_eq!(
+            (e.code.as_str(), e.message.as_str()),
+            ("VALIDATION", "bad date")
+        );
+
+        let e = CommandError::from(sqlx::Error::RowNotFound);
+        assert_eq!(e.code, "NOT_FOUND");
+
+        let e = CommandError::from(sqlx::Error::PoolClosed);
+        assert_eq!(e.code, "DATABASE");
+        assert_eq!(e.message, "A database error occurred");
+
+        let e = CommandError::from(aequi_core::LedgerError::NegativeAmount(1));
+        assert_eq!(e.code, "VALIDATION");
+    }
+
+    #[tokio::test]
+    async fn unique_violation_is_a_validation_error() {
+        let db = test_db().await;
+        let err = sqlx::query(
+            "INSERT INTO accounts (code, name, account_type) VALUES ('4000', 'Dup', 'Income')",
+        )
+        .execute(&db)
+        .await
+        .unwrap_err();
+        assert_eq!(CommandError::from(err).code, "VALIDATION");
+    }
+
+    #[test]
+    fn pipeline_input_errors_are_validation_errors() {
+        let e = CommandError::from(PipelineError::NotAFile("/dev/zero".into()));
+        assert_eq!(e.code, "VALIDATION");
+        let e = CommandError::from(PipelineError::TooLarge { size: 60 << 20 });
+        assert_eq!(e.code, "VALIDATION");
+        let e = CommandError::from(PipelineError::Io(std::io::Error::from(
+            std::io::ErrorKind::NotFound,
+        )));
+        assert_eq!(e.code, "VALIDATION");
+    }
+
+    #[test]
+    fn date_bounds_are_independent_and_validated() {
+        assert_eq!(
+            date_bounds(Some("2026-01-01".into()), None).unwrap(),
+            (Some("2026-01-01".into()), None)
+        );
+        assert_eq!(
+            date_bounds(None, Some("2026-03-31".into())).unwrap(),
+            (None, Some("2026-03-31".into()))
+        );
+        assert_eq!(
+            date_bounds(Some(String::new()), Some(" ".into())).unwrap(),
+            (None, None)
+        );
+        for (start, end) in [
+            (Some("2026-1-5"), None),
+            (None, Some("03/31/2026")),
+            (Some("2026-04-01"), Some("2026-03-31")),
+        ] {
+            let err = date_bounds(start.map(Into::into), end.map(Into::into)).unwrap_err();
+            assert_eq!(err.code, "VALIDATION", "{start:?}..{end:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn transactions_honor_each_bound() {
+        let db = test_db().await;
+        for date in ["2026-01-15", "2026-02-15", "2026-03-15"] {
+            post(&db, date, &[("1000", 100, 0), ("4000", 0, 100)]).await;
+        }
+        let dates =
+            |txs: Vec<TransactionOutput>| txs.into_iter().map(|t| t.date).collect::<Vec<_>>();
+
+        let from = query_transactions(&db, "2026-02-01", MAX_DATE)
+            .await
+            .unwrap();
+        assert_eq!(dates(from), ["2026-03-15", "2026-02-15"]);
+
+        let until = query_transactions(&db, MIN_DATE, "2026-02-15")
+            .await
+            .unwrap();
+        assert_eq!(dates(until), ["2026-02-15", "2026-01-15"]);
+    }
+
+    #[tokio::test]
+    async fn profit_loss_sums_only_in_range_transactions() {
+        let db = test_db().await;
+        post(
+            &db,
+            "2025-12-31",
+            &[("1000", 70_000, 0), ("4000", 0, 70_000)],
+        )
+        .await;
+        post(
+            &db,
+            "2026-02-01",
+            &[("1000", 10_000, 0), ("4000", 0, 10_000)],
+        )
+        .await;
+        post(&db, "2026-02-02", &[("5010", 500, 0), ("1000", 0, 500)]).await;
+        post(&db, "2026-04-01", &[("1000", 3_000, 0), ("4000", 0, 3_000)]).await;
+
+        let q1 = query_profit_loss(&db, "2026-01-01", "2026-03-31")
+            .await
+            .unwrap();
+        assert_eq!(total_for(&q1, "4000"), 10_000);
+        assert_eq!(total_for(&q1, "5010"), -500);
+        // Accounts without activity in range are still listed.
+        assert_eq!(total_for(&q1, "4010"), 0);
+
+        let since = query_profit_loss(&db, "2026-01-01", MAX_DATE)
+            .await
+            .unwrap();
+        assert_eq!(total_for(&since, "4000"), 13_000);
+
+        let until = query_profit_loss(&db, MIN_DATE, "2026-02-01")
+            .await
+            .unwrap();
+        assert_eq!(total_for(&until, "4000"), 80_000);
+    }
+
+    #[tokio::test]
+    async fn dashboard_tax_due_is_installment_minus_payments() {
+        let db = test_db().await;
+        aequi_storage::upsert_tax_period(
+            &db,
+            2026,
+            2,
+            800_000,
+            200_000,
+            0,
+            0,
+            0,
+            "2026-06-15",
+            2026,
+        )
+        .await
+        .unwrap();
+        let period = |db: DbPool| async move {
+            aequi_storage::get_tax_periods(&db, 2026)
+                .await
+                .unwrap()
+                .remove(0)
+        };
+
+        assert_eq!(remaining_quarterly_tax(&period(db.clone()).await), 200_000);
+
+        aequi_storage::record_tax_payment(&db, 2026, 2, 150_000, "2026-06-01")
+            .await
+            .unwrap();
+        assert_eq!(remaining_quarterly_tax(&period(db.clone()).await), 50_000);
+
+        aequi_storage::record_tax_payment(&db, 2026, 2, 100_000, "2026-06-10")
+            .await
+            .unwrap();
+        assert_eq!(remaining_quarterly_tax(&period(db.clone()).await), 0);
+    }
+
+    #[test]
+    fn backup_paths_inside_data_dir_are_detected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data = tmp.path().join("data");
+        std::fs::create_dir_all(data.join("attachments")).unwrap();
+
+        assert!(is_within(&data, &data).unwrap());
+        assert!(is_within(&data.join("ledger.db"), &data).unwrap());
+        assert!(is_within(&data.join("new").join("backup.tar.gz"), &data).unwrap());
+        assert!(!is_within(&tmp.path().join("backup.tar.gz"), &data).unwrap());
+
+        #[cfg(unix)]
+        {
+            let link = tmp.path().join("link");
+            std::os::unix::fs::symlink(&data, &link).unwrap();
+            assert!(is_within(&link.join("ledger.db"), &data).unwrap());
+        }
+
+        let rel = is_within(Path::new("backup.tar.gz"), &data).unwrap_err();
+        assert_eq!(rel.code, "VALIDATION");
+        let dotdot = is_within(&tmp.path().join("x").join("..").join("data"), &data).unwrap_err();
+        assert_eq!(dotdot.code, "VALIDATION");
+    }
 }

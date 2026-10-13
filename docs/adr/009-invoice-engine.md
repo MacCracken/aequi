@@ -36,7 +36,7 @@ Invalid transitions return `InvoiceError::InvalidTransition`.
 
 ### 1099-NEC tracking
 
-`compute_ytd_payments()` aggregates payments to a contact within a calendar year. `check_1099_threshold()` returns true when YTD payments reach $600. Both are pure functions in `crates/core/src/invoice/compute.rs`.
+`compute_ytd_payments()` aggregates payments to a contact within a calendar year. `check_1099_threshold()` returns true when YTD payments reach the threshold for that year: $600 through 2025, $2,000 from 2026 (`nec_threshold()`). Both are pure functions in `crates/core/src/invoice/compute.rs`.
 
 ## Consequences
 

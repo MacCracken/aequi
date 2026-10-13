@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { getDashboardSummary, type DashboardSummary } from "../lib/api";
+import { getDashboardSummary, errorMessage, type DashboardSummary } from "../lib/api";
 import { formatCents, formatDate } from "../lib/format";
 import { DashboardSkeleton } from "../components/Skeleton";
 
@@ -14,7 +14,7 @@ export function DashboardPage() {
     let cancelled = false;
     getDashboardSummary()
       .then((d) => { if (!cancelled) setData(d); })
-      .catch((e) => { if (!cancelled) setError(String(e)); })
+      .catch((e) => { if (!cancelled) setError(errorMessage(e)); })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
   }, []);

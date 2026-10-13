@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   getAuditLog,
   getSetting,
@@ -6,68 +6,128 @@ import {
   exportBeancount,
   exportQif,
   checkForUpdates,
+  errorMessage,
   type AuditLogRecord,
   type UpdateStatus,
 } from "../lib/api";
 import { useToast } from "../components/Toast";
 
+// Delay before releasing an export's object URL; revoking it synchronously
+// after click() can cancel the download in some webviews.
+const REVOKE_DELAY_MS = 60_000;
+
 export function SettingsPage() {
-  const [mcpEnabled, setMcpEnabled] = useState(false);
+  const [settingsLoaded, setSettingsLoaded] = useState(false);
+  // Defaults mirror the MCP server: unset mcp_enabled means enabled,
+  // unset mcp_read_only means read-write.
+  const [mcpEnabled, setMcpEnabled] = useState(true);
   const [readOnly, setReadOnly] = useState(false);
   const [auditLog, setAuditLog] = useState<AuditLogRecord[]>([]);
   const [businessName, setBusinessName] = useState("");
   const [businessEin, setBusinessEin] = useState("");
   const [updateStatus, setUpdateStatus] = useState<UpdateStatus | null>(null);
+  const [updateError, setUpdateError] = useState<string | null>(null);
+  const [checkingUpdates, setCheckingUpdates] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  const [savingKey, setSavingKey] = useState<string | null>(null);
+  const savingRef = useRef(false);
   const { toast } = useToast();
 
   useEffect(() => {
-    getSetting("mcp_enabled").then((v) => setMcpEnabled(v === "true")).catch(() => {});
-    getSetting("mcp_read_only").then((v) => setReadOnly(v === "true")).catch(() => {});
-    getSetting("business_name").then((v) => v && setBusinessName(v)).catch(() => {});
-    getSetting("business_ein").then((v) => v && setBusinessEin(v)).catch(() => {});
-    getAuditLog(50).then(setAuditLog).catch(() => {});
-  }, []);
+    let cancelled = false;
+    Promise.all([
+      getSetting("mcp_enabled"),
+      getSetting("mcp_read_only"),
+      getSetting("business_name"),
+      getSetting("business_ein"),
+    ])
+      .then(([enabled, ro, name, ein]) => {
+        if (cancelled) return;
+        setMcpEnabled(enabled !== "false");
+        setReadOnly(ro === "true");
+        setBusinessName(name ?? "");
+        setBusinessEin(ein ?? "");
+        setSettingsLoaded(true);
+      })
+      .catch((e) => {
+        if (!cancelled) toast("error", `Failed to load settings: ${errorMessage(e)}`);
+      });
+    getAuditLog(50)
+      .then((log) => { if (!cancelled) setAuditLog(log); })
+      .catch((e) => {
+        if (!cancelled) toast("error", `Failed to load audit log: ${errorMessage(e)}`);
+      });
+    return () => { cancelled = true; };
+  }, [toast]);
 
+  /** Persist one setting; resolves true on success, toasts and resolves false on failure. */
+  async function saveSetting(key: string, value: string): Promise<boolean> {
+    if (savingRef.current) return false;
+    savingRef.current = true;
+    setSavingKey(key);
+    try {
+      await setSetting(key, value);
+      return true;
+    } catch (e) {
+      toast("error", `Failed to save setting: ${errorMessage(e)}`);
+      return false;
+    } finally {
+      savingRef.current = false;
+      setSavingKey(null);
+    }
+  }
+
+  // The checkboxes are controlled, so they only flip once the save succeeded.
   const toggleMcp = async () => {
     const next = !mcpEnabled;
-    await setSetting("mcp_enabled", String(next));
-    setMcpEnabled(next);
+    if (await saveSetting("mcp_enabled", String(next))) setMcpEnabled(next);
   };
 
   const toggleReadOnly = async () => {
     const next = !readOnly;
-    await setSetting("mcp_read_only", String(next));
-    setReadOnly(next);
+    if (await saveSetting("mcp_read_only", String(next))) setReadOnly(next);
   };
 
   const saveBusinessName = async () => {
-    await setSetting("business_name", businessName);
-    toast("success", "Business name saved");
+    if (await saveSetting("business_name", businessName)) {
+      toast("success", "Business name saved");
+    }
   };
 
   const saveBusinessEin = async () => {
-    await setSetting("business_ein", businessEin);
-    toast("success", "Business EIN saved");
+    if (await saveSetting("business_ein", businessEin)) {
+      toast("success", "Business EIN saved");
+    }
   };
 
   async function handleExport(format: "beancount" | "qif") {
+    if (exporting) return;
+    setExporting(true);
     try {
       const content = format === "beancount" ? await exportBeancount() : await exportQif();
       const ext = format === "beancount" ? "beancount" : "qif";
-      const blob = new Blob([content], { type: "text/plain" });
+      const blob = new Blob([content], { type: "text/plain;charset=utf-8" });
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
       a.download = `aequi-export.${ext}`;
+      a.style.display = "none";
+      document.body.appendChild(a);
       a.click();
-      URL.revokeObjectURL(url);
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), REVOKE_DELAY_MS);
       toast("success", `Exported as ${format}`);
     } catch (e) {
-      toast("error", String(e));
+      toast("error", `Export failed: ${errorMessage(e)}`);
+    } finally {
+      setExporting(false);
     }
   }
 
   async function handleCheckUpdates() {
+    if (checkingUpdates) return;
+    setCheckingUpdates(true);
+    setUpdateError(null);
     try {
       const status = await checkForUpdates();
       setUpdateStatus(status);
@@ -77,9 +137,17 @@ export function SettingsPage() {
         toast("success", "You're on the latest version");
       }
     } catch (e) {
-      toast("error", String(e));
+      // A failed check says nothing about whether we're up to date.
+      const msg = errorMessage(e);
+      setUpdateStatus(null);
+      setUpdateError(msg);
+      toast("error", `Update check failed: ${msg}`);
+    } finally {
+      setCheckingUpdates(false);
     }
   }
+
+  const saveDisabled = !settingsLoaded || savingKey !== null;
 
   return (
     <div className="space-y-6">
@@ -102,7 +170,8 @@ export function SettingsPage() {
               />
               <button
                 onClick={saveBusinessName}
-                className="px-3 py-1.5 text-sm bg-primary text-white rounded-md hover:bg-primary-hover"
+                disabled={saveDisabled}
+                className="px-3 py-1.5 text-sm bg-primary text-white rounded-md hover:bg-primary-hover disabled:opacity-50"
               >
                 Save
               </button>
@@ -121,7 +190,8 @@ export function SettingsPage() {
               />
               <button
                 onClick={saveBusinessEin}
-                className="px-3 py-1.5 text-sm bg-primary text-white rounded-md hover:bg-primary-hover"
+                disabled={saveDisabled}
+                className="px-3 py-1.5 text-sm bg-primary text-white rounded-md hover:bg-primary-hover disabled:opacity-50"
               >
                 Save
               </button>
@@ -136,13 +206,15 @@ export function SettingsPage() {
         <div className="flex gap-2">
           <button
             onClick={() => handleExport("beancount")}
-            className="px-4 py-2 text-sm font-medium border border-border rounded-md hover:bg-bg transition-colors"
+            disabled={exporting}
+            className="px-4 py-2 text-sm font-medium border border-border rounded-md hover:bg-bg transition-colors disabled:opacity-50"
           >
             Export Beancount
           </button>
           <button
             onClick={() => handleExport("qif")}
-            className="px-4 py-2 text-sm font-medium border border-border rounded-md hover:bg-bg transition-colors"
+            disabled={exporting}
+            className="px-4 py-2 text-sm font-medium border border-border rounded-md hover:bg-bg transition-colors disabled:opacity-50"
           >
             Export QIF
           </button>
@@ -153,13 +225,30 @@ export function SettingsPage() {
       <section className="space-y-3">
         <h3 className="font-medium">MCP Server</h3>
         <label htmlFor="settings-mcpEnabled" className="flex items-center gap-3 text-sm">
-          <input id="settings-mcpEnabled" type="checkbox" checked={mcpEnabled} onChange={toggleMcp} className="rounded" />
+          <input
+            id="settings-mcpEnabled"
+            type="checkbox"
+            checked={mcpEnabled}
+            onChange={toggleMcp}
+            disabled={saveDisabled}
+            className="rounded"
+          />
           Enable MCP server
         </label>
         <label htmlFor="settings-readOnly" className="flex items-center gap-3 text-sm">
-          <input id="settings-readOnly" type="checkbox" checked={readOnly} onChange={toggleReadOnly} className="rounded" />
+          <input
+            id="settings-readOnly"
+            type="checkbox"
+            checked={readOnly}
+            onChange={toggleReadOnly}
+            disabled={saveDisabled}
+            className="rounded"
+          />
           Read-only mode (disables all write tools)
         </label>
+        <p className="text-xs text-text-muted">
+          Changes apply to the next MCP tool call; no restart needed.
+        </p>
       </section>
 
       {/* Updates */}
@@ -167,10 +256,14 @@ export function SettingsPage() {
         <h3 className="font-medium">Updates</h3>
         <button
           onClick={handleCheckUpdates}
-          className="px-4 py-2 text-sm font-medium border border-border rounded-md hover:bg-bg transition-colors"
+          disabled={checkingUpdates}
+          className="px-4 py-2 text-sm font-medium border border-border rounded-md hover:bg-bg transition-colors disabled:opacity-50"
         >
-          Check for Updates
+          {checkingUpdates ? "Checking..." : "Check for Updates"}
         </button>
+        {updateError && (
+          <p className="text-sm text-danger">Update check failed: {updateError}</p>
+        )}
         {updateStatus && (
           <p className="text-sm text-text-muted">
             Current version: {updateStatus.current_version}

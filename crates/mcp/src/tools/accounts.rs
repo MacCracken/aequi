@@ -1,7 +1,8 @@
 use serde_json::json;
 
 use crate::protocol::{ToolDefinition, ToolResult};
-use crate::tools::ToolRegistry;
+use crate::tools::args::{Args, ToolError};
+use crate::tools::{Access, ToolRegistry};
 
 pub fn register(registry: &mut ToolRegistry) {
     registry.register(
@@ -10,12 +11,10 @@ pub fn register(registry: &mut ToolRegistry) {
             description: "List all active accounts in the chart of accounts".to_string(),
             input_schema: json!({ "type": "object", "properties": {} }),
         },
-        false,
+        Access::Read,
         |db, _params| async move {
-            match aequi_storage::get_all_accounts(&db).await {
-                Ok(accounts) => ToolResult::text(serde_json::to_string_pretty(&accounts).unwrap()),
-                Err(e) => ToolResult::error(e.to_string()),
-            }
+            let accounts = aequi_storage::get_all_accounts(&db).await?;
+            Ok(ToolResult::json(&accounts))
         },
     );
 
@@ -29,15 +28,12 @@ pub fn register(registry: &mut ToolRegistry) {
                 "required": ["code"]
             }),
         },
-        false,
+        Access::Read,
         |db, params| async move {
-            let code = params.get("code").and_then(|v| v.as_str()).unwrap_or("");
-            match aequi_storage::get_account_by_code(&db, code).await {
-                Ok(Some(account)) => {
-                    ToolResult::text(serde_json::to_string_pretty(&account).unwrap())
-                }
-                Ok(None) => ToolResult::error(format!("Account {code} not found")),
-                Err(e) => ToolResult::error(e.to_string()),
+            let code = Args::new(&params).str("code")?;
+            match aequi_storage::get_account_by_code(&db, code).await? {
+                Some(account) => Ok(ToolResult::json(&account)),
+                None => Err(ToolError(format!("Account {code} not found"))),
             }
         },
     );

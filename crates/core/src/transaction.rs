@@ -53,8 +53,25 @@ impl ValidatedTransaction {
             return Err(LedgerError::EmptyTransaction);
         }
 
+        for (i, line) in tx.lines.iter().enumerate() {
+            let n = i + 1;
+            if line.debit.is_negative() || line.credit.is_negative() {
+                return Err(LedgerError::NegativeAmount(n));
+            }
+            match (line.debit.is_zero(), line.credit.is_zero()) {
+                (true, true) => return Err(LedgerError::ZeroLine(n)),
+                (false, false) => return Err(LedgerError::DebitAndCredit(n)),
+                _ => {}
+            }
+        }
+
         let total_debits = tx.total_debits();
         let total_credits = tx.total_credits();
+        // Everything downstream stores integer cents, so the total (and hence
+        // every line) must fit in an i64 number of cents.
+        if total_debits.checked_to_cents().is_none() || total_credits.checked_to_cents().is_none() {
+            return Err(LedgerError::AmountOutOfRange);
+        }
 
         if total_debits != total_credits {
             return Err(LedgerError::Unbalanced(total_debits, total_credits));
@@ -184,6 +201,78 @@ mod tests {
         };
         let validated = ValidatedTransaction::validate(tx).unwrap();
         assert_eq!(validated.balanced_total.to_cents(), 500);
+    }
+
+    fn two_line_tx(a: TransactionLine, b: TransactionLine) -> UnvalidatedTransaction {
+        UnvalidatedTransaction {
+            date: date(2024, 1, 15),
+            description: "Test".to_string(),
+            lines: vec![a, b],
+            memo: None,
+        }
+    }
+
+    #[test]
+    fn validate_rejects_negative_amounts() {
+        // Balanced, but negative: would post a negative balanced_total.
+        let tx = two_line_tx(
+            TransactionLine::debit(id(1), Money::from_cents(-500), None),
+            TransactionLine::credit(id(2), Money::from_cents(-500), None),
+        );
+        assert!(matches!(
+            ValidatedTransaction::validate(tx),
+            Err(LedgerError::NegativeAmount(1))
+        ));
+    }
+
+    #[test]
+    fn validate_rejects_zero_lines() {
+        let tx = two_line_tx(
+            TransactionLine::debit(id(1), Money::zero(), None),
+            TransactionLine::credit(id(2), Money::zero(), None),
+        );
+        assert!(matches!(
+            ValidatedTransaction::validate(tx),
+            Err(LedgerError::ZeroLine(1))
+        ));
+    }
+
+    #[test]
+    fn validate_rejects_line_with_debit_and_credit() {
+        let both = TransactionLine {
+            account_id: id(1),
+            debit: Money::from_cents(500),
+            credit: Money::from_cents(500),
+            memo: None,
+        };
+        let tx = two_line_tx(
+            both,
+            TransactionLine::debit(id(2), Money::from_cents(100), None),
+        );
+        assert!(matches!(
+            ValidatedTransaction::validate(tx),
+            Err(LedgerError::DebitAndCredit(1))
+        ));
+    }
+
+    #[test]
+    fn validate_rejects_total_beyond_i64_cents() {
+        let max = Money::from_cents(i64::MAX);
+        let tx = UnvalidatedTransaction {
+            date: date(2024, 1, 15),
+            description: "Overflow".to_string(),
+            lines: vec![
+                TransactionLine::debit(id(1), max, None),
+                TransactionLine::debit(id(1), max, None),
+                TransactionLine::credit(id(2), max, None),
+                TransactionLine::credit(id(2), max, None),
+            ],
+            memo: None,
+        };
+        assert!(matches!(
+            ValidatedTransaction::validate(tx),
+            Err(LedgerError::AmountOutOfRange)
+        ));
     }
 
     #[test]

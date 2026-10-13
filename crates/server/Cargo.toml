@@ -2,6 +2,7 @@
 name = "aequi-server"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 
@@ -28,7 +29,7 @@ anyhow.workspace = true
 sqlx.workspace = true
 reqwest.workspace = true
 uuid.workspace = true
-tracing-bunyan-formatter = "0.3.10"
-jsonwebtoken = "10.3.0"
+tracing-bunyan-formatter = "0.3.11"
+jsonwebtoken = { version = "11.1", features = ["aws_lc_rs"] }
 sha2.workspace = true
-hex = "0.4"
+hex.workspace = true

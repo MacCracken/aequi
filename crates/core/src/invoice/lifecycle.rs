@@ -205,16 +205,20 @@ mod tests {
     fn paid_to_anything_rejected() {
         let status = InvoiceStatus::Paid { paid_at: now() };
         assert!(status.clone().transition(InvoiceStatus::Draft).is_err());
-        assert!(status
-            .clone()
-            .transition(InvoiceStatus::Sent { sent_at: now() })
-            .is_err());
-        assert!(status
-            .transition(InvoiceStatus::Void {
-                voided_at: now(),
-                reason: "test".to_string(),
-            })
-            .is_err());
+        assert!(
+            status
+                .clone()
+                .transition(InvoiceStatus::Sent { sent_at: now() })
+                .is_err()
+        );
+        assert!(
+            status
+                .transition(InvoiceStatus::Void {
+                    voided_at: now(),
+                    reason: "test".to_string(),
+                })
+                .is_err()
+        );
     }
 
     #[test]
@@ -224,9 +228,11 @@ mod tests {
             reason: "test".to_string(),
         };
         assert!(status.clone().transition(InvoiceStatus::Draft).is_err());
-        assert!(status
-            .transition(InvoiceStatus::Sent { sent_at: now() })
-            .is_err());
+        assert!(
+            status
+                .transition(InvoiceStatus::Sent { sent_at: now() })
+                .is_err()
+        );
     }
 
     #[test]

@@ -100,6 +100,7 @@ mod tests {
                     credit_column: None,
                     memo_column: Some(3),
                     date_format: "%m/%d/%Y".to_string(),
+                    invert_sign: false,
                 },
                 has_header: true,
                 delimiter: ",".to_string(),
@@ -171,6 +172,7 @@ mod tests {
             account_code: "5110".to_string(),
             amount_min_cents: None,
             amount_max_cents: None,
+            memo: None,
         }];
         let toml = export_profile(&profile).unwrap();
         let restored = import_profile(&toml).unwrap();

@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use thiserror::Error;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct AccountId(pub i64);
 
 impl fmt::Display for AccountId {
@@ -69,6 +69,14 @@ pub enum LedgerError {
     ClosedPeriod,
     #[error("Account {0} is archived")]
     ArchivedAccount(AccountId),
+    #[error("Line {0}: amounts must not be negative")]
+    NegativeAmount(usize),
+    #[error("Line {0}: a line must have either a debit or a credit, not both")]
+    DebitAndCredit(usize),
+    #[error("Line {0}: a line must have a non-zero debit or credit")]
+    ZeroLine(usize),
+    #[error("Transaction amount is out of range")]
+    AmountOutOfRange,
 }
 
 pub const DEFAULT_ACCOUNTS: &[(&str, &str, AccountType, &str)] = &[
@@ -81,7 +89,7 @@ pub const DEFAULT_ACCOUNTS: &[(&str, &str, AccountType, &str)] = &[
     ("3000", "Owner's Equity", AccountType::Equity, ""),
     ("3100", "Owner's Draw", AccountType::Equity, ""),
     ("4000", "Services Revenue", AccountType::Income, "line_1"),
-    ("4010", "Product Sales", AccountType::Income, "line_2"),
+    ("4010", "Product Sales", AccountType::Income, "line_1"),
     ("4020", "Other Income", AccountType::Income, "line_6"),
     (
         "5000",
@@ -89,7 +97,7 @@ pub const DEFAULT_ACCOUNTS: &[(&str, &str, AccountType, &str)] = &[
         AccountType::Expense,
         "line_8",
     ),
-    ("5010", "Bank Fees", AccountType::Expense, "line_17"),
+    ("5010", "Bank Fees", AccountType::Expense, "line_27"),
     (
         "5020",
         "Business Meals (50% deductible)",
@@ -102,9 +110,9 @@ pub const DEFAULT_ACCOUNTS: &[(&str, &str, AccountType, &str)] = &[
         AccountType::Expense,
         "line_27",
     ),
-    ("5040", "Equipment", AccountType::Expense, "line_15"),
+    ("5040", "Equipment", AccountType::Expense, "line_13"),
     ("5050", "Home Office", AccountType::Expense, "line_30"),
-    ("5060", "Insurance", AccountType::Expense, "line_14"),
+    ("5060", "Insurance", AccountType::Expense, "line_15"),
     ("5070", "Internet & Phone", AccountType::Expense, "line_18"),
     (
         "5080",
@@ -112,7 +120,7 @@ pub const DEFAULT_ACCOUNTS: &[(&str, &str, AccountType, &str)] = &[
         AccountType::Expense,
         "line_17",
     ),
-    ("5090", "Mileage", AccountType::Expense, "line_24a"),
+    ("5090", "Mileage", AccountType::Expense, "line_9"),
     ("5100", "Office Supplies", AccountType::Expense, "line_18"),
     (
         "5110",
@@ -121,8 +129,8 @@ pub const DEFAULT_ACCOUNTS: &[(&str, &str, AccountType, &str)] = &[
         "line_18",
     ),
     ("5120", "Travel", AccountType::Expense, "line_24a"),
-    ("5130", "Utilities", AccountType::Expense, "line_18"),
-    ("5140", "Vehicle Expenses", AccountType::Expense, "line_24a"),
+    ("5130", "Utilities", AccountType::Expense, "line_25"),
+    ("5140", "Vehicle Expenses", AccountType::Expense, "line_9"),
     ("5900", "Miscellaneous", AccountType::Expense, "line_27"),
 ];
 

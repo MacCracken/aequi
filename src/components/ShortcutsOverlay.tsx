@@ -12,6 +12,19 @@ export function ShortcutsOverlay() {
     return () => window.removeEventListener("aequi:toggle-shortcuts", toggle);
   }, []);
 
+  // The backdrop is not focusable, so listen on the window for Escape.
+  useEffect(() => {
+    if (!open) return;
+    function onKeyDown(e: KeyboardEvent) {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        setOpen(false);
+      }
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [open]);
+
   if (!open) return null;
 
   return (
@@ -21,9 +34,6 @@ export function ShortcutsOverlay() {
       aria-modal="true"
       aria-label="Keyboard shortcuts"
       onClick={() => setOpen(false)}
-      onKeyDown={(e) => {
-        if (e.key === "Escape") setOpen(false);
-      }}
     >
       <div
         className="bg-surface rounded-lg shadow-xl p-6 w-80 max-w-[90vw]"

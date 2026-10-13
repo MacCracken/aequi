@@ -1,5 +1,5 @@
 import { useEffect, useState, useMemo } from "react";
-import { getAccounts, type Account } from "../lib/api";
+import { getAccounts, errorMessage, type Account } from "../lib/api";
 import { TableSkeleton } from "../components/Skeleton";
 import { useToast } from "../components/Toast";
 
@@ -11,10 +11,12 @@ export function AccountsPage() {
   const { toast } = useToast();
 
   useEffect(() => {
+    let cancelled = false;
     getAccounts()
-      .then(setAccounts)
-      .catch((e) => toast("error", String(e)))
-      .finally(() => setLoading(false));
+      .then((a) => { if (!cancelled) setAccounts(a); })
+      .catch((e) => { if (!cancelled) toast("error", errorMessage(e)); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
   }, [toast]);
 
   const filtered = useMemo(() => {

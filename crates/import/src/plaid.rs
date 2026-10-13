@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::util::truncate_on_char_boundary;
+
 // ---------------------------------------------------------------------------
 // Configuration
 // ---------------------------------------------------------------------------
@@ -65,7 +67,10 @@ pub enum PlaidError {
 // API request/response types
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Serialize)]
+// Request bodies carry the client secret and access tokens, so they
+// deliberately do not implement Debug.
+
+#[derive(Serialize)]
 struct LinkTokenCreateRequest {
     client_id: String,
     secret: String,
@@ -88,21 +93,32 @@ pub struct LinkTokenResponse {
     pub request_id: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 struct ExchangeTokenRequest {
     client_id: String,
     secret: String,
     public_token: String,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Deserialize, Serialize)]
 pub struct ExchangeTokenResponse {
     pub access_token: String,
     pub item_id: String,
     pub request_id: String,
 }
 
-#[derive(Debug, Serialize)]
+// Redact the access token in Debug output
+impl std::fmt::Debug for ExchangeTokenResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExchangeTokenResponse")
+            .field("access_token", &"[REDACTED]")
+            .field("item_id", &self.item_id)
+            .field("request_id", &self.request_id)
+            .finish()
+    }
+}
+
+#[derive(Serialize)]
 struct TransactionsGetRequest {
     client_id: String,
     secret: String,
@@ -196,6 +212,7 @@ impl PlaidClient {
     pub fn new(config: PlaidConfig) -> Self {
         let http = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
+            .connect_timeout(std::time::Duration::from_secs(10))
             .build()
             .expect("failed to build HTTP client");
         Self { http, config }
@@ -291,11 +308,19 @@ impl PlaidClient {
             if accounts.is_empty() {
                 accounts = page.accounts;
             }
+            let received = u32::try_from(page.transactions.len()).unwrap_or(u32::MAX);
             all_transactions.extend(page.transactions);
 
-            offset += page_size;
+            // Advance by what was actually returned so a short page cannot
+            // skip transactions.
+            offset = offset.saturating_add(received);
             if offset >= total {
                 break;
+            }
+            if received == 0 {
+                return Err(PlaidError::Deserialize(format!(
+                    "Plaid returned an empty page after {offset} of {total} transactions"
+                )));
             }
         }
 
@@ -323,7 +348,7 @@ impl PlaidClient {
                 });
             }
             let mut truncated = text;
-            truncated.truncate(500);
+            truncate_on_char_boundary(&mut truncated, 500);
             return Err(PlaidError::Deserialize(format!(
                 "HTTP {status}: {truncated}"
             )));
@@ -708,6 +733,18 @@ mod tests {
         assert_eq!(err.error_type, "INVALID_REQUEST");
         assert_eq!(err.error_code, "MISSING_FIELDS");
         assert_eq!(err.error_message, "client_id is required");
+    }
+
+    #[test]
+    fn exchange_token_response_debug_redacts_access_token() {
+        let resp = ExchangeTokenResponse {
+            access_token: "access-sandbox-secret-token".into(),
+            item_id: "item_abc".into(),
+            request_id: "req_123".into(),
+        };
+        let debug = format!("{resp:?}");
+        assert!(!debug.contains("access-sandbox-secret-token"));
+        assert!(debug.contains("item_abc"));
     }
 
     #[test]

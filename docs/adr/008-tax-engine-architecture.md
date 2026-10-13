@@ -48,13 +48,21 @@ Each `Account` already has a `schedule_c_line: Option<String>` field (e.g., `"li
 
 Business meals (Line 24b) are automatically capped at 50% during both the quarterly estimate and Schedule C preview. The cap fraction is configurable in the TOML rules file.
 
+### Annualization
+
+A quarterly estimate is a projection of the full year, not tax on the profit booked so far. The `LedgerSnapshot` covers Jan 1 through `through`, which is the end of the quarter's installment period (Mar 31, May 31, Aug 31, Dec 31; the periods of the IRS annualized income installment method, Form 2210 Schedule AI) or today if that period is still open. Year-to-date net profit is scaled to a full year: completed periods use the IRS factors 4, 2.4, 1.5 and 1; a period in progress is prorated by days elapsed. All tax figures are computed on the annualized profit, `total_tax_estimate` is the projected full-year tax, and `quarterly_payment` is one quarter of it.
+
 ### SE tax wage base cap
 
-Social Security tax is capped at the wage base ($176,100 for 2026). Medicare has no cap. The engine computes these separately and combines them.
+Social Security tax is capped at the wage base ($184,500 for 2026). Medicare has no cap. The engine computes these separately and combines them. No SE tax is due below $400 of net earnings, and the 0.9% Additional Medicare Tax applies to SE earnings above $200,000 (single); it is not part of the deductible half of SE tax.
+
+### Income tax
+
+Brackets apply to taxable income: annualized net profit, minus the deductible half of SE tax, minus the standard deduction from the rules file. The qualified business income (QBI) deduction is not modeled yet, so estimates err high for most filers.
 
 ### Safe harbor calculation
 
-Safe harbor amount = min(100% prior year tax, 90% current year estimate). Prior year tax is pulled from the `tax_periods` table. If no prior year data exists, 90% of the current estimate is used.
+Safe harbor amount = min(100% prior year tax, 90% current year estimate). Prior year tax is the most recent full-year projection stored in the `tax_periods` table for that year. If no prior year data exists, 90% of the current estimate is used. The 110% prior-year rule for prior-year AGI over $150,000 is not applied because prior-year AGI is not tracked.
 
 ## Consequences
 

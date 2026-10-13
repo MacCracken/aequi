@@ -2,8 +2,8 @@
 
 ## Prerequisites
 
-- **Rust** (stable, via rustup) — `rustup update stable`
-- **Node.js** 20+ and **pnpm** — for the React frontend
+- **Rust** 1.94+ (stable, via rustup; edition 2024) — `rustup update stable`
+- **Node.js** 22.12+ (24 LTS recommended) and **npm** — for the React frontend
 - **Tauri CLI v2** — `cargo install tauri-cli --version "^2"`
 - **For mobile (Phase 3+):**
   - iOS: Xcode 15+ (macOS only)
@@ -17,7 +17,7 @@ git clone https://github.com/anomalyco/aequi.git
 cd aequi
 
 # Install frontend dependencies
-pnpm install
+npm ci
 
 # Build all Rust crates
 cargo build --workspace
@@ -48,7 +48,7 @@ breakpoints (`sm:`, `md:`, `lg:`) for layout differences. No separate mobile cod
 - Run `cargo test --workspace` to ensure all tests pass
 - All business logic in `crates/core` and `crates/import` must have unit tests
 - No `f32`/`f64` in financial calculations — use `rust_decimal::Decimal` or `Money`
-- Frontend: `pnpm lint` and `pnpm typecheck` must pass
+- Frontend: `npx tsc --noEmit` must pass
 
 ## Project Structure
 
@@ -76,8 +76,8 @@ Business logic must never live in `app`.
 ## Adding a New Tauri Command
 
 1. Add the handler in `crates/app/src/commands.rs`
-2. Register it in the `invoke_handler!` macro in `crates/app/src/main.rs`
-3. Add a TypeScript wrapper in `src/lib/commands.ts` (typed `invoke()`)
+2. Register it in the `tauri::generate_handler!` list in `crates/app/src/lib.rs`
+3. Add a TypeScript wrapper in `src/lib/api.ts` (typed `invoke()`)
 4. Write unit tests for any new logic in `core` or `storage`
 
 ## Submitting Changes
@@ -86,7 +86,7 @@ Business logic must never live in `app`.
 2. Create a feature branch (`git checkout -b feat/my-feature`)
 3. Make your changes
 4. Run `cargo fmt && cargo clippy -- -D warnings && cargo test --workspace`
-5. Run `pnpm lint && pnpm typecheck`
+5. Run `npx tsc --noEmit`
 6. Submit a pull request with a description of what changed and why
 
 ## Tax Rule Files

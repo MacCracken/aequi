@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use chrono::NaiveDate;
+use chrono::{Datelike, NaiveDate};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
@@ -14,6 +14,9 @@ use super::schedule_c::ScheduleCLine;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LedgerSnapshot {
     pub year: FiscalYear,
+    /// Last date (inclusive) covered by `line_totals`; the snapshot starts on
+    /// Jan 1 of `year`. Used to annualize year-to-date figures.
+    pub through: NaiveDate,
     /// Income and expense totals keyed by Schedule C line.
     /// Income lines have positive values; expense lines have positive values
     /// (representing the amount spent).
@@ -63,17 +66,28 @@ pub struct QuarterlyEstimate {
     pub ytd_gross_income: Money,
     pub ytd_total_expenses: Money,
     pub ytd_net_profit: Money,
-    /// SE tax base: net_profit * net_earnings_factor (0.9235)
+    /// Factor that scales year-to-date profit to a full year (1 for a full year).
+    pub annualization_factor: Decimal,
+    /// Projected full-year net profit: ytd_net_profit * annualization_factor.
+    /// All tax figures below are full-year projections based on this.
+    pub annualized_net_profit: Money,
+    /// SE tax base: annualized_net_profit * net_earnings_factor (0.9235)
     pub se_tax_base: Money,
-    /// SE tax amount: se_tax_base * combined_rate (0.153), capped at SS wage base
+    /// SE tax amount: Social Security (capped at the wage base) + Medicare
     pub se_tax_amount: Money,
+    /// Additional Medicare Tax on SE earnings above the threshold (not deductible)
+    pub additional_medicare_tax: Money,
     /// SE tax deduction: se_tax_amount * deductible_fraction (0.50)
     pub se_tax_deduction: Money,
     /// Net income after SE tax deduction
     pub adjusted_net_income: Money,
+    /// Standard deduction subtracted before applying brackets
+    pub standard_deduction: Money,
+    /// adjusted_net_income - standard_deduction (floored at zero)
+    pub taxable_income: Money,
     /// Estimated federal income tax from brackets
     pub estimated_income_tax: Money,
-    /// Total estimated tax (SE tax + income tax)
+    /// Projected full-year tax (SE tax + Additional Medicare + income tax)
     pub total_tax_estimate: Money,
     /// Safe harbor: min(100% prior year, 90% current year estimate)
     pub safe_harbor_amount: Money,
@@ -96,7 +110,61 @@ pub struct ScheduleCPreview {
     pub lines: BTreeMap<ScheduleCLine, Money>,
 }
 
+/// Last day of the estimated-tax installment period for `quarter` (the periods
+/// used by the IRS annualized income installment method, Form 2210 Schedule AI):
+/// Q1 → Mar 31, Q2 → May 31, Q3 → Aug 31, Q4 → Dec 31.
+pub fn installment_period_end(year: FiscalYear, quarter: Quarter) -> NaiveDate {
+    let y = year.year() as i32;
+    let (m, d) = match quarter {
+        Quarter::Q1 => (3, 31),
+        Quarter::Q2 => (5, 31),
+        Quarter::Q3 => (8, 31),
+        Quarter::Q4 => (12, 31),
+    };
+    NaiveDate::from_ymd_opt(y, m, d).expect("valid installment period end")
+}
+
+/// The last date a snapshot should cover when estimating `quarter` on `today`:
+/// the end of the installment period, or today if the period is still open.
+pub fn estimate_through(year: FiscalYear, quarter: Quarter, today: NaiveDate) -> NaiveDate {
+    installment_period_end(year, quarter).min(today)
+}
+
+/// Factor that scales profit for Jan 1..=`through` up to a full year.
+///
+/// A completed installment period uses the IRS factors (4, 2.4, 1.5, 1). A
+/// period still in progress is prorated by days elapsed, so an estimate made
+/// mid-period isn't understated by applying a full period's factor to a
+/// partial period's income.
+pub fn annualization_factor(year: FiscalYear, quarter: Quarter, through: NaiveDate) -> Decimal {
+    let period_end = installment_period_end(year, quarter);
+    if through >= period_end {
+        return match quarter {
+            Quarter::Q1 => Decimal::from(4),
+            Quarter::Q2 => Decimal::new(24, 1),
+            Quarter::Q3 => Decimal::new(15, 1),
+            Quarter::Q4 => Decimal::ONE,
+        };
+    }
+    let start = year.start_date();
+    if through < start {
+        // Nothing booked yet for this year; the factor is irrelevant.
+        return Decimal::ONE;
+    }
+    let elapsed = (through - start).num_days() + 1;
+    let days_in_year = if year.end_date().ordinal() == 366 {
+        366
+    } else {
+        365
+    };
+    Decimal::from(days_in_year) / Decimal::from(elapsed)
+}
+
 /// Compute a quarterly tax estimate. This is a pure function — no I/O.
+///
+/// The snapshot's year-to-date profit is annualized (see [`annualization_factor`])
+/// and every tax figure is a projection for the full year; `quarterly_payment`
+/// is one quarter of that projection.
 pub fn compute_quarterly_estimate(
     rules: &TaxRules,
     snapshot: &LedgerSnapshot,
@@ -106,27 +174,39 @@ pub fn compute_quarterly_estimate(
     let ytd_total_expenses = snapshot.total_expenses(rules);
     let ytd_net_profit = ytd_gross_income - ytd_total_expenses;
 
+    let annualization_factor = annualization_factor(snapshot.year, quarter, snapshot.through);
+    let annualized_net_profit = ytd_net_profit * annualization_factor;
+
     // SE tax calculation
-    let se_tax_base = if ytd_net_profit > Money::zero() {
-        ytd_net_profit * rules.se_tax.net_earnings_factor
+    let se_tax_base = if annualized_net_profit > Money::zero() {
+        annualized_net_profit * rules.se_tax.net_earnings_factor
     } else {
         Money::zero()
     };
 
     let se_tax_amount = compute_se_tax(rules, se_tax_base);
+    let additional_medicare_tax = compute_additional_medicare_tax(rules, se_tax_base);
     let se_tax_deduction = se_tax_amount * rules.se_tax.deductible_fraction;
 
     // Income tax on adjusted income
-    let adjusted_net_income = if ytd_net_profit > Money::zero() {
-        ytd_net_profit - se_tax_deduction
+    let adjusted_net_income = if annualized_net_profit > Money::zero() {
+        annualized_net_profit - se_tax_deduction
     } else {
-        ytd_net_profit
+        annualized_net_profit
+    };
+
+    let standard_deduction = Money::from_decimal(rules.standard_deduction.single);
+    let taxable_income = if adjusted_net_income > standard_deduction {
+        adjusted_net_income - standard_deduction
+    } else {
+        Money::zero()
     };
 
     let estimated_income_tax =
-        Money::from_decimal(rules.compute_income_tax(adjusted_net_income.as_decimal()));
+        Money::from_decimal(rules.compute_income_tax(taxable_income.as_decimal()));
 
-    let total_tax_estimate = (se_tax_amount + estimated_income_tax).round_to_dollar();
+    let total_tax_estimate =
+        (se_tax_amount + additional_medicare_tax + estimated_income_tax).round_to_dollar();
 
     // Safe harbor: 100% of prior year tax or 90% of current year estimate
     let ninety_pct_current = total_tax_estimate * Decimal::from_str_exact("0.90").unwrap();
@@ -163,10 +243,15 @@ pub fn compute_quarterly_estimate(
         ytd_gross_income,
         ytd_total_expenses,
         ytd_net_profit,
+        annualization_factor,
+        annualized_net_profit,
         se_tax_base,
         se_tax_amount,
+        additional_medicare_tax,
         se_tax_deduction,
         adjusted_net_income,
+        standard_deduction,
+        taxable_income,
         estimated_income_tax,
         total_tax_estimate,
         safe_harbor_amount,
@@ -178,7 +263,7 @@ pub fn compute_quarterly_estimate(
 
 /// Compute SE tax, respecting the Social Security wage base cap.
 fn compute_se_tax(rules: &TaxRules, se_tax_base: Money) -> Money {
-    if se_tax_base <= Money::zero() {
+    if se_tax_base <= Money::zero() || se_tax_base.as_decimal() < rules.se_tax.min_net_earnings {
         return Money::zero();
     }
 
@@ -193,6 +278,15 @@ fn compute_se_tax(rules: &TaxRules, se_tax_base: Money) -> Money {
     let medicare_tax = base * rules.se_tax.medicare_rate;
 
     Money::from_decimal(ss_tax + medicare_tax)
+}
+
+/// Additional Medicare Tax (0.9%) on SE earnings above the filing threshold.
+fn compute_additional_medicare_tax(rules: &TaxRules, se_tax_base: Money) -> Money {
+    let excess = se_tax_base.as_decimal() - rules.se_tax.additional_medicare_threshold;
+    if excess <= Decimal::ZERO || se_tax_base.as_decimal() < rules.se_tax.min_net_earnings {
+        return Money::zero();
+    }
+    Money::from_decimal(excess * rules.se_tax.additional_medicare_rate)
 }
 
 /// Build a Schedule C preview from a ledger snapshot.
@@ -242,8 +336,14 @@ mod tests {
         // $1,000 travel
         line_totals.insert(ScheduleCLine::Line24a, Money::from_cents(100_000));
 
+        full_year(line_totals)
+    }
+
+    /// A snapshot covering all of 2026 (annualization factor 1 for Q4).
+    fn full_year(line_totals: BTreeMap<ScheduleCLine, Money>) -> LedgerSnapshot {
         LedgerSnapshot {
             year: FiscalYear::new(2026),
+            through: NaiveDate::from_ymd_opt(2026, 12, 31).unwrap(),
             line_totals,
             prior_year_tax: None,
         }
@@ -275,12 +375,14 @@ mod tests {
     fn quarterly_estimate_basic() {
         let rules = load_rules();
         let snap = sample_snapshot();
-        let est = compute_quarterly_estimate(&rules, &snap, Quarter::Q1);
+        let est = compute_quarterly_estimate(&rules, &snap, Quarter::Q4);
 
         assert_eq!(est.year, 2026);
-        assert_eq!(est.quarter, Quarter::Q1);
+        assert_eq!(est.quarter, Quarter::Q4);
         assert_eq!(est.ytd_gross_income.to_cents(), 10_000_000);
         assert_eq!(est.ytd_net_profit.to_cents(), 9_050_000);
+        assert_eq!(est.annualization_factor, Decimal::ONE);
+        assert_eq!(est.annualized_net_profit.to_cents(), 9_050_000);
 
         // SE tax base: $90,500 * 0.9235 = $83,576.75
         assert_eq!(est.se_tax_base.to_cents(), 8_357_675);
@@ -294,13 +396,45 @@ mod tests {
         // Adjusted income: $90,500 - $6,393.62 = $84,106.38
         assert_eq!(est.adjusted_net_income.to_cents(), 8_410_638);
 
-        // Income tax on $84,106.38 (spans 10%, 12%, 22% brackets)
-        assert!(est.estimated_income_tax.to_cents() > 0);
+        // Taxable income after the $16,100 standard deduction: $68,006.38
+        assert_eq!(est.standard_deduction.to_cents(), 1_610_000);
+        assert_eq!(est.taxable_income.to_cents(), 6_800_638);
 
-        // Total tax should be positive
-        assert!(est.total_tax_estimate.to_cents() > 0);
+        // Income tax: 1,240 + 4,560 + 22% × 17,606.38 = $9,673.40
+        assert_eq!(est.estimated_income_tax.to_cents(), 967_340);
 
-        // Due date for Q1
+        // Total: $12,787.24 + $9,673.40 = $22,460.64 → $22,461
+        assert_eq!(est.additional_medicare_tax.to_cents(), 0);
+        assert_eq!(est.total_tax_estimate.to_cents(), 2_246_100);
+        assert_eq!(est.quarterly_payment.to_cents(), 561_500);
+
+        assert_eq!(
+            est.payment_due_date,
+            NaiveDate::from_ymd_opt(2027, 1, 15).unwrap()
+        );
+    }
+
+    #[test]
+    fn q1_estimate_annualizes_first_quarter_profit() {
+        // $22,625 of Q1 profit annualizes (×4) to the same $90,500 as the
+        // full-year sample, so the projected tax must match it exactly.
+        let rules = load_rules();
+        let mut line_totals = BTreeMap::new();
+        line_totals.insert(ScheduleCLine::Line1, Money::from_cents(2_500_000));
+        line_totals.insert(ScheduleCLine::Line8, Money::from_cents(237_500));
+        let snap = LedgerSnapshot {
+            year: FiscalYear::new(2026),
+            through: NaiveDate::from_ymd_opt(2026, 3, 31).unwrap(),
+            line_totals,
+            prior_year_tax: None,
+        };
+        let est = compute_quarterly_estimate(&rules, &snap, Quarter::Q1);
+
+        assert_eq!(est.ytd_net_profit.to_cents(), 2_262_500);
+        assert_eq!(est.annualization_factor, Decimal::from(4));
+        assert_eq!(est.annualized_net_profit.to_cents(), 9_050_000);
+        assert_eq!(est.total_tax_estimate.to_cents(), 2_246_100);
+        assert_eq!(est.quarterly_payment.to_cents(), 561_500);
         assert_eq!(
             est.payment_due_date,
             NaiveDate::from_ymd_opt(2026, 4, 15).unwrap()
@@ -308,13 +442,50 @@ mod tests {
     }
 
     #[test]
+    fn annualization_factors() {
+        let y = FiscalYear::new(2026);
+        let d = |m, day| NaiveDate::from_ymd_opt(2026, m, day).unwrap();
+        // Completed installment periods use the IRS factors.
+        assert_eq!(
+            annualization_factor(y, Quarter::Q1, d(3, 31)),
+            Decimal::from(4)
+        );
+        assert_eq!(
+            annualization_factor(y, Quarter::Q2, d(5, 31)),
+            Decimal::new(24, 1)
+        );
+        assert_eq!(
+            annualization_factor(y, Quarter::Q3, d(8, 31)),
+            Decimal::new(15, 1)
+        );
+        assert_eq!(
+            annualization_factor(y, Quarter::Q4, d(12, 31)),
+            Decimal::ONE
+        );
+        // A period in progress is prorated by days elapsed (Jan 1..=Feb 14 = 45 days).
+        assert_eq!(
+            annualization_factor(y, Quarter::Q1, d(2, 14)),
+            Decimal::from(365) / Decimal::from(45)
+        );
+        // The window is capped at the installment period end, or today.
+        assert_eq!(estimate_through(y, Quarter::Q2, d(10, 1)), d(5, 31));
+        assert_eq!(estimate_through(y, Quarter::Q4, d(10, 1)), d(10, 1));
+    }
+
+    #[test]
+    fn no_se_tax_below_400_of_net_earnings() {
+        let rules = load_rules();
+        let mut line_totals = BTreeMap::new();
+        line_totals.insert(ScheduleCLine::Line1, Money::from_cents(30_000)); // $300
+        let est = compute_quarterly_estimate(&rules, &full_year(line_totals), Quarter::Q4);
+        assert_eq!(est.se_tax_amount.to_cents(), 0);
+        assert_eq!(est.total_tax_estimate.to_cents(), 0);
+    }
+
+    #[test]
     fn quarterly_estimate_zero_income() {
         let rules = load_rules();
-        let snap = LedgerSnapshot {
-            year: FiscalYear::new(2026),
-            line_totals: BTreeMap::new(),
-            prior_year_tax: None,
-        };
+        let snap = full_year(BTreeMap::new());
         let est = compute_quarterly_estimate(&rules, &snap, Quarter::Q2);
 
         assert_eq!(est.ytd_gross_income.to_cents(), 0);
@@ -329,11 +500,7 @@ mod tests {
         line_totals.insert(ScheduleCLine::Line1, Money::from_cents(500_000)); // $5,000 income
         line_totals.insert(ScheduleCLine::Line8, Money::from_cents(1_000_000)); // $10,000 expenses
 
-        let snap = LedgerSnapshot {
-            year: FiscalYear::new(2026),
-            line_totals,
-            prior_year_tax: None,
-        };
+        let snap = full_year(line_totals);
         let est = compute_quarterly_estimate(&rules, &snap, Quarter::Q3);
 
         // Net loss → no SE tax, no income tax
@@ -368,19 +535,19 @@ mod tests {
         // Very high income: $500,000
         let mut line_totals = BTreeMap::new();
         line_totals.insert(ScheduleCLine::Line1, Money::from_cents(50_000_000));
-        let snap = LedgerSnapshot {
-            year: FiscalYear::new(2026),
-            line_totals,
-            prior_year_tax: None,
-        };
-        let est = compute_quarterly_estimate(&rules, &snap, Quarter::Q1);
+        let snap = full_year(line_totals);
+        let est = compute_quarterly_estimate(&rules, &snap, Quarter::Q4);
 
         // SE base = $500,000 * 0.9235 = $461,750
-        // SS portion: capped at $176,100 * 0.124 = $21,836.40
+        // SS portion: capped at $184,500 * 0.124 = $22,878.00
         // Medicare: $461,750 * 0.029 = $13,390.75
-        // Total SE: $35,227.15
+        // Total SE: $36,268.75
         let se_base_cents = est.se_tax_base.to_cents();
         assert_eq!(se_base_cents, 46_175_000);
+        assert_eq!(est.se_tax_amount.to_cents(), 3_626_875);
+
+        // Additional Medicare: ($461,750 - $200,000) * 0.009 = $2,355.75
+        assert_eq!(est.additional_medicare_tax.to_cents(), 235_575);
 
         // Verify SE tax is less than uncapped amount
         let uncapped =

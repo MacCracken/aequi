@@ -194,12 +194,19 @@ impl DaimonClient {
 /// If daimon is unreachable, the task retries registration with backoff.
 /// The task shuts down when the `shutdown` receiver fires.
 pub fn spawn_daimon_task(
-    _state: Arc<ServerState>,
+    state: Arc<ServerState>,
     shutdown: watch::Receiver<bool>,
 ) -> tokio::task::JoinHandle<()> {
     let daimon_url =
         std::env::var("AEQUI_DAIMON_URL").unwrap_or_else(|_| DEFAULT_DAIMON_URL.to_string());
+    spawn_daimon_task_with_url(state, shutdown, daimon_url)
+}
 
+fn spawn_daimon_task_with_url(
+    _state: Arc<ServerState>,
+    shutdown: watch::Receiver<bool>,
+    daimon_url: String,
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let client = DaimonClient::new(&daimon_url);
         let session_id = uuid::Uuid::new_v4().to_string();
@@ -248,7 +255,9 @@ pub fn spawn_daimon_task(
         let agent_id = match agent_id {
             Some(id) => id,
             None => {
-                tracing::warn!("could not register with daimon after {MAX_REGISTER_RETRIES} attempts; daimon sync disabled");
+                tracing::warn!(
+                    "could not register with daimon after {MAX_REGISTER_RETRIES} attempts; daimon sync disabled"
+                );
                 return;
             }
         };
@@ -367,13 +376,13 @@ mod tests {
             oidc: None,
             stripe_webhook_secret: None,
             plaid_config: None,
+            plaid_sync_lock: Default::default(),
         });
 
         let (tx, rx) = watch::channel(false);
 
-        // Set a bogus URL so registration fails fast
-        std::env::set_var("AEQUI_DAIMON_URL", "http://127.0.0.1:1");
-        let handle = spawn_daimon_task(state, rx);
+        // Use a bogus URL so registration fails fast
+        let handle = spawn_daimon_task_with_url(state, rx, "http://127.0.0.1:1".to_string());
 
         // Signal shutdown after a brief delay
         tokio::time::sleep(Duration::from_millis(200)).await;

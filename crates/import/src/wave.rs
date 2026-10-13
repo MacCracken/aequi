@@ -1,10 +1,9 @@
-use chrono::NaiveDate;
-use rust_decimal::prelude::ToPrimitive;
-use rust_decimal::Decimal;
+use chrono::{Datelike, NaiveDate};
 use serde::{Deserialize, Serialize};
 use std::io::Read;
-use std::str::FromStr;
 use thiserror::Error;
+
+use crate::util::parse_amount_cents;
 
 /// A transaction imported from Wave Accounting CSV export.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -171,28 +170,19 @@ pub fn summarize(transactions: &[WaveTransaction]) -> WaveImportSummary {
 
 fn parse_wave_date(s: &str) -> Result<NaiveDate, WaveImportError> {
     let s = s.trim();
-    // Wave uses MM/DD/YYYY
+    // Wave uses MM/DD/YYYY; the separators make the ISO fallback unambiguous.
     NaiveDate::parse_from_str(s, "%m/%d/%Y")
         .or_else(|_| NaiveDate::parse_from_str(s, "%Y-%m-%d"))
-        .map_err(|_| WaveImportError::InvalidDate(s.to_string()))
+        .ok()
+        // chrono's %Y also accepts two-digit years ("01/15/24" → year 24).
+        .filter(|d| (1900..=9999).contains(&d.year()))
+        .ok_or_else(|| WaveImportError::InvalidDate(s.to_string()))
 }
 
+/// Amounts like "$1,234.56", "-99.99" or accounting-style "(50.00)" (negative).
+/// Anything else is rejected rather than stripped down to its digits.
 fn parse_wave_amount(s: &str) -> Result<i64, WaveImportError> {
-    // Strip all non-numeric characters except '.', '-', and digits
-    let cleaned: String = s
-        .chars()
-        .filter(|c| c.is_ascii_digit() || *c == '.' || *c == '-')
-        .collect();
-    if cleaned.is_empty() {
-        return Err(WaveImportError::InvalidAmount(s.trim().to_string()));
-    }
-    let dec = Decimal::from_str(&cleaned)
-        .map_err(|_| WaveImportError::InvalidAmount(s.trim().to_string()))?;
-    let cents = (dec * Decimal::from(100))
-        .round()
-        .to_i64()
-        .ok_or_else(|| WaveImportError::InvalidAmount(s.trim().to_string()))?;
-    Ok(cents)
+    parse_amount_cents(s).ok_or_else(|| WaveImportError::InvalidAmount(s.trim().to_string()))
 }
 
 #[cfg(test)]
@@ -295,5 +285,35 @@ mod tests {
         let data = wave_csv("1,01/01/2024,Acct,credit,-99.99,Refund,,\n");
         let txs = parse_wave_csv(data.as_bytes()).unwrap();
         assert_eq!(txs[0].amount_cents, -9999);
+    }
+
+    #[test]
+    fn parenthesized_amount_is_negative() {
+        // Used to strip the parentheses and import +5000.
+        let data = wave_csv("1,01/01/2024,Acct,debit,(50.00),Refund,,\n");
+        let txs = parse_wave_csv(data.as_bytes()).unwrap();
+        assert_eq!(txs[0].amount_cents, -5000);
+        assert_eq!(parse_wave_amount("($1,234.56)").unwrap(), -123456);
+    }
+
+    #[test]
+    fn garbage_amount_rejected() {
+        for bad in ["12abc", "abc", "", "1-2", "5.00 USD"] {
+            assert!(parse_wave_amount(bad).is_err(), "{bad}");
+        }
+        let data = wave_csv("1,01/01/2024,Acct,debit,12abc,X,,\n");
+        assert!(matches!(
+            parse_wave_csv(data.as_bytes()),
+            Err(WaveImportError::InvalidAmount(_))
+        ));
+    }
+
+    #[test]
+    fn two_digit_year_rejected() {
+        assert!(parse_wave_date("01/15/24").is_err());
+        assert_eq!(
+            parse_wave_date("2024-01-15").unwrap(),
+            NaiveDate::from_ymd_opt(2024, 1, 15).unwrap()
+        );
     }
 }

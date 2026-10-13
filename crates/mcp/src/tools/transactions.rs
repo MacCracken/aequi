@@ -3,62 +3,85 @@ use serde_json::json;
 use aequi_core::{Money, TransactionLine, UnvalidatedTransaction, ValidatedTransaction};
 
 use crate::protocol::{ToolDefinition, ToolResult};
-use crate::tools::ToolRegistry;
+use crate::tools::args::{Args, ToolError, check_date_order};
+use crate::tools::{Access, ToolRegistry};
+
+const MAX_LIMIT: i64 = 1000;
 
 pub fn register(registry: &mut ToolRegistry) {
     registry.register(
         ToolDefinition {
             name: "aequi_get_transactions".to_string(),
-            description: "List recent transactions, optionally filtered by date range".to_string(),
+            description: "List recent transactions, newest first, optionally filtered by date range (inclusive)".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "start_date": { "type": "string", "description": "YYYY-MM-DD" },
-                    "end_date": { "type": "string", "description": "YYYY-MM-DD" },
-                    "limit": { "type": "integer", "default": 50 }
+                    "start_date": { "type": "string", "description": "YYYY-MM-DD (inclusive)" },
+                    "end_date": { "type": "string", "description": "YYYY-MM-DD (inclusive)" },
+                    "limit": { "type": "integer", "default": 50, "minimum": 1, "maximum": MAX_LIMIT }
                 }
             }),
         },
-        false,
+        Access::Read,
         |db, params| async move {
-            let limit = params.get("limit").and_then(|v| v.as_i64()).unwrap_or(50);
+            let args = Args::new(&params);
+            let start = args.opt_date("start_date")?;
+            let end = args.opt_date("end_date")?;
+            if let (Some(s), Some(e)) = (start, end) {
+                check_date_order(s, e)?;
+            }
+            let limit = args.opt_i64("limit")?.unwrap_or(50);
+            if !(1..=MAX_LIMIT).contains(&limit) {
+                return Err(ToolError(format!(
+                    "Argument limit must be between 1 and {MAX_LIMIT}, got {limit}"
+                )));
+            }
+
+            // Unset bounds bind NULL and drop out of the filter.
             let rows = sqlx::query_as::<_, (i64, String, String, Option<String>, i64)>(
-                "SELECT id, date, description, memo, balanced_total_cents FROM transactions ORDER BY date DESC LIMIT ?"
+                "SELECT id, date, description, memo, balanced_total_cents FROM transactions \
+                 WHERE (?1 IS NULL OR date >= ?1) AND (?2 IS NULL OR date <= ?2) \
+                 ORDER BY date DESC, id DESC LIMIT ?3",
             )
+            .bind(start)
+            .bind(end)
             .bind(limit)
             .fetch_all(&db)
-            .await;
+            .await?;
 
-            match rows {
-                Ok(rows) => {
-                    let txs: Vec<_> = rows.iter().map(|r| json!({
+            let txs: Vec<_> = rows
+                .iter()
+                .map(|r| {
+                    json!({
                         "id": r.0, "date": r.1, "description": r.2,
                         "memo": r.3, "balanced_total_cents": r.4
-                    })).collect();
-                    ToolResult::text(serde_json::to_string_pretty(&txs).unwrap())
-                }
-                Err(e) => ToolResult::error(e.to_string()),
-            }
+                    })
+                })
+                .collect();
+            Ok(ToolResult::json(&txs))
         },
     );
 
     registry.register(
         ToolDefinition {
             name: "aequi_create_transaction".to_string(),
-            description: "Create a double-entry transaction".to_string(),
+            description: "Create a balanced double-entry transaction. Each line has either a debit or a credit (whole cents, positive); total debits must equal total credits".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "date": { "type": "string", "description": "YYYY-MM-DD" },
                     "description": { "type": "string" },
+                    "memo": { "type": "string" },
                     "lines": {
                         "type": "array",
+                        "minItems": 2,
                         "items": {
                             "type": "object",
                             "properties": {
                                 "account_code": { "type": "string" },
-                                "debit_cents": { "type": "integer" },
-                                "credit_cents": { "type": "integer" }
+                                "debit_cents": { "type": "integer", "minimum": 0 },
+                                "credit_cents": { "type": "integer", "minimum": 0 },
+                                "memo": { "type": "string" }
                             },
                             "required": ["account_code", "debit_cents", "credit_cents"]
                         }
@@ -67,73 +90,49 @@ pub fn register(registry: &mut ToolRegistry) {
                 "required": ["date", "description", "lines"]
             }),
         },
-        true,
+        Access::Write,
         |db, params| async move {
-            let date_str = params.get("date").and_then(|v| v.as_str()).unwrap_or("");
-            let date = match chrono::NaiveDate::parse_from_str(date_str, "%Y-%m-%d") {
-                Ok(d) => d,
-                Err(e) => return ToolResult::error(format!("Invalid date: {e}")),
-            };
-
-            let description = params.get("description").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let lines_val = match params.get("lines").and_then(|v| v.as_array()) {
-                Some(l) => l,
-                None => return ToolResult::error("lines is required".to_string()),
-            };
+            let args = Args::new(&params);
+            let date_str = args.date("date")?;
+            let date = chrono::NaiveDate::parse_from_str(date_str, "%Y-%m-%d")
+                .map_err(|e| ToolError(format!("Invalid date: {e}")))?;
+            let description = args.str("description")?.to_string();
+            let memo = args.opt_str("memo")?.map(str::to_string);
 
             let mut lines = Vec::new();
-            for line in lines_val {
-                let code = line.get("account_code").and_then(|v| v.as_str()).unwrap_or("");
-                let account = match aequi_storage::get_account_by_code(&db, code).await {
-                    Ok(Some(a)) => a,
-                    Ok(None) => return ToolResult::error(format!("Account {code} not found")),
-                    Err(e) => return ToolResult::error(e.to_string()),
-                };
-                let debit = line.get("debit_cents").and_then(|v| v.as_i64()).unwrap_or(0);
-                let credit = line.get("credit_cents").and_then(|v| v.as_i64()).unwrap_or(0);
+            for (i, line) in args.array("lines")?.iter().enumerate() {
+                let line = Args::object(line, format!("lines[{i}]"))?;
+                let code = line.str("account_code")?;
+                let account = aequi_storage::get_account_by_code(&db, code)
+                    .await?
+                    .ok_or_else(|| ToolError(format!("Account {code} not found")))?;
+                if account.is_archived {
+                    return Err(ToolError(format!("Account {code} is archived")));
+                }
+                let account_id = account
+                    .id
+                    .ok_or_else(|| ToolError(format!("Account {code} has no id")))?;
                 lines.push(TransactionLine {
-                    account_id: account.id.unwrap(),
-                    debit: Money::from_cents(debit),
-                    credit: Money::from_cents(credit),
-                    memo: None,
+                    account_id,
+                    debit: Money::from_cents(line.cents("debit_cents")?),
+                    credit: Money::from_cents(line.cents("credit_cents")?),
+                    memo: line.opt_str("memo")?.map(str::to_string),
                 });
             }
 
-            let tx = UnvalidatedTransaction { date, description, lines, memo: None };
-            let validated = match ValidatedTransaction::validate(tx) {
-                Ok(v) => v,
-                Err(e) => return ToolResult::error(e.to_string()),
+            let tx = UnvalidatedTransaction {
+                date,
+                description,
+                lines,
+                memo,
             };
+            let validated = ValidatedTransaction::validate(tx)
+                .map_err(|e| ToolError(format!("Invalid transaction: {e}")))?;
 
-            let row = sqlx::query_as::<_, (i64,)>(
-                "INSERT INTO transactions (date, description, memo, balanced_total_cents) VALUES (?, ?, ?, ?) RETURNING id"
-            )
-            .bind(validated.date.to_string())
-            .bind(&validated.description)
-            .bind(&validated.memo)
-            .bind(validated.balanced_total.to_cents())
-            .fetch_one(&db)
-            .await;
-
-            let id = match row {
-                Ok(r) => r.0,
-                Err(e) => return ToolResult::error(e.to_string()),
-            };
-
-            for line in &validated.lines {
-                let _ = sqlx::query(
-                    "INSERT INTO transaction_lines (transaction_id, account_id, debit_cents, credit_cents, memo) VALUES (?, ?, ?, ?, ?)"
-                )
-                .bind(id)
-                .bind(line.account_id.0)
-                .bind(line.debit.to_cents())
-                .bind(line.credit.to_cents())
-                .bind(&line.memo)
-                .execute(&db)
-                .await;
-            }
-
-            ToolResult::text(json!({ "id": id, "status": "created" }).to_string())
+            let id = insert_transaction(&db, &validated).await?;
+            Ok(ToolResult::text(
+                json!({ "id": id, "status": "created" }).to_string(),
+            ))
         },
     );
 
@@ -149,60 +148,99 @@ pub fn register(registry: &mut ToolRegistry) {
                 }
             }),
         },
-        false,
+        Access::Read,
         |db, params| async move {
-            let today = chrono::Utc::now().date_naive();
+            let args = Args::new(&params);
+            let today = chrono::Local::now().date_naive();
             let default_start = format!("{}-01-01", today.format("%Y"));
-            let start = params.get("start_date").and_then(|v| v.as_str()).unwrap_or(&default_start);
             let today_str = today.to_string();
-            let end = params.get("end_date").and_then(|v| v.as_str()).unwrap_or(&today_str);
+            let start = args.opt_date("start_date")?.unwrap_or(&default_start);
+            let end = args.opt_date("end_date")?.unwrap_or(&today_str);
+            check_date_order(start, end)?;
 
-            let income_rows = sqlx::query_as::<_, (String, String, i64)>(
+            let income = sqlx::query_as::<_, (String, String, i64)>(
                 r#"SELECT a.code, a.name, COALESCE(SUM(tl.credit_cents - tl.debit_cents), 0) AS net
                    FROM accounts a
                    JOIN transaction_lines tl ON tl.account_id = a.id
                    JOIN transactions t ON t.id = tl.transaction_id
                    WHERE a.account_type = 'Income' AND t.date >= ? AND t.date <= ?
-                   GROUP BY a.id ORDER BY a.code"#
+                   GROUP BY a.id ORDER BY a.code"#,
             )
-            .bind(start).bind(end)
-            .fetch_all(&db).await;
+            .bind(start)
+            .bind(end)
+            .fetch_all(&db)
+            .await?;
 
-            let expense_rows = sqlx::query_as::<_, (String, String, i64)>(
+            let expenses = sqlx::query_as::<_, (String, String, i64)>(
                 r#"SELECT a.code, a.name, COALESCE(SUM(tl.debit_cents - tl.credit_cents), 0) AS net
                    FROM accounts a
                    JOIN transaction_lines tl ON tl.account_id = a.id
                    JOIN transactions t ON t.id = tl.transaction_id
                    WHERE a.account_type = 'Expense' AND t.date >= ? AND t.date <= ?
-                   GROUP BY a.id ORDER BY a.code"#
+                   GROUP BY a.id ORDER BY a.code"#,
             )
-            .bind(start).bind(end)
-            .fetch_all(&db).await;
-
-            let (income, expenses) = match (income_rows, expense_rows) {
-                (Ok(i), Ok(e)) => (i, e),
-                (Err(e), _) | (_, Err(e)) => return ToolResult::error(e.to_string()),
-            };
+            .bind(start)
+            .bind(end)
+            .fetch_all(&db)
+            .await?;
 
             let total_income: i64 = income.iter().map(|r| r.2).sum();
             let total_expenses: i64 = expenses.iter().map(|r| r.2).sum();
             let net_profit = total_income - total_expenses;
 
-            let income_lines: Vec<_> = income.iter().map(|r| json!({
-                "code": r.0, "name": r.1, "amount_cents": r.2
-            })).collect();
-            let expense_lines: Vec<_> = expenses.iter().map(|r| json!({
-                "code": r.0, "name": r.1, "amount_cents": r.2
-            })).collect();
+            let income_lines: Vec<_> = income
+                .iter()
+                .map(|r| json!({ "code": r.0, "name": r.1, "amount_cents": r.2 }))
+                .collect();
+            let expense_lines: Vec<_> = expenses
+                .iter()
+                .map(|r| json!({ "code": r.0, "name": r.1, "amount_cents": r.2 }))
+                .collect();
 
-            ToolResult::text(serde_json::to_string_pretty(&json!({
+            Ok(ToolResult::json(&json!({
                 "period": { "start": start, "end": end },
                 "income": income_lines,
                 "expenses": expense_lines,
                 "total_income_cents": total_income,
                 "total_expenses_cents": total_expenses,
                 "net_profit_cents": net_profit
-            })).unwrap())
+            })))
         },
     );
+}
+
+/// Insert the header and all lines in one database transaction, so a failed
+/// line insert can't leave an unbalanced header behind.
+async fn insert_transaction(
+    db: &aequi_storage::DbPool,
+    tx: &ValidatedTransaction,
+) -> Result<i64, sqlx::Error> {
+    let mut db_tx = db.begin().await?;
+
+    let (id,) = sqlx::query_as::<_, (i64,)>(
+        "INSERT INTO transactions (date, description, memo, balanced_total_cents) VALUES (?, ?, ?, ?) RETURNING id",
+    )
+    .bind(tx.date.to_string())
+    .bind(&tx.description)
+    .bind(&tx.memo)
+    .bind(tx.balanced_total.to_cents())
+    .fetch_one(&mut *db_tx)
+    .await?;
+
+    for line in &tx.lines {
+        sqlx::query(
+            "INSERT INTO transaction_lines (transaction_id, account_id, debit_cents, credit_cents, memo) VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(id)
+        .bind(line.account_id.0)
+        .bind(line.debit.to_cents())
+        .bind(line.credit.to_cents())
+        .bind(&line.memo)
+        .execute(&mut *db_tx)
+        .await?;
+    }
+
+    // Dropping `db_tx` on any early return above rolls everything back.
+    db_tx.commit().await?;
+    Ok(id)
 }

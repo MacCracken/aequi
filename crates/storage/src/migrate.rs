@@ -39,16 +39,38 @@ fn all_migrations() -> Vec<Migration> {
             up_sql: include_str!("migrations/V002__indexes_and_constraints.sql"),
             down_sql: include_str!("migrations/V002__indexes_and_constraints.down.sql"),
         },
+        Migration {
+            version: 3,
+            name: "tax_installments_and_schedule_c_lines",
+            up_sql: include_str!("migrations/V003__tax_installments_and_schedule_c_lines.sql"),
+            down_sql: include_str!(
+                "migrations/V003__tax_installments_and_schedule_c_lines.down.sql"
+            ),
+        },
     ]
 }
 
-/// Compute a simple checksum for migration content.
+/// SHA-256 of the migration SQL with line endings normalized, so the value is
+/// the same on every platform and every Rust release.
 fn checksum(sql: &str) -> String {
+    use sha2::{Digest, Sha256};
+    hex::encode(Sha256::digest(sql.replace("\r\n", "\n").as_bytes()))
+}
+
+/// Checksums written by earlier builds, which used `DefaultHasher` (whose
+/// algorithm is unspecified across Rust releases) over the raw file, so a
+/// Windows build with CRLF checkouts stored a different value. Accepting these
+/// lets existing databases upgrade instead of failing with a mismatch.
+fn legacy_checksums(sql: &str) -> [String; 2] {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
-    let mut hasher = DefaultHasher::new();
-    sql.hash(&mut hasher);
-    format!("{:016x}", hasher.finish())
+    let lf = sql.replace("\r\n", "\n");
+    let crlf = lf.replace('\n', "\r\n");
+    [lf, crlf].map(|variant| {
+        let mut hasher = DefaultHasher::new();
+        variant.as_str().hash(&mut hasher);
+        format!("{:016x}", hasher.finish())
+    })
 }
 
 /// Ensure the schema_versions tracking table exists.
@@ -125,31 +147,43 @@ pub async fn run_migrations(pool: &DbPool) -> Result<usize, sqlx::Error> {
             if let Some(existing) = applied.iter().find(|v| v.version == migration.version) {
                 let expected = checksum(migration.up_sql);
                 if existing.checksum != expected {
-                    return Err(sqlx::Error::Protocol(format!(
-                        "Migration V{:03} ({}) checksum mismatch: expected {}, found {}. \
-                         The migration file has been modified after it was applied.",
-                        migration.version, migration.name, expected, existing.checksum
-                    )));
+                    if legacy_checksums(migration.up_sql).contains(&existing.checksum) {
+                        // Same SQL, old checksum format: re-stamp it.
+                        sqlx::query("UPDATE schema_versions SET checksum = ? WHERE version = ?")
+                            .bind(&expected)
+                            .bind(migration.version)
+                            .execute(pool)
+                            .await?;
+                    } else {
+                        return Err(sqlx::Error::Protocol(format!(
+                            "Migration V{:03} ({}) checksum mismatch: expected {}, found {}. \
+                             The migration file has been modified after it was applied.",
+                            migration.version, migration.name, expected, existing.checksum
+                        )));
+                    }
                 }
             }
             continue;
         }
 
-        // Execute each statement in the migration
+        // Apply the statements and record the version atomically, so a failure
+        // part-way (e.g. after an ALTER TABLE) can't leave a migration that is
+        // half applied and then fails when re-run.
+        let mut tx = pool.begin().await?;
         for statement in split_statements(migration.up_sql) {
             let trimmed = statement.trim();
             if !trimmed.is_empty() {
-                sqlx::query(trimmed).execute(pool).await?;
+                sqlx::query(trimmed).execute(&mut *tx).await?;
             }
         }
 
-        // Record the migration
         sqlx::query("INSERT INTO schema_versions (version, name, checksum) VALUES (?, ?, ?)")
             .bind(migration.version)
             .bind(migration.name)
             .bind(checksum(migration.up_sql))
-            .execute(pool)
+            .execute(&mut *tx)
             .await?;
+        tx.commit().await?;
 
         count += 1;
     }
@@ -183,17 +217,19 @@ pub async fn rollback_last(pool: &DbPool) -> Result<Option<i64>, sqlx::Error> {
             ))
         })?;
 
+    let mut tx = pool.begin().await?;
     for statement in split_statements(migration.down_sql) {
         let trimmed = statement.trim();
         if !trimmed.is_empty() {
-            sqlx::query(trimmed).execute(pool).await?;
+            sqlx::query(trimmed).execute(&mut *tx).await?;
         }
     }
 
     sqlx::query("DELETE FROM schema_versions WHERE version = ?")
         .bind(latest.version)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
+    tx.commit().await?;
 
     Ok(Some(latest.version))
 }
@@ -474,5 +510,103 @@ mod tests {
     fn checksum_deterministic() {
         let sql = "CREATE TABLE test (id INT);";
         assert_eq!(checksum(sql), checksum(sql));
+    }
+
+    #[test]
+    fn checksum_ignores_line_endings() {
+        assert_eq!(
+            checksum("CREATE TABLE t (id INT);\nSELECT 1;\n"),
+            checksum("CREATE TABLE t (id INT);\r\nSELECT 1;\r\n")
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_checksums_are_restamped() {
+        let pool = test_pool().await;
+        run_migrations(&pool).await.unwrap();
+
+        // Simulate a database written by a build that used DefaultHasher.
+        let v001 = &all_migrations()[0];
+        let legacy = legacy_checksums(v001.up_sql)[0].clone();
+        sqlx::query("UPDATE schema_versions SET checksum = ? WHERE version = 1")
+            .bind(&legacy)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        // Must not fail with a checksum mismatch, and must upgrade the value.
+        run_migrations(&pool).await.unwrap();
+        let (stored,): (String,) =
+            sqlx::query_as("SELECT checksum FROM schema_versions WHERE version = 1")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(stored, checksum(v001.up_sql));
+    }
+
+    #[tokio::test]
+    async fn modified_migration_still_rejected() {
+        let pool = test_pool().await;
+        run_migrations(&pool).await.unwrap();
+        sqlx::query("UPDATE schema_versions SET checksum = 'deadbeef' WHERE version = 1")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(run_migrations(&pool).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn v003_retags_only_default_schedule_c_lines() {
+        let pool = test_pool().await;
+        ensure_version_table(&pool).await.unwrap();
+        // Apply V001-V002 only, seed accounts with the old tags, then V003.
+        for m in &all_migrations()[..2] {
+            for stmt in super::split_statements(m.up_sql) {
+                if !stmt.trim().is_empty() {
+                    sqlx::query(stmt.trim()).execute(&pool).await.unwrap();
+                }
+            }
+            sqlx::query("INSERT INTO schema_versions (version, name, checksum) VALUES (?, ?, ?)")
+                .bind(m.version)
+                .bind(m.name)
+                .bind(checksum(m.up_sql))
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        for (code, name, tag) in [
+            ("4010", "Product Sales", "line_2"),
+            ("5060", "Insurance", "line_14"),
+            ("5130", "Utilities", "line_27"), // customized by the user
+        ] {
+            sqlx::query(
+                "INSERT INTO accounts (code, name, account_type, schedule_c_line) VALUES (?, ?, ?, ?)",
+            )
+            .bind(code)
+            .bind(name)
+            .bind(if code == "4010" { "Income" } else { "Expense" })
+            .bind(tag)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        run_migrations(&pool).await.unwrap();
+
+        let tag = |code: &'static str| {
+            let pool = pool.clone();
+            async move {
+                let (t,): (String,) =
+                    sqlx::query_as("SELECT schedule_c_line FROM accounts WHERE code = ?")
+                        .bind(code)
+                        .fetch_one(&pool)
+                        .await
+                        .unwrap();
+                t
+            }
+        };
+        assert_eq!(tag("4010").await, "line_1");
+        assert_eq!(tag("5060").await, "line_15");
+        assert_eq!(tag("5130").await, "line_27");
     }
 }

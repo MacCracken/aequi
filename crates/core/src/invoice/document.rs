@@ -65,11 +65,21 @@ impl Invoice {
             .fold(Money::zero(), |a, b| a + b)
     }
 
+    /// Discount applied to the subtotal, clamped to `0..=subtotal` so an
+    /// oversized discount can't produce a negative total or negative tax.
     pub fn discount_amount(&self) -> Money {
-        match &self.discount {
-            Some(Discount::Percentage(pct)) => self.subtotal() * *pct,
+        let subtotal = self.subtotal();
+        let raw = match &self.discount {
+            Some(Discount::Percentage(pct)) => subtotal * *pct,
             Some(Discount::Flat(amount)) => *amount,
             None => Money::zero(),
+        };
+        if raw.is_negative() || subtotal.is_negative() {
+            Money::zero()
+        } else if raw > subtotal {
+            subtotal
+        } else {
+            raw
         }
     }
 
@@ -220,5 +230,21 @@ mod tests {
             terms: None,
         };
         assert_eq!(inv.total().to_cents(), 0);
+    }
+
+    #[test]
+    fn oversized_discounts_are_clamped() {
+        let mut inv = sample_invoice();
+        let subtotal = inv.subtotal();
+        inv.discount = Some(Discount::Flat(subtotal + Money::from_cents(100)));
+        assert_eq!(inv.discount_amount(), subtotal);
+        assert!(!inv.total().is_negative());
+        assert!(!inv.tax_amount().is_negative());
+
+        inv.discount = Some(Discount::Percentage(Decimal::from(10)));
+        assert_eq!(inv.discount_amount(), subtotal);
+
+        inv.discount = Some(Discount::Flat(Money::from_cents(-500)));
+        assert_eq!(inv.discount_amount(), Money::zero());
     }
 }

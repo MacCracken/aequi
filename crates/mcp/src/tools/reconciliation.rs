@@ -1,7 +1,8 @@
 use serde_json::json;
 
 use crate::protocol::{ToolDefinition, ToolResult};
-use crate::tools::ToolRegistry;
+use crate::tools::args::{Args, ToolError, check_date_order, not_found};
+use crate::tools::{Access, ToolRegistry};
 
 pub fn register(registry: &mut ToolRegistry) {
     registry.register(
@@ -12,38 +13,34 @@ pub fn register(registry: &mut ToolRegistry) {
                 "type": "object",
                 "properties": {
                     "account_id": { "type": "integer" },
-                    "start_date": { "type": "string" },
-                    "end_date": { "type": "string" },
+                    "start_date": { "type": "string", "description": "YYYY-MM-DD" },
+                    "end_date": { "type": "string", "description": "YYYY-MM-DD" },
                     "statement_balance_cents": { "type": "integer" }
                 },
                 "required": ["account_id", "start_date", "end_date", "statement_balance_cents"]
             }),
         },
-        true,
+        Access::Write,
         |db, params| async move {
-            let account_id = params
-                .get("account_id")
-                .and_then(|v| v.as_i64())
-                .unwrap_or(0);
-            let start = params
-                .get("start_date")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let end = params
-                .get("end_date")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let balance = params
-                .get("statement_balance_cents")
-                .and_then(|v| v.as_i64())
-                .unwrap_or(0);
+            let args = Args::new(&params);
+            let account_id = args.id("account_id")?;
+            let start = args.date("start_date")?;
+            let end = args.date("end_date")?;
+            check_date_order(start, end)?;
+            let balance = args.cents("statement_balance_cents")?;
 
-            match aequi_storage::create_reconciliation_session(&db, account_id, start, end, balance)
-                .await
-            {
-                Ok(id) => ToolResult::text(json!({ "session_id": id }).to_string()),
-                Err(e) => ToolResult::error(e.to_string()),
+            let exists = sqlx::query_as::<_, (i64,)>("SELECT id FROM accounts WHERE id = ?")
+                .bind(account_id)
+                .fetch_optional(&db)
+                .await?;
+            if exists.is_none() {
+                return Err(ToolError(format!("Account {account_id} not found")));
             }
+
+            let id =
+                aequi_storage::create_reconciliation_session(&db, account_id, start, end, balance)
+                    .await?;
+            Ok(ToolResult::text(json!({ "session_id": id }).to_string()))
         },
     );
 
@@ -57,16 +54,21 @@ pub fn register(registry: &mut ToolRegistry) {
                 "required": ["session_id"]
             }),
         },
-        false,
+        Access::Read,
         |db, params| async move {
-            let session_id = params
-                .get("session_id")
-                .and_then(|v| v.as_i64())
-                .unwrap_or(0);
-            match aequi_storage::get_reconciliation_items(&db, session_id).await {
-                Ok(items) => ToolResult::text(serde_json::to_string_pretty(&items).unwrap()),
-                Err(e) => ToolResult::error(e.to_string()),
+            let session_id = Args::new(&params).id("session_id")?;
+            let exists =
+                sqlx::query_as::<_, (i64,)>("SELECT id FROM reconciliation_sessions WHERE id = ?")
+                    .bind(session_id)
+                    .fetch_optional(&db)
+                    .await?;
+            if exists.is_none() {
+                return Err(ToolError(format!(
+                    "Reconciliation session {session_id} not found"
+                )));
             }
+            let items = aequi_storage::get_reconciliation_items(&db, session_id).await?;
+            Ok(ToolResult::json(&items))
         },
     );
 
@@ -83,15 +85,16 @@ pub fn register(registry: &mut ToolRegistry) {
                 "required": ["item_id", "notes"]
             }),
         },
-        true,
+        Access::Write,
         |db, params| async move {
-            let item_id = params.get("item_id").and_then(|v| v.as_i64()).unwrap_or(0);
-            let notes = params.get("notes").and_then(|v| v.as_str()).unwrap_or("");
+            let args = Args::new(&params);
+            let item_id = args.id("item_id")?;
+            let notes = args.str("notes")?;
 
-            match aequi_storage::resolve_reconciliation_item(&db, item_id, notes).await {
-                Ok(()) => ToolResult::text("Item resolved".to_string()),
-                Err(e) => ToolResult::error(e.to_string()),
-            }
+            aequi_storage::resolve_reconciliation_item(&db, item_id, notes)
+                .await
+                .map_err(not_found(format!("Reconciliation item {item_id}")))?;
+            Ok(ToolResult::text("Item resolved".to_string()))
         },
     );
 }

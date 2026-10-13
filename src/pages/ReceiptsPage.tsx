@@ -1,69 +1,82 @@
 import { useEffect, useState, useCallback, useRef, useMemo } from "react";
+import { convertFileSrc } from "@tauri-apps/api/core";
 import {
   getPendingReceipts,
   getTransactions,
   approveReceipt,
   rejectReceipt,
-  ingestReceipt,
+  errorMessage,
   type ReceiptOutput,
   type TransactionOutput,
 } from "../lib/api";
 import { formatCents, formatDate, confidenceLabel, confidenceColor } from "../lib/format";
 import { CameraCapture } from "../components/CameraCapture";
-import { writeCapturedFile } from "../lib/capture";
+import { ingestCapturedFile } from "../lib/capture";
 import { useToast } from "../components/Toast";
 
 export function ReceiptsPage() {
   const [receipts, setReceipts] = useState<ReceiptOutput[]>([]);
   const [transactions, setTransactions] = useState<TransactionOutput[]>([]);
   const [selected, setSelected] = useState<ReceiptOutput | null>(null);
+  const [capturing, setCapturing] = useState(false);
+  const [actionPending, setActionPending] = useState(false);
   const { toast } = useToast();
-  const toastRef = useRef(toast);
-  toastRef.current = toast;
+  // Latest refresh wins; bumped on unmount so late responses are dropped.
+  const refreshIdRef = useRef(0);
+  const actionPendingRef = useRef(false);
 
   const refresh = useCallback(() => {
+    const id = ++refreshIdRef.current;
     getPendingReceipts()
-      .then(setReceipts)
-      .catch((e) => toastRef.current("error", String(e)));
+      .then((r) => { if (id === refreshIdRef.current) setReceipts(r); })
+      .catch((e) => { if (id === refreshIdRef.current) toast("error", errorMessage(e)); });
     getTransactions()
-      .then(setTransactions)
-      .catch((e) => toastRef.current("error", String(e)));
-  }, []);
+      .then((t) => { if (id === refreshIdRef.current) setTransactions(t); })
+      .catch((e) => { if (id === refreshIdRef.current) toast("error", errorMessage(e)); });
+  }, [toast]);
 
   useEffect(() => {
     refresh();
+    const ref = refreshIdRef;
+    return () => { ref.current++; };
   }, [refresh]);
 
-  async function handleApprove(id: number, transactionId?: number) {
+  async function runAction(action: () => Promise<void>, successText: string) {
+    if (actionPendingRef.current) return;
+    actionPendingRef.current = true;
+    setActionPending(true);
     try {
-      await approveReceipt(id, transactionId);
+      await action();
       setSelected(null);
       refresh();
-      toast("success", "Receipt approved");
+      toast("success", successText);
     } catch (e) {
-      toast("error", String(e));
+      toast("error", errorMessage(e));
+    } finally {
+      actionPendingRef.current = false;
+      setActionPending(false);
     }
   }
 
-  async function handleReject(id: number) {
-    try {
-      await rejectReceipt(id);
-      setSelected(null);
-      refresh();
-      toast("success", "Receipt rejected");
-    } catch (e) {
-      toast("error", String(e));
-    }
+  function handleApprove(id: number, transactionId?: number) {
+    return runAction(() => approveReceipt(id, transactionId), "Receipt approved");
+  }
+
+  function handleReject(id: number) {
+    return runAction(() => rejectReceipt(id), "Receipt rejected");
   }
 
   async function handleCapture(file: File) {
+    if (capturing) return;
+    setCapturing(true);
     try {
-      const filePath = await writeCapturedFile(file);
-      await ingestReceipt(filePath);
+      await ingestCapturedFile(file);
       refresh();
       toast("success", "Receipt captured");
     } catch (e) {
-      toast("error", String(e));
+      toast("error", errorMessage(e));
+    } finally {
+      setCapturing(false);
     }
   }
 
@@ -71,7 +84,7 @@ export function ReceiptsPage() {
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <h2 className="text-xl font-semibold">Receipt Review Queue</h2>
-        <CameraCapture onCapture={handleCapture} />
+        <CameraCapture onCapture={handleCapture} busy={capturing} />
       </div>
 
       {receipts.length === 0 ? (
@@ -112,6 +125,7 @@ export function ReceiptsPage() {
               <ReceiptDetail
                 receipt={selected}
                 transactions={transactions}
+                busy={actionPending}
                 onApprove={handleApprove}
                 onReject={handleReject}
               />
@@ -130,23 +144,27 @@ export function ReceiptsPage() {
 function ReceiptDetail({
   receipt,
   transactions,
+  busy,
   onApprove,
   onReject,
 }: {
   receipt: ReceiptOutput;
   transactions: TransactionOutput[];
+  busy: boolean;
   onApprove: (id: number, transactionId?: number) => void;
   onReject: (id: number) => void;
 }) {
   const [linkedTxId, setLinkedTxId] = useState<number | undefined>(undefined);
   const [search, setSearch] = useState("");
   const [showPicker, setShowPicker] = useState(false);
+  const [imageFailed, setImageFailed] = useState(false);
 
-  // Reset link state when receipt changes
+  // Reset per-receipt state when receipt changes
   useEffect(() => {
     setLinkedTxId(undefined);
     setSearch("");
     setShowPicker(false);
+    setImageFailed(false);
   }, [receipt.id]);
 
   const filtered = useMemo(() => {
@@ -164,21 +182,24 @@ function ReceiptDetail({
     ? transactions.find((tx) => tx.id === linkedTxId)
     : undefined;
 
-  const isImage = receipt.attachment_path.match(/\.(png|jpg|jpeg|gif|webp)$/i);
+  const isImage = /\.(png|jpe?g|gif|webp|bmp)$/i.test(receipt.attachment_path);
+  const fileName = receipt.attachment_path.split(/[\\/]/).pop();
 
   return (
     <div className="bg-surface rounded-lg border border-border overflow-hidden">
       {/* Attachment viewer */}
       <div className="bg-bg border-b border-border p-4 flex items-center justify-center min-h-[200px] md:min-h-[300px]">
-        {isImage ? (
+        {isImage && !imageFailed ? (
           <img
-            src={`asset://localhost/${receipt.attachment_path}`}
+            src={convertFileSrc(receipt.attachment_path)}
             alt="Receipt"
+            onError={() => setImageFailed(true)}
             className="max-h-[400px] object-contain rounded"
           />
         ) : (
           <div className="text-text-muted text-sm">
-            Attachment: {receipt.attachment_path.split("/").pop()}
+            {imageFailed ? "Could not load image: " : "Attachment: "}
+            {fileName}
           </div>
         )}
       </div>
@@ -268,13 +289,15 @@ function ReceiptDetail({
         <div className="flex gap-2 pt-2">
           <button
             onClick={() => onApprove(receipt.id, linkedTxId)}
-            className="px-4 py-2 rounded-md text-sm font-medium text-white bg-success hover:bg-success/90 transition-colors"
+            disabled={busy}
+            className="px-4 py-2 rounded-md text-sm font-medium text-white bg-success hover:bg-success/90 transition-colors disabled:opacity-50"
           >
             {linkedTxId != null ? "Approve & Link" : "Approve"}
           </button>
           <button
             onClick={() => onReject(receipt.id)}
-            className="px-4 py-2 rounded-md text-sm font-medium text-white bg-danger hover:bg-danger/90 transition-colors"
+            disabled={busy}
+            className="px-4 py-2 rounded-md text-sm font-medium text-white bg-danger hover:bg-danger/90 transition-colors disabled:opacity-50"
           >
             Reject
           </button>

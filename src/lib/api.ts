@@ -1,5 +1,22 @@
 import { invoke } from "@tauri-apps/api/core";
 
+/** Shape of every rejected `invoke` (see the backend's command error type). */
+export interface ApiError {
+  code: string;
+  message: string;
+}
+
+/** Human-readable message for anything thrown by an API call or helper. */
+export function errorMessage(e: unknown): string {
+  if (e instanceof Error) return e.message;
+  if (typeof e === "object" && e !== null && "message" in e) {
+    const { message } = e as { message: unknown };
+    if (typeof message === "string") return message;
+  }
+  if (typeof e === "string") return e;
+  return String(e);
+}
+
 export interface Account {
   code: string;
   name: string;
@@ -110,11 +127,18 @@ export interface QuarterlyEstimateOutput {
   ytd_gross_income_cents: number;
   ytd_total_expenses_cents: number;
   ytd_net_profit_cents: number;
+  /** Year-to-date net profit projected to a full year. */
+  annualized_net_profit_cents: number;
+  standard_deduction_cents: number;
+  taxable_income_cents: number;
   se_tax_cents: number;
   se_tax_deduction_cents: number;
   income_tax_cents: number;
+  additional_medicare_tax_cents: number;
+  /** Projected full-year tax. */
   total_tax_cents: number;
   safe_harbor_cents: number;
+  /** One quarter of the projected full-year tax. */
   quarterly_payment_cents: number;
   payment_due_date: string;
   schedule_c_lines: ScheduleCLineOutput[];
@@ -310,6 +334,7 @@ export interface DashboardSummary {
   total_accounts: number;
   total_transactions: number;
   recent_transactions: TransactionOutput[];
+  /** This quarter's installment minus payments already recorded. */
   quarterly_tax_due_cents: number | null;
   next_tax_due_date: string | null;
 }

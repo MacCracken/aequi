@@ -20,7 +20,7 @@ The `aequi-server` crate provides a standalone Axum server binary. It reuses `ae
 Configuration via environment variables:
 - `AEQUI_DB_PATH` — SQLite database path (required)
 - `AEQUI_PORT` — listen port (default 8060)
-- `AEQUI_API_KEY` — optional Bearer token for authentication
+- `AEQUI_API_KEY` — Bearer token for authentication (or `AEQUI_OIDC_CONFIG`; one is required unless bound to loopback)
 
 ### API design
 
@@ -30,7 +30,7 @@ All endpoints under `/api/v1/` with domain-organized routes:
 
 ### Authentication
 
-Bearer token middleware checks `Authorization: Bearer <key>` header. The `/health` endpoint is exempt. If `AEQUI_API_KEY` is not set, authentication is disabled (development mode).
+Bearer token middleware checks `Authorization: Bearer <key>` header (constant-time comparison), or validates an OIDC JWT when `AEQUI_OIDC_CONFIG` is set. The `/health` endpoint is exempt. The server refuses to start without either one unless it is bound to a loopback address (`AEQUI_BIND_ADDR`) or `AEQUI_INSECURE_NO_AUTH=1` is set explicitly; a config variable that is set but does not parse is a startup error rather than silently disabling auth.
 
 ### Containerization
 
@@ -45,7 +45,7 @@ Multi-stage Dockerfile: Rust builder stage → minimal Debian runtime. The datab
   - CORS enabled for cross-origin browser access
 
 - **Cons:**
-  - No OAuth/OIDC in v1 (single API key only)
+  - OIDC authorization is limited to optional subject/email allowlists; without one, any account from the issuer has full access
   - No rate limiting in v1
   - SQLite limits concurrent write throughput (acceptable for single-user)
 
